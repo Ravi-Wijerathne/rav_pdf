@@ -1,0 +1,25 @@
+[package]
+name = "ravpdf-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ravpdf-gui"
+path = "src/main.rs"
+
+[dependencies]
+ravpdf-core.workspace = true
+ravpdf-render.workspace = true
+ravpdf-edit.workspace = true
+ravpdf-annot.workspace = true
+ravpdf-forms.workspace = true
+ravpdf-tools.workspace = true
+eframe.workspace = true
+rfd = "0.15"
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

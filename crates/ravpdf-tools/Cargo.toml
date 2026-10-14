@@ -1,0 +1,17 @@
+[package]
+name = "ravpdf-tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ravpdf-core.workspace = true
+ravpdf-edit.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+regex.workspace = true
+chrono.workspace = true
