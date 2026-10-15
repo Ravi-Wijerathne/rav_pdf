@@ -49,7 +49,7 @@ pub fn rotate_page(doc: &mut PdfDocument, index: usize, angle: i64) -> Result<()
     let page_obj = doc
         .objects
         .get_mut(&page_id)
-        .ok_or_else(|| PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
 
     let page_dict = page_obj
         .as_dict_mut()
@@ -72,7 +72,7 @@ pub fn crop_page(doc: &mut PdfDocument, index: usize, crop_box: [f64; 4]) -> Res
     let page_obj = doc
         .objects
         .get_mut(&page_id)
-        .ok_or_else(|| PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
 
     let page_dict = page_obj
         .as_dict_mut()
@@ -112,7 +112,7 @@ pub fn delete_page(doc: &mut PdfDocument, index: usize) -> Result<()> {
     let pages_obj = doc
         .objects
         .get_mut(&pages_id)
-        .ok_or_else(|| PdfError::ObjectNotFound(pages_id.number, pages_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(pages_id.number, pages_id.generation))?;
 
     let dict = pages_obj
         .as_dict_mut()
@@ -154,7 +154,7 @@ pub fn reorder_pages(doc: &mut PdfDocument, new_order: &[usize]) -> Result<()> {
     let pages_obj = doc
         .objects
         .get_mut(&pages_id)
-        .ok_or_else(|| PdfError::ObjectNotFound(pages_id.number, pages_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(pages_id.number, pages_id.generation))?;
 
     let dict = pages_obj
         .as_dict_mut()
@@ -203,7 +203,7 @@ fn insert_page_id_at(doc: &mut PdfDocument, index: usize, page_id: ObjectId) -> 
     let pages_obj = doc
         .objects
         .get_mut(&pages_id)
-        .ok_or_else(|| PdfError::ObjectNotFound(pages_id.number, pages_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(pages_id.number, pages_id.generation))?;
 
     let dict = pages_obj
         .as_dict_mut()

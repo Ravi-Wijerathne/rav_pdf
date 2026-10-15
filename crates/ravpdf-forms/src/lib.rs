@@ -7,7 +7,10 @@
 pub mod field;
 pub mod flatten;
 
-pub use field::{add_form_field, get_form_fields, FormField, FormFieldType};
+pub use field::{
+    add_form_field, get_form_fields, get_page_form_fields, set_form_field_value, FormField,
+    FormFieldType,
+};
 pub use flatten::flatten_form;
 
 #[cfg(test)]
@@ -35,4 +38,22 @@ mod tests {
         let fields_after = get_form_fields(&doc).expect("get form fields after flatten");
         assert_eq!(fields_after.len(), 0);
     }
+
+    #[test]
+    fn test_page_fields_and_value_update() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(612.0, 792.0);
+
+        let field = FormField::new_text("Email", [50.0, 400.0, 200.0, 420.0]);
+        let field_id = add_form_field(&mut doc, 0, &field).expect("add field");
+
+        let page_fields = get_page_form_fields(&doc, 0).expect("get page fields");
+        assert_eq!(page_fields.len(), 1);
+        assert_eq!(page_fields[0].name, "Email");
+
+        set_form_field_value(&mut doc, field_id, "test@example.com").expect("set value");
+        let updated_page_fields = get_page_form_fields(&doc, 0).expect("get updated page fields");
+        assert_eq!(updated_page_fields[0].value.as_deref(), Some("test@example.com"));
+    }
 }
+

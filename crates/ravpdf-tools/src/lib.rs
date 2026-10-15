@@ -7,12 +7,14 @@
 //! - FR-34 (Search & Text Extraction)
 
 pub mod bates;
+pub mod header_footer;
 pub mod metadata;
 pub mod redact;
 pub mod search;
 pub mod watermark;
 
 pub use bates::apply_bates_numbering;
+pub use header_footer::{apply_headers_and_footers, HeaderFooterConfig};
 pub use metadata::{get_document_info, set_document_info, DocumentInfo};
 pub use redact::redact_pattern;
 pub use search::{extract_all_text, extract_page_text, search_document, SearchMatch};

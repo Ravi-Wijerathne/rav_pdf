@@ -168,7 +168,7 @@ pub fn add_form_field(
     let page_obj = doc
         .objects
         .get_mut(&page_id)
-        .ok_or_else(|| PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
     let page_dict = page_obj
         .as_dict_mut()
         .ok_or_else(|| PdfError::InvalidStructure("Expected page dictionary".into()))?;
@@ -186,7 +186,7 @@ pub fn add_form_field(
     let root_obj = doc
         .objects
         .get_mut(&root_id)
-        .ok_or_else(|| PdfError::ObjectNotFound(root_id.number, root_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(root_id.number, root_id.generation))?;
     let root_dict = root_obj
         .as_dict_mut()
         .ok_or_else(|| PdfError::InvalidStructure("Expected root catalog".into()))?;
@@ -233,3 +233,56 @@ pub fn get_form_fields(doc: &PdfDocument) -> Result<Vec<FormField>> {
 
     Ok(fields)
 }
+
+/// Retrieves form fields associated with a specific page.
+pub fn get_page_form_fields(doc: &PdfDocument, page_index: usize) -> Result<Vec<FormField>> {
+    let page_ids = doc.page_ids();
+    let page_id = match page_ids.get(page_index) {
+        Some(id) => *id,
+        None => return Ok(Vec::new()),
+    };
+
+    let page_obj = match doc.objects.get(&page_id).and_then(Object::as_dict) {
+        Some(d) => d,
+        None => return Ok(Vec::new()),
+    };
+
+    let mut fields = Vec::new();
+    if let Some(annots) = page_obj.get_array("Annots") {
+        for item in annots {
+            if let Some(ref_id) = item.as_reference() {
+                if let Some(dict) = doc.objects.get(&ref_id).and_then(Object::as_dict) {
+                    if dict.get_name("Subtype") == Some("Widget") {
+                        if let Some(field) = FormField::from_dictionary(ref_id, dict) {
+                            fields.push(field);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(fields)
+}
+
+/// Updates the value of an existing interactive form field conforming to ISO 32000-1 Section 12.7.4.3.
+pub fn set_form_field_value(doc: &mut PdfDocument, field_id: ObjectId, value: &str) -> Result<()> {
+    let field_obj = doc
+        .objects
+        .get_mut(&field_id)
+        .ok_or(PdfError::ObjectNotFound(field_id.number, field_id.generation))?;
+    let field_dict = field_obj
+        .as_dict_mut()
+        .ok_or_else(|| PdfError::InvalidStructure("Expected field dictionary".into()))?;
+
+    let ft = field_dict.get_name("FT").unwrap_or("Tx");
+    if ft == "Btn" {
+        field_dict.insert("V", PdfName::new(value));
+        field_dict.insert("AS", PdfName::new(value));
+    } else {
+        field_dict.insert("V", PdfString::from_str(value));
+    }
+
+    Ok(())
+}
+

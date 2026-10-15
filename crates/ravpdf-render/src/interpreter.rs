@@ -95,8 +95,10 @@ impl<'a> ContentInterpreter<'a> {
             (crop_box[3] as f32) * zoom,
         );
 
-        let mut initial_state = GraphicsState::default();
-        initial_state.ctm = ctm;
+        let initial_state = GraphicsState {
+            ctm,
+            ..Default::default()
+        };
 
         Self {
             pixmap,
@@ -482,11 +484,13 @@ impl<'a> ContentInterpreter<'a> {
                     );
                     paint.anti_alias = true;
 
-                    let mut skia_stroke = Stroke::default();
-                    skia_stroke.width = self.state.line_width;
-                    skia_stroke.line_cap = self.state.line_cap;
-                    skia_stroke.line_join = self.state.line_join;
-                    skia_stroke.miter_limit = self.state.miter_limit;
+                    let skia_stroke = Stroke {
+                        width: self.state.line_width,
+                        line_cap: self.state.line_cap,
+                        line_join: self.state.line_join,
+                        miter_limit: self.state.miter_limit,
+                        ..Default::default()
+                    };
 
                     self.pixmap
                         .stroke_path(&path, &paint, &skia_stroke, self.state.ctm, None);
@@ -523,8 +527,10 @@ impl<'a> ContentInterpreter<'a> {
                 paint.anti_alias = true;
 
                 // Subtle glyph stroke
-                let mut stroke = Stroke::default();
-                stroke.width = (self.state.font_size * 0.08).max(0.5);
+                let stroke = Stroke {
+                    width: (self.state.font_size * 0.08).max(0.5),
+                    ..Default::default()
+                };
                 self.pixmap.stroke_path(&path, &paint, &stroke, combined, None);
             }
 
