@@ -26,16 +26,56 @@ use eframe::egui::{
 use ravpdf_annot::{add_annotation_to_page, get_page_annotations, Annotation, AnnotationType};
 use ravpdf_core::document::{paper_sizes, PdfDocument};
 use ravpdf_core::outline::{add_bookmark, Bookmark};
-use ravpdf_edit::{delete_page, insert_blank_page, rotate_page};
+use ravpdf_edit::{
+    create_pdf_from_images, create_pdf_from_text, delete_page, extract_pages, insert_blank_page,
+    merge_documents, reorder_pages, rotate_page, split_document, ImagePdfOptions, TextPdfOptions,
+};
 use ravpdf_forms::{
     flatten_form, get_page_form_fields, set_form_field_value, FormFieldType,
 };
+use ravpdf_render::{pixmap_to_png, render_page, RenderOptions};
 use ravpdf_tools::{
-    apply_bates_numbering, apply_headers_and_footers, apply_text_watermark, search_document,
-    HeaderFooterConfig, SearchMatch,
+    apply_bates_numbering, apply_headers_and_footers, apply_text_watermark, extract_all_text,
+    search_document, HeaderFooterConfig, SearchMatch,
 };
 use std::path::PathBuf;
 use tab::DocumentTab;
+
+/// Action triggered on a page from the thumbnail sidebar (FR-01.2.3, FR-06).
+#[derive(Debug, Clone, Copy)]
+enum PageAction {
+    Select(usize),
+    Rotate(usize),
+    Delete(usize),
+    MoveUp(usize),
+    MoveDown(usize),
+    Extract(usize),
+}
+
+/// Parses 1-based page range string (e.g. "1-2, 3, 5-6") into 0-based index pairs (start, end) inclusive (FR-07.3).
+fn parse_page_ranges(input: &str, total_pages: usize) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    for part in input.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((start_s, end_s)) = part.split_once('-') {
+            if let (Ok(s), Ok(e)) = (start_s.trim().parse::<usize>(), end_s.trim().parse::<usize>()) {
+                if s >= 1 && e >= s && s <= total_pages {
+                    let end_bounded = e.min(total_pages);
+                    ranges.push((s - 1, end_bounded - 1));
+                }
+            }
+        } else if let Ok(p) = part.parse::<usize>() {
+            if p >= 1 && p <= total_pages {
+                ranges.push((p - 1, p - 1));
+            }
+        }
+    }
+    ranges
+}
+
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum SidebarTab {
@@ -85,6 +125,14 @@ struct RavPdfApp {
     show_header_footer_dialog: bool,
     hf_config: HeaderFooterConfig,
 
+    // Combine & Merge Dialog (FR-07.1)
+    show_combine_dialog: bool,
+    combine_file_paths: Vec<PathBuf>,
+
+    // Split Document Dialog (FR-07.3)
+    show_split_dialog: bool,
+    split_ranges_input: String,
+
     // Bookmark creation modal state (FR-19.2)
     new_bookmark_title: String,
 
@@ -127,6 +175,12 @@ impl Default for RavPdfApp {
 
             show_header_footer_dialog: false,
             hf_config: HeaderFooterConfig::default(),
+
+            show_combine_dialog: false,
+            combine_file_paths: Vec::new(),
+
+            show_split_dialog: false,
+            split_ranges_input: "1-2".into(),
 
             new_bookmark_title: String::new(),
 
@@ -241,6 +295,117 @@ impl RavPdfApp {
                     }
                     Err(e) => {
                         self.status_message = format!("Save error: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Creates a new PDF from selected image files (FR-02.4).
+    fn create_pdf_from_images_dialog(&mut self) {
+        if let Some(files) = rfd::FileDialog::new()
+            .add_filter("Image Files", &["png", "jpg", "jpeg", "bmp", "webp", "tiff", "gif"])
+            .pick_files()
+        {
+            if files.is_empty() {
+                return;
+            }
+            match create_pdf_from_images(&files, &ImagePdfOptions::default()) {
+                Ok(doc) => {
+                    let id = self.next_tab_id;
+                    self.next_tab_id += 1;
+                    let title = format!("Images ({} pages).pdf", files.len());
+                    let mut tab = DocumentTab::new(id, title, doc, None);
+                    tab.is_modified = true;
+                    self.tabs.push(tab);
+                    self.active_tab_idx = Some(self.tabs.len() - 1);
+                    self.status_message = format!("Created PDF from {} images", files.len());
+                }
+                Err(e) => {
+                    self.status_message = format!("Failed to create PDF from images: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Creates a new PDF from a plain text file (FR-02.5).
+    fn create_pdf_from_text_dialog(&mut self) {
+        if let Some(file) = rfd::FileDialog::new()
+            .add_filter("Plain Text File", &["txt"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&file) {
+                Ok(content) => {
+                    match create_pdf_from_text(&content, &TextPdfOptions::default()) {
+                        Ok(doc) => {
+                            let id = self.next_tab_id;
+                            self.next_tab_id += 1;
+                            let title = file
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|n| format!("{}.pdf", n))
+                                .unwrap_or_else(|| "Text Document.pdf".into());
+                            let mut tab = DocumentTab::new(id, title, doc, None);
+                            tab.is_modified = true;
+                            self.tabs.push(tab);
+                            self.active_tab_idx = Some(self.tabs.len() - 1);
+                            self.status_message = format!("Created PDF from text file '{}'", file.display());
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed to create PDF from text: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.status_message = format!("Failed to read text file: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Exports all pages of the active document as PNG images (FR-03.2.4).
+    fn export_pages_as_png_dialog(&mut self) {
+        if let Some(tab) = self.active_tab() {
+            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                let page_count = tab.doc.page_count();
+                let mut exported = 0;
+                let options = RenderOptions {
+                    zoom: 2.0, // 144 DPI
+                    rotation: 0,
+                    background_color: ravpdf_render::Color::WHITE,
+                };
+                for i in 0..page_count {
+                    if let Ok(pixmap) = render_page(&tab.doc, i, &options) {
+                        if let Ok(png_data) = pixmap_to_png(&pixmap) {
+                            let out_path = folder.join(format!("page_{}.png", i + 1));
+                            if std::fs::write(&out_path, png_data).is_ok() {
+                                exported += 1;
+                            }
+                        }
+                    }
+                }
+                self.status_message = format!("Exported {}/{} pages as PNG to '{}'", exported, page_count, folder.display());
+            }
+        }
+    }
+
+    /// Exports all text content of the active document to a .txt file (FR-03.2.5).
+    fn export_text_dialog(&mut self) {
+        if let Some(tab) = self.active_tab() {
+            if let Some(file) = rfd::FileDialog::new()
+                .add_filter("Text File", &["txt"])
+                .save_file()
+            {
+                match extract_all_text(&tab.doc) {
+                    Ok(text) => {
+                        if std::fs::write(&file, text).is_ok() {
+                            self.status_message = format!("Exported text to '{}'", file.display());
+                        } else {
+                            self.status_message = "Failed to write exported text file".into();
+                        }
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Failed to extract text: {}", e);
                     }
                 }
             }
@@ -440,8 +605,21 @@ impl RavPdfApp {
                         self.create_new_blank_document();
                         ui.close_menu();
                     }
+                    if ui.button("New PDF from Images... (FR-02.4)").clicked() {
+                        self.create_pdf_from_images_dialog();
+                        ui.close_menu();
+                    }
+                    if ui.button("New PDF from Text File... (FR-02.5)").clicked() {
+                        self.create_pdf_from_text_dialog();
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Open... (Ctrl+O)").clicked() {
                         self.open_file_dialog();
+                        ui.close_menu();
+                    }
+                    if ui.button("Combine / Merge Files... (FR-07.1)").clicked() {
+                        self.show_combine_dialog = true;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -469,6 +647,18 @@ impl RavPdfApp {
                         self.save_file_dialog();
                         ui.close_menu();
                     }
+                    ui.separator();
+                    ui.menu_button("Export (FR-03.2)", |ui| {
+                        if ui.add_enabled(has_doc, Button::new("Export Pages as PNG... (FR-03.2.4)")).clicked() {
+                            self.export_pages_as_png_dialog();
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(has_doc, Button::new("Export Text (.txt)... (FR-03.2.5)")).clicked() {
+                            self.export_text_dialog();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
                     if ui
                         .add_enabled(has_doc, Button::new("Close Tab (Ctrl+W)"))
                         .clicked()
@@ -529,6 +719,14 @@ impl RavPdfApp {
                                 self.status_message = "Deleted current page".into();
                             }
                         }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_doc, Button::new("Split Document... (FR-07.3)"))
+                        .clicked()
+                    {
+                        self.show_split_dialog = true;
                         ui.close_menu();
                     }
                 });
@@ -875,26 +1073,234 @@ impl RavPdfApp {
 
                 match self.sidebar_tab {
                     SidebarTab::Thumbnails => {
-                        ScrollArea::vertical().show(ui, |ui| {
-                            let total = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
-                            let curr = self.active_tab().map(|t| t.current_page).unwrap_or(0);
-
-                            for i in 0..total {
-                                let is_selected = curr == i;
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .selectable_label(is_selected, format!("Page {}", i + 1))
-                                        .clicked()
-                                    {
-                                        if let Some(tab) = self.active_tab_mut() {
-                                            tab.current_page = i;
-                                            tab.page_input_buffer = (i + 1).to_string();
-                                            tab.invalidate_render();
-                                        }
+                        ui.horizontal(|ui| {
+                            ui.heading("Pages");
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui
+                                    .button("➕ Blank")
+                                    .on_hover_text("Insert blank A4 page at end (FR-06.1)")
+                                    .clicked()
+                                {
+                                    if let Some(tab) = self.active_tab_mut() {
+                                        let total = tab.doc.page_count();
+                                        let _ = insert_blank_page(
+                                            &mut tab.doc,
+                                            total,
+                                            paper_sizes::A4.0,
+                                            paper_sizes::A4.1,
+                                        );
+                                        tab.current_page = total;
+                                        tab.page_input_buffer = (total + 1).to_string();
+                                        tab.is_modified = true;
+                                        tab.invalidate_render();
+                                        self.status_message = format!("Inserted blank page {}", total + 1);
                                     }
-                                });
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+
+                        let total_pages = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
+                        let mut page_action = None;
+
+                        ScrollArea::vertical().show(ui, |ui| {
+                            for i in 0..total_pages {
+                                let (thumb_tex, is_selected) = if let Some(tab) = self.active_tab_mut() {
+                                    let tex = tab.get_or_render_thumbnail(ctx, i);
+                                    let selected = tab.current_page == i;
+                                    (tex, selected)
+                                } else {
+                                    (None, false)
+                                };
+
+                                let stroke = if is_selected {
+                                    Stroke::new(2.0_f32, Color32::from_rgb(66, 153, 225))
+                                } else {
+                                    Stroke::new(1.0_f32, Color32::from_gray(60))
+                                };
+                                let bg = if is_selected {
+                                    Color32::from_rgb(30, 41, 59)
+                                } else {
+                                    Color32::from_rgb(20, 24, 33)
+                                };
+
+                                egui::Frame::none()
+                                    .fill(bg)
+                                    .stroke(stroke)
+                                    .rounding(4.0)
+                                    .inner_margin(egui::Margin::same(6.0))
+                                    .show(ui, |ui| {
+                                        ui.vertical_centered(|ui| {
+                                            if let Some(tex) = thumb_tex {
+                                                let (w, h) = (tex.size()[0] as f32, tex.size()[1] as f32);
+                                                let target_w = 140.0_f32;
+                                                let aspect = if w > 0.0 { h / w } else { 1.33 };
+                                                let target_h = target_w * aspect;
+
+                                                let img_btn = egui::ImageButton::new(
+                                                    egui::Image::new(&tex)
+                                                        .fit_to_exact_size(Vec2::new(target_w, target_h)),
+                                                );
+                                                if ui.add(img_btn).clicked() {
+                                                    page_action = Some(PageAction::Select(i));
+                                                }
+                                            } else {
+                                                let label = ui.selectable_label(
+                                                    is_selected,
+                                                    format!("Page {}", i + 1),
+                                                );
+                                                if label.clicked() {
+                                                    page_action = Some(PageAction::Select(i));
+                                                }
+                                            }
+
+                                            ui.add_space(3.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new(format!("{}", i + 1))
+                                                        .size(11.0)
+                                                        .strong(),
+                                                );
+                                                if ui
+                                                    .small_button("⟳")
+                                                    .on_hover_text("Rotate 90° clockwise (FR-06.7)")
+                                                    .clicked()
+                                                {
+                                                    page_action = Some(PageAction::Rotate(i));
+                                                }
+                                                if i > 0
+                                                    && ui
+                                                        .small_button("▲")
+                                                        .on_hover_text("Move page up (FR-06.6)")
+                                                        .clicked()
+                                                {
+                                                    page_action = Some(PageAction::MoveUp(i));
+                                                }
+                                                if i + 1 < total_pages
+                                                    && ui
+                                                        .small_button("▼")
+                                                        .on_hover_text("Move page down (FR-06.6)")
+                                                        .clicked()
+                                                {
+                                                    page_action = Some(PageAction::MoveDown(i));
+                                                }
+                                                if ui
+                                                    .small_button("📄")
+                                                    .on_hover_text("Extract page to new tab (FR-06.3)")
+                                                    .clicked()
+                                                {
+                                                    page_action = Some(PageAction::Extract(i));
+                                                }
+                                                if total_pages > 1
+                                                    && ui
+                                                        .small_button("🗑")
+                                                        .on_hover_text("Delete page (FR-06.2)")
+                                                        .clicked()
+                                                {
+                                                    page_action = Some(PageAction::Delete(i));
+                                                }
+                                            });
+                                        });
+                                    });
+                                ui.add_space(6.0);
                             }
                         });
+
+                        if let Some(act) = page_action {
+                            match act {
+                                PageAction::Select(idx) => {
+                                    if let Some(tab) = self.active_tab_mut() {
+                                        tab.current_page = idx;
+                                        tab.page_input_buffer = (idx + 1).to_string();
+                                        tab.invalidate_render();
+                                    }
+                                }
+                                PageAction::Rotate(idx) => {
+                                    if let Some(tab) = self.active_tab_mut() {
+                                        let _ = rotate_page(&mut tab.doc, idx, 90);
+                                        tab.is_modified = true;
+                                        tab.invalidate_render();
+                                        self.status_message = format!("Rotated page {}", idx + 1);
+                                    }
+                                }
+                                PageAction::Delete(idx) => {
+                                    if let Some(tab) = self.active_tab_mut() {
+                                        if tab.doc.page_count() > 1 {
+                                            let _ = delete_page(&mut tab.doc, idx);
+                                            if tab.current_page >= tab.doc.page_count() {
+                                                tab.current_page =
+                                                    tab.doc.page_count().saturating_sub(1);
+                                            }
+                                            tab.page_input_buffer =
+                                                (tab.current_page + 1).to_string();
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = format!("Deleted page {}", idx + 1);
+                                        }
+                                    }
+                                }
+                                PageAction::MoveUp(idx) => {
+                                    if idx > 0 {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let total = tab.doc.page_count();
+                                            let mut order: Vec<usize> = (0..total).collect();
+                                            order.swap(idx, idx - 1);
+                                            let _ = reorder_pages(&mut tab.doc, &order);
+                                            if tab.current_page == idx {
+                                                tab.current_page = idx - 1;
+                                            } else if tab.current_page == idx - 1 {
+                                                tab.current_page = idx;
+                                            }
+                                            tab.page_input_buffer =
+                                                (tab.current_page + 1).to_string();
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message =
+                                                format!("Moved page {} up", idx + 1);
+                                        }
+                                    }
+                                }
+                                PageAction::MoveDown(idx) => {
+                                    if let Some(tab) = self.active_tab_mut() {
+                                        let total = tab.doc.page_count();
+                                        if idx + 1 < total {
+                                            let mut order: Vec<usize> = (0..total).collect();
+                                            order.swap(idx, idx + 1);
+                                            let _ = reorder_pages(&mut tab.doc, &order);
+                                            if tab.current_page == idx {
+                                                tab.current_page = idx + 1;
+                                            } else if tab.current_page == idx + 1 {
+                                                tab.current_page = idx;
+                                            }
+                                            tab.page_input_buffer =
+                                                (tab.current_page + 1).to_string();
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message =
+                                                format!("Moved page {} down", idx + 1);
+                                        }
+                                    }
+                                }
+                                PageAction::Extract(idx) => {
+                                    let extracted_info = self.active_tab().and_then(|tab| {
+                                        extract_pages(&tab.doc, &[idx])
+                                            .ok()
+                                            .map(|extracted| (format!("{} (Page {})", tab.title, idx + 1), extracted))
+                                    });
+                                    if let Some((title, extracted)) = extracted_info {
+                                        let tab_id = self.next_tab_id;
+                                        self.next_tab_id += 1;
+                                        let mut new_tab =
+                                            DocumentTab::new(tab_id, title, extracted, None);
+                                        new_tab.is_modified = true;
+                                        self.tabs.push(new_tab);
+                                        self.active_tab_idx = Some(self.tabs.len() - 1);
+                                        self.status_message =
+                                            format!("Extracted page {} into new tab", idx + 1);
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     SidebarTab::Bookmarks => {
@@ -1364,20 +1770,36 @@ impl RavPdfApp {
 
             // Primary Action Buttons
             ui.horizontal(|ui| {
-                ui.add_space((ui.available_width() - 360.0).max(0.0) * 0.5);
+                ui.add_space((ui.available_width() - 580.0).max(0.0) * 0.5);
 
-                let open_btn = Button::new(RichText::new("📂  Open PDF File").size(15.0).strong())
-                    .min_size(Vec2::new(170.0, 48.0));
+                let open_btn = Button::new(RichText::new("📂  Open PDF").size(14.0).strong())
+                    .min_size(Vec2::new(130.0, 44.0));
                 if ui.add(open_btn).clicked() {
                     self.open_file_dialog();
                 }
 
-                ui.add_space(16.0);
+                ui.add_space(10.0);
 
-                let new_btn = Button::new(RichText::new("📄  New Blank PDF").size(15.0))
-                    .min_size(Vec2::new(170.0, 48.0));
+                let new_btn = Button::new(RichText::new("📄  New Blank").size(14.0))
+                    .min_size(Vec2::new(130.0, 44.0));
                 if ui.add(new_btn).clicked() {
                     self.create_new_blank_document();
+                }
+
+                ui.add_space(10.0);
+
+                let img_btn = Button::new(RichText::new("🖼  From Images").size(14.0))
+                    .min_size(Vec2::new(130.0, 44.0));
+                if ui.add(img_btn).clicked() {
+                    self.create_pdf_from_images_dialog();
+                }
+
+                ui.add_space(10.0);
+
+                let comb_btn = Button::new(RichText::new("🔗  Combine Files").size(14.0))
+                    .min_size(Vec2::new(130.0, 44.0));
+                if ui.add(comb_btn).clicked() {
+                    self.show_combine_dialog = true;
                 }
             });
 
@@ -1647,6 +2069,176 @@ impl RavPdfApp {
                 });
             if close {
                 self.show_free_text_dialog = false;
+            }
+        }
+
+        // 5. Combine / Merge Files Dialog (FR-07.1)
+        if self.show_combine_dialog {
+            let mut close = false;
+            egui::Window::new("Combine / Merge PDF Files (FR-07.1)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([480.0, 360.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Add PDF files in the desired order to merge them into a single document:");
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("➕ Add PDF Files...").clicked() {
+                            if let Some(files) = rfd::FileDialog::new()
+                                .add_filter("PDF files", &["pdf"])
+                                .pick_files()
+                            {
+                                self.combine_file_paths.extend(files);
+                            }
+                        }
+                        if ui.button("🗑 Clear List").clicked() {
+                            self.combine_file_paths.clear();
+                        }
+                    });
+                    ui.separator();
+
+                    let mut remove_idx = None;
+                    let mut move_up = None;
+                    let mut move_down = None;
+
+                    ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        if self.combine_file_paths.is_empty() {
+                            ui.weak("(No files selected yet — click 'Add PDF Files' to select files)");
+                        }
+                        for (i, p) in self.combine_file_paths.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                                ui.label(format!("{}. {}", i + 1, name));
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                                        remove_idx = Some(i);
+                                    }
+                                    if i + 1 < self.combine_file_paths.len()
+                                        && ui.small_button("▼").on_hover_text("Move down").clicked()
+                                    {
+                                        move_down = Some(i);
+                                    }
+                                    if i > 0 && ui.small_button("▲").on_hover_text("Move up").clicked() {
+                                        move_up = Some(i);
+                                    }
+                                });
+                            });
+                        }
+                    });
+
+                    if let Some(i) = remove_idx {
+                        self.combine_file_paths.remove(i);
+                    }
+                    if let Some(i) = move_up {
+                        self.combine_file_paths.swap(i, i - 1);
+                    }
+                    if let Some(i) = move_down {
+                        self.combine_file_paths.swap(i, i + 1);
+                    }
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let can_combine = self.combine_file_paths.len() >= 2;
+                        if ui.add_enabled(can_combine, Button::new("Combine Files")).clicked() {
+                            let mut docs = Vec::new();
+                            let mut load_err = None;
+                            for p in &self.combine_file_paths {
+                                match PdfDocument::load_from_file(p) {
+                                    Ok(d) => docs.push(d),
+                                    Err(e) => {
+                                        load_err = Some(format!("Failed to load {}: {}", p.display(), e));
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(err) = load_err {
+                                self.status_message = err;
+                            } else {
+                                match merge_documents(&docs) {
+                                    Ok(merged) => {
+                                        let tab_id = self.next_tab_id;
+                                        self.next_tab_id += 1;
+                                        let title = format!("Merged Document ({} files).pdf", docs.len());
+                                        let mut tab = DocumentTab::new(tab_id, title, merged, None);
+                                        tab.is_modified = true;
+                                        self.tabs.push(tab);
+                                        self.active_tab_idx = Some(self.tabs.len() - 1);
+                                        self.status_message = format!("Combined {} documents successfully", docs.len());
+                                        close = true;
+                                    }
+                                    Err(e) => {
+                                        self.status_message = format!("Merge error: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.show_combine_dialog = false;
+            }
+        }
+
+        // 6. Split Document Dialog (FR-07.3)
+        if self.show_split_dialog {
+            let mut close = false;
+            egui::Window::new("Split Document (FR-07.3)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Split the active document into separate PDF files by page ranges:");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Page ranges:");
+                        ui.text_edit_singleline(&mut self.split_ranges_input);
+                    });
+                    ui.weak("Example: '1-2, 3, 4-5' creates separate PDFs for each range.");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Choose Folder & Split...").clicked() {
+                            if let Some(tab) = self.active_tab() {
+                                let total_pages = tab.doc.page_count();
+                                let ranges = parse_page_ranges(&self.split_ranges_input, total_pages);
+                                if ranges.is_empty() {
+                                    self.status_message = "Invalid or empty page ranges specified".into();
+                                } else if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                    match split_document(&tab.doc, &ranges) {
+                                        Ok(docs) => {
+                                            let mut count = 0;
+                                            for (idx, doc) in docs.iter().enumerate() {
+                                                let (s, e) = ranges[idx];
+                                                let out_name = format!("split_pages_{}_to_{}.pdf", s + 1, e + 1);
+                                                let out_path = folder.join(out_name);
+                                                if doc.save_to_file(&out_path).is_ok() {
+                                                    count += 1;
+                                                }
+                                            }
+                                            self.status_message = format!(
+                                                "Created {} split PDF files in '{}'",
+                                                count,
+                                                folder.display()
+                                            );
+                                            close = true;
+                                        }
+                                        Err(e) => {
+                                            self.status_message = format!("Split error: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.show_split_dialog = false;
             }
         }
     }
