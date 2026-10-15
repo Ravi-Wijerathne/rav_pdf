@@ -217,7 +217,7 @@ pub fn add_annotation_to_page(
     let page_obj = doc
         .objects
         .get_mut(&page_id)
-        .ok_or_else(|| PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
 
     let page_dict = page_obj
         .as_dict_mut()

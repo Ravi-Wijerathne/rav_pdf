@@ -14,6 +14,7 @@ pub mod error;
 pub mod filter;
 pub mod lexer;
 pub mod object;
+pub mod outline;
 pub mod parser;
 pub mod writer;
 
@@ -21,5 +22,6 @@ pub mod writer;
 pub use document::{paper_sizes, Page, PdfDocument};
 pub use error::{PdfError, Result};
 pub use object::{ObjectId, Object, PdfDictionary, PdfName, PdfStream, PdfString};
+pub use outline::{add_bookmark, get_document_bookmarks, Bookmark};
 pub use parser::Parser;
 pub use writer::PdfWriter;

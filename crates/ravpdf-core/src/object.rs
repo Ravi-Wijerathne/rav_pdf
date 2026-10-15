@@ -88,6 +88,7 @@ impl PdfString {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         Self {
             bytes: s.as_bytes().to_vec(),
@@ -148,22 +149,22 @@ impl PdfDictionary {
     }
 
     pub fn get(&self, key: &str) -> Option<&Object> {
-        let key = if key.starts_with('/') { &key[1..] } else { key };
+        let key = key.strip_prefix('/').unwrap_or(key);
         self.map.get(&PdfName(key.to_string()))
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Object> {
-        let key = if key.starts_with('/') { &key[1..] } else { key };
+        let key = key.strip_prefix('/').unwrap_or(key);
         self.map.get_mut(&PdfName(key.to_string()))
     }
 
     pub fn remove(&mut self, key: &str) -> Option<Object> {
-        let key = if key.starts_with('/') { &key[1..] } else { key };
+        let key = key.strip_prefix('/').unwrap_or(key);
         self.map.remove(&PdfName(key.to_string()))
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
-        let key = if key.starts_with('/') { &key[1..] } else { key };
+        let key = key.strip_prefix('/').unwrap_or(key);
         self.map.contains_key(&PdfName(key.to_string()))
     }
 

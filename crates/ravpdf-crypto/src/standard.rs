@@ -40,11 +40,11 @@ pub fn compute_encryption_key(
 ) -> [u8; 16] {
     let mut hasher = Md5::new();
     let padded = pad_password(password);
-    hasher.update(&padded);
+    hasher.update(padded);
     hasher.update(o_hash);
 
     let p_bytes = p_flags.to_le_bytes();
-    hasher.update(&p_bytes);
+    hasher.update(p_bytes);
     hasher.update(id_first);
 
     let digest = hasher.finalize();

@@ -3,25 +3,39 @@
 //! Traceability:
 //! - FR-01 (PDF Viewing and Navigation: continuous/fit modes, keyboard navigation shortcuts)
 //! - FR-01.2.1 (Page navigation: Page Up/Down, Home, End, Arrows)
-//! - FR-01.2.6 (Go to Page)
+//! - FR-01.2.4 & FR-19.1 - FR-19.8 (Bookmarks / Outline tree panel and bookmark creation)
+//! - FR-01.2.6 (Go to Page direct navigation)
 //! - FR-01.3.2 (Fit to Page, Fit to Width, 100% actual size)
+//! - FR-01.4 (Multi-Tab Document Interface)
+//! - FR-08.1 - FR-08.2 (Annotation and Markup Tools: sticky notes, text boxes, highlights)
+//! - FR-09.5 (Drawing Tools: Rectangles / Shapes)
+//! - FR-11.1 - FR-11.3 (Interactive AcroForms: on-canvas text fields, checkboxes, form flattening)
+//! - FR-18.1 (Headers and Footers dynamic tokens and dialog)
+//! - FR-18.2 (Watermarking dialog and application)
+//! - FR-18.3 (Bates Numbering dialog and application)
 //! - FR-34.1 (Find & Search Ctrl+F with match navigation)
 //! - EI-01.1 - EI-01.9 (Main menu bar, toolbar, canvas, side panels, status bar)
 //! - NFR-05.1 (Usability, modern UI conventions)
 
+mod tab;
+
 use eframe::egui::{
     self, Align, Align2, Button, Color32, FontId, Key, Layout, Pos2, Rect, RichText, ScrollArea,
-    Stroke, TextureOptions, Vec2,
+    Stroke, Vec2,
 };
 use ravpdf_annot::{add_annotation_to_page, get_page_annotations, Annotation, AnnotationType};
 use ravpdf_core::document::{paper_sizes, PdfDocument};
+use ravpdf_core::outline::{add_bookmark, Bookmark};
 use ravpdf_edit::{delete_page, insert_blank_page, rotate_page};
-use ravpdf_render::{render_page, Color, RenderOptions};
+use ravpdf_forms::{
+    flatten_form, get_page_form_fields, set_form_field_value, FormFieldType,
+};
 use ravpdf_tools::{
-    apply_bates_numbering, apply_text_watermark, get_document_info, search_document, DocumentInfo,
-    SearchMatch,
+    apply_bates_numbering, apply_headers_and_footers, apply_text_watermark, search_document,
+    HeaderFooterConfig, SearchMatch,
 };
 use std::path::PathBuf;
+use tab::DocumentTab;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum SidebarTab {
@@ -43,21 +57,14 @@ enum ActiveTool {
 }
 
 struct RavPdfApp {
-    doc: Option<PdfDocument>,
-    file_path: Option<PathBuf>,
-    current_page: usize,
-    page_input_buffer: String,
-    zoom: f32,
-    rotation: i64,
+    tabs: Vec<DocumentTab>,
+    active_tab_idx: Option<usize>,
+    next_tab_id: usize,
+
     sidebar_tab: SidebarTab,
     sidebar_open: bool,
     active_tool: ActiveTool,
-    page_texture: Option<egui::TextureHandle>,
-    cached_page_index: Option<usize>,
-    cached_zoom: Option<f32>,
-    cached_rotation: Option<i64>,
     status_message: String,
-    metadata: Option<DocumentInfo>,
 
     // Search bar state (FR-34)
     search_bar_open: bool,
@@ -65,88 +72,207 @@ struct RavPdfApp {
     search_results: Vec<SearchMatch>,
     current_search_idx: usize,
 
-    // Dialog modals
+    // Dialog modals (FR-18)
     show_watermark_dialog: bool,
     watermark_text: String,
     watermark_opacity: f32,
+
     show_bates_dialog: bool,
     bates_prefix: String,
     bates_start: u32,
     bates_digits: usize,
+
+    show_header_footer_dialog: bool,
+    hf_config: HeaderFooterConfig,
+
+    // Bookmark creation modal state (FR-19.2)
+    new_bookmark_title: String,
+
+    // Annotation drawing state (FR-08, FR-09)
+    drag_start_pos: Option<Pos2>,
+    drag_current_pos: Option<Pos2>,
+    show_free_text_dialog: bool,
+    free_text_content: String,
+    free_text_coords: Option<[f64; 4]>,
+
+    // Inline form editing buffer: field_id -> current string value
+    form_field_text_buffers: std::collections::HashMap<ravpdf_core::object::ObjectId, String>,
 }
 
 impl Default for RavPdfApp {
     fn default() -> Self {
         Self {
-            doc: None,
-            file_path: None,
-            current_page: 0,
-            page_input_buffer: "1".into(),
-            zoom: 1.0,
-            rotation: 0,
+            tabs: Vec::new(),
+            active_tab_idx: None,
+            next_tab_id: 1,
+
             sidebar_tab: SidebarTab::Thumbnails,
             sidebar_open: true,
             active_tool: ActiveTool::Select,
-            page_texture: None,
-            cached_page_index: None,
-            cached_zoom: None,
-            cached_rotation: None,
             status_message: "Ready • No document open".into(),
-            metadata: None,
+
             search_bar_open: false,
             search_query: String::new(),
             search_results: Vec::new(),
             current_search_idx: 0,
+
             show_watermark_dialog: false,
             watermark_text: "CONFIDENTIAL".into(),
             watermark_opacity: 0.3,
+
             show_bates_dialog: false,
             bates_prefix: "DOC".into(),
             bates_start: 1,
             bates_digits: 6,
+
+            show_header_footer_dialog: false,
+            hf_config: HeaderFooterConfig::default(),
+
+            new_bookmark_title: String::new(),
+
+            drag_start_pos: None,
+            drag_current_pos: None,
+            show_free_text_dialog: false,
+            free_text_content: String::new(),
+            free_text_coords: None,
+
+            form_field_text_buffers: std::collections::HashMap::new(),
         }
-    }
-}
-
-impl eframe::App for RavPdfApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 1. Handle Drag-and-Drop files onto the window (EI-01.7)
-        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
-        for dropped in dropped_files {
-            if let Some(path) = dropped.path {
-                if path
-                    .extension()
-                    .map_or(false, |ext| ext.eq_ignore_ascii_case("pdf"))
-                {
-                    self.open_file(path);
-                    break;
-                }
-            }
-        }
-
-        // 2. Handle Global Keyboard Shortcuts (FR-01.2.1, FR-34.1)
-        self.handle_keyboard_shortcuts(ctx);
-
-        // 3. Render UI Components (EI-01.1 - EI-01.6)
-        self.render_menu_bar(ctx);
-        self.render_toolbar(ctx);
-        if self.search_bar_open && self.doc.is_some() {
-            self.render_search_bar(ctx);
-        }
-        self.render_status_bar(ctx);
-        self.render_sidebar(ctx);
-        self.render_canvas(ctx);
-
-        // 4. Render Modals (Watermark, Bates)
-        self.render_dialogs(ctx);
     }
 }
 
 impl RavPdfApp {
-    /// Handles keyboard shortcuts for rapid navigation and productivity.
+    /// Returns a reference to the currently active document tab, if any.
+    pub fn active_tab(&self) -> Option<&DocumentTab> {
+        self.active_tab_idx.and_then(|idx| self.tabs.get(idx))
+    }
+
+    /// Returns a mutable reference to the currently active document tab, if any.
+    pub fn active_tab_mut(&mut self) -> Option<&mut DocumentTab> {
+        self.active_tab_idx.and_then(|idx| self.tabs.get_mut(idx))
+    }
+
+    /// Opens a PDF document from a file path into a new tab (FR-01.4.1).
+    pub fn open_file(&mut self, path: PathBuf) {
+        match PdfDocument::load_from_file(&path) {
+            Ok(doc) => {
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Document.pdf")
+                    .to_string();
+
+                let id = self.next_tab_id;
+                self.next_tab_id += 1;
+
+                let tab = DocumentTab::new(id, file_name.clone(), doc, Some(path.clone()));
+                self.tabs.push(tab);
+                self.active_tab_idx = Some(self.tabs.len() - 1);
+
+                self.status_message = format!("Opened: {}", path.display());
+            }
+            Err(e) => {
+                self.status_message = format!("Error opening file: {}", e);
+            }
+        }
+    }
+
+    /// Creates a new blank PDF document in a new tab (FR-02.1).
+    pub fn create_new_blank_document(&mut self) {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(paper_sizes::LETTER.0, paper_sizes::LETTER.1);
+
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+
+        let title = format!("Untitled-{}.pdf", id);
+        let mut tab = DocumentTab::new(id, title, doc, None);
+        tab.is_modified = true;
+
+        self.tabs.push(tab);
+        self.active_tab_idx = Some(self.tabs.len() - 1);
+        self.status_message = "Created new blank document".into();
+    }
+
+    /// Closes a tab by index.
+    pub fn close_tab(&mut self, idx: usize) {
+        if idx < self.tabs.len() {
+            self.tabs.remove(idx);
+            if self.tabs.is_empty() {
+                self.active_tab_idx = None;
+                self.status_message = "Ready • No document open".into();
+                self.search_results.clear();
+                self.search_bar_open = false;
+            } else {
+                let new_idx = idx.min(self.tabs.len() - 1);
+                self.active_tab_idx = Some(new_idx);
+                self.status_message = format!("Active: {}", self.tabs[new_idx].title);
+            }
+        }
+    }
+
+    /// Shows native file dialog to open a PDF file (EI-01.7).
+    fn open_file_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("PDF Document", &["pdf"])
+            .pick_file()
+        {
+            self.open_file(path);
+        }
+    }
+
+    /// Shows native file dialog to save active PDF document.
+    fn save_file_dialog(&mut self) {
+        if let Some(tab) = self.active_tab_mut() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("PDF Document", &["pdf"])
+                .save_file()
+            {
+                tab.file_path = Some(path.clone());
+                tab.title = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Document.pdf")
+                    .to_string();
+
+                match tab.save() {
+                    Ok(_) => {
+                        self.status_message = format!("Saved: {}", path.display());
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Save error: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Executes full-text search on the active document (FR-34.1).
+    fn execute_search(&mut self) {
+        self.search_results.clear();
+        self.current_search_idx = 0;
+
+        if let Some(tab) = self.active_tab() {
+            if !self.search_query.trim().is_empty() {
+                if let Ok(matches) = search_document(&tab.doc, &self.search_query, false, false) {
+                    self.search_results = matches;
+                    if let Some(first) = self.search_results.first() {
+                        let page_idx = first.page_index;
+                        if let Some(t) = self.active_tab_mut() {
+                            t.current_page = page_idx;
+                            t.page_input_buffer = (page_idx + 1).to_string();
+                            t.invalidate_render();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handles keyboard shortcuts (FR-01.2.1, FR-34.1).
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
-        let has_doc = self.doc.is_some();
-        let total_pages = self.doc.as_ref().map(|d| d.page_count()).unwrap_or(0);
+        let has_doc = self.active_tab().is_some();
+        let total_pages = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
 
         ctx.input(|i| {
             // Open / New / Save
@@ -157,17 +283,25 @@ impl RavPdfApp {
                 self.create_new_blank_document();
             }
             if i.modifiers.ctrl && i.key_pressed(Key::S) && has_doc {
-                if let Some(ref path) = self.file_path.clone() {
-                    if let Some(ref doc) = self.doc {
-                        let _ = doc.save_to_file(path);
-                        self.status_message = format!("Saved: {}", path.display());
+                let needs_save_dialog = if let Some(tab) = self.active_tab_mut() {
+                    if tab.file_path.is_some() {
+                        let _ = tab.save();
+                        self.status_message = format!("Saved: {}", tab.title);
+                        false
+                    } else {
+                        true
                     }
                 } else {
+                    false
+                };
+                if needs_save_dialog {
                     self.save_file_dialog();
                 }
             }
             if i.modifiers.ctrl && i.key_pressed(Key::W) && has_doc {
-                self.close_document();
+                if let Some(idx) = self.active_tab_idx {
+                    self.close_tab(idx);
+                }
             }
 
             // Find (Ctrl+F)
@@ -177,232 +311,153 @@ impl RavPdfApp {
 
             // Zoom shortcuts
             if i.modifiers.ctrl && (i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals)) && has_doc {
-                self.zoom = (self.zoom * 1.25).min(64.0);
-                self.invalidate_render();
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.zoom = (tab.zoom * 1.25).min(64.0);
+                    tab.invalidate_render();
+                }
             }
             if i.modifiers.ctrl && i.key_pressed(Key::Minus) && has_doc {
-                self.zoom = (self.zoom / 1.25).max(0.1);
-                self.invalidate_render();
-            }
-            if i.modifiers.ctrl && i.key_pressed(Key::Num0) && has_doc {
-                self.fit_to_page(ctx);
-            }
-            if i.modifiers.ctrl && i.key_pressed(Key::Num9) && has_doc {
-                self.fit_to_width(ctx);
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.zoom = (tab.zoom / 1.25).max(0.1);
+                    tab.invalidate_render();
+                }
             }
 
             // Navigation shortcuts (FR-01.2.1)
             if has_doc && total_pages > 0 {
-                if i.key_pressed(Key::PageDown) || i.key_pressed(Key::ArrowRight) {
-                    if self.current_page + 1 < total_pages {
-                        self.current_page += 1;
-                        self.page_input_buffer = (self.current_page + 1).to_string();
-                        self.invalidate_render();
+                if let Some(tab) = self.active_tab_mut() {
+                    if (i.key_pressed(Key::PageDown) || i.key_pressed(Key::ArrowRight))
+                        && tab.current_page + 1 < total_pages
+                    {
+                        tab.current_page += 1;
+                        tab.page_input_buffer = (tab.current_page + 1).to_string();
+                        tab.invalidate_render();
                     }
-                }
-                if i.key_pressed(Key::PageUp) || i.key_pressed(Key::ArrowLeft) {
-                    if self.current_page > 0 {
-                        self.current_page -= 1;
-                        self.page_input_buffer = (self.current_page + 1).to_string();
-                        self.invalidate_render();
+                    if (i.key_pressed(Key::PageUp) || i.key_pressed(Key::ArrowLeft))
+                        && tab.current_page > 0
+                    {
+                        tab.current_page -= 1;
+                        tab.page_input_buffer = (tab.current_page + 1).to_string();
+                        tab.invalidate_render();
                     }
-                }
-                if i.key_pressed(Key::Home) {
-                    self.current_page = 0;
-                    self.page_input_buffer = "1".into();
-                    self.invalidate_render();
-                }
-                if i.key_pressed(Key::End) {
-                    self.current_page = total_pages.saturating_sub(1);
-                    self.page_input_buffer = (self.current_page + 1).to_string();
-                    self.invalidate_render();
+                    if i.key_pressed(Key::Home) {
+                        tab.current_page = 0;
+                        tab.page_input_buffer = "1".into();
+                        tab.invalidate_render();
+                    }
+                    if i.key_pressed(Key::End) {
+                        tab.current_page = total_pages.saturating_sub(1);
+                        tab.page_input_buffer = (tab.current_page + 1).to_string();
+                        tab.invalidate_render();
+                    }
                 }
             }
         });
     }
 
-    /// Fits page to window width (FR-01.3.2).
-    fn fit_to_width(&mut self, ctx: &egui::Context) {
-        if let Some(ref doc) = self.doc {
-            if let Some(page) = doc.get_page(self.current_page) {
-                let page_w = (page.crop_box[2] - page.crop_box[0]).abs() as f32;
-                let avail_w = ctx.screen_rect().width() - (if self.sidebar_open { 240.0 } else { 40.0 });
-                if page_w > 0.0 && avail_w > 0.0 {
-                    self.zoom = (avail_w / page_w).clamp(0.2, 5.0);
-                    self.invalidate_render();
-                    self.status_message = format!("Fit to width ({:.0}%)", self.zoom * 100.0);
-                }
-            }
+    /// Renders the multi-tab strip (FR-01.4).
+    fn render_tab_bar(&mut self, ctx: &egui::Context) {
+        if self.tabs.is_empty() {
+            return;
         }
-    }
 
-    /// Fits entire page into view (FR-01.3.2).
-    fn fit_to_page(&mut self, ctx: &egui::Context) {
-        if let Some(ref doc) = self.doc {
-            if let Some(page) = doc.get_page(self.current_page) {
-                let page_w = (page.crop_box[2] - page.crop_box[0]).abs() as f32;
-                let page_h = (page.crop_box[3] - page.crop_box[1]).abs() as f32;
-                let avail_w = ctx.screen_rect().width() - (if self.sidebar_open { 260.0 } else { 60.0 });
-                let avail_h = ctx.screen_rect().height() - 140.0;
+        let mut tab_to_close: Option<usize> = None;
+        let mut tab_to_select: Option<usize> = None;
+        let mut create_new = false;
 
-                if page_w > 0.0 && page_h > 0.0 && avail_w > 0.0 && avail_h > 0.0 {
-                    let zoom_w = avail_w / page_w;
-                    let zoom_h = avail_h / page_h;
-                    self.zoom = zoom_w.min(zoom_h).clamp(0.2, 5.0);
-                    self.invalidate_render();
-                    self.status_message = format!("Fit to page ({:.0}%)", self.zoom * 100.0);
-                }
-            }
-        }
-    }
+        egui::TopBottomPanel::top("tab_bar")
+            .min_height(28.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
 
-    /// Opens a PDF document from a path on disk.
-    fn open_file(&mut self, path: PathBuf) {
-        match PdfDocument::load_from_file(&path) {
-            Ok(doc) => {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("Document");
-                self.status_message = format!("Opened: {}", name);
-                self.metadata = get_document_info(&doc).ok();
-                self.doc = Some(doc);
-                self.file_path = Some(path);
-                self.current_page = 0;
-                self.page_input_buffer = "1".into();
-                self.zoom = 1.0;
-                self.rotation = 0;
-                self.search_results.clear();
-                self.current_search_idx = 0;
-                self.invalidate_render();
-            }
-            Err(err) => {
-                self.status_message = format!("Failed to open file: {}", err);
-            }
-        }
-    }
+                    for (idx, tab) in self.tabs.iter().enumerate() {
+                        let is_active = self.active_tab_idx == Some(idx);
+                        let mod_mark = if tab.is_modified { "* " } else { "" };
+                        let label_text = format!("{}📄 {}", mod_mark, tab.title);
 
-    /// Spawns the native file picker to open a PDF.
-    fn open_file_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("PDF Documents (*.pdf)", &["pdf"])
-            .pick_file()
-        {
-            self.open_file(path);
-        }
-    }
-
-    /// Spawns the native file picker to save the current document.
-    fn save_file_dialog(&mut self) {
-        if let Some(ref doc) = self.doc {
-            let mut dialog = rfd::FileDialog::new().add_filter("PDF Documents (*.pdf)", &["pdf"]);
-            if let Some(ref current_path) = self.file_path {
-                if let Some(name) = current_path.file_name().and_then(|n| n.to_str()) {
-                    dialog = dialog.set_file_name(name);
-                }
-            } else {
-                dialog = dialog.set_file_name("document.pdf");
-            }
-
-            if let Some(path) = dialog.save_file() {
-                match doc.save_to_file(&path) {
-                    Ok(()) => {
-                        self.file_path = Some(path.clone());
-                        self.status_message = format!("Saved: {}", path.display());
-                    }
-                    Err(e) => {
-                        self.status_message = format!("Save failed: {}", e);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Closes the currently active document.
-    fn close_document(&mut self) {
-        self.doc = None;
-        self.file_path = None;
-        self.current_page = 0;
-        self.page_input_buffer = "1".into();
-        self.metadata = None;
-        self.search_results.clear();
-        self.current_search_idx = 0;
-        self.search_bar_open = false;
-        self.invalidate_render();
-        self.status_message = "Ready • No document open".into();
-    }
-
-    /// Creates a brand new empty PDF document with one blank Letter page.
-    fn create_new_blank_document(&mut self) {
-        let mut doc = PdfDocument::new();
-        doc.add_blank_page(paper_sizes::LETTER.0, paper_sizes::LETTER.1);
-        self.doc = Some(doc);
-        self.file_path = None;
-        self.current_page = 0;
-        self.page_input_buffer = "1".into();
-        self.zoom = 1.0;
-        self.rotation = 0;
-        self.metadata = None;
-        self.search_results.clear();
-        self.invalidate_render();
-        self.status_message = "New blank document created (Letter 612x792 pt)".into();
-    }
-
-    /// Executes search across document.
-    fn execute_search(&mut self) {
-        if let Some(ref doc) = self.doc {
-            if !self.search_query.trim().is_empty() {
-                match search_document(doc, &self.search_query, false, false) {
-                    Ok(results) => {
-                        self.search_results = results;
-                        self.current_search_idx = 0;
-                        if let Some(first_match) = self.search_results.first() {
-                            self.current_page = first_match.page_index;
-                            self.page_input_buffer = (self.current_page + 1).to_string();
-                            self.invalidate_render();
-                            self.status_message = format!(
-                                "Found {} matches for '{}'",
-                                self.search_results.len(),
-                                self.search_query
-                            );
+                        let (bg_color, stroke_color) = if is_active {
+                            (Color32::from_rgb(45, 55, 72), Color32::from_rgb(66, 153, 225))
                         } else {
-                            self.status_message = format!("No matches found for '{}'", self.search_query);
-                        }
+                            (Color32::from_rgb(26, 32, 44), Color32::from_gray(60))
+                        };
+
+                        let frame = egui::Frame::none()
+                            .fill(bg_color)
+                            .stroke(Stroke::new(1.0_f32, stroke_color))
+                            .rounding(4.0)
+                            .inner_margin(egui::Margin::symmetric(8.0, 4.0));
+
+                        frame.show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let label = ui.selectable_label(is_active, label_text);
+                                if label.clicked() {
+                                    tab_to_select = Some(idx);
+                                }
+
+                                if ui
+                                    .small_button("✕")
+                                    .on_hover_text("Close tab (Ctrl+W)")
+                                    .clicked()
+                                {
+                                    tab_to_close = Some(idx);
+                                }
+                            });
+                        });
                     }
-                    Err(e) => {
-                        self.status_message = format!("Search error: {}", e);
+
+                    // Plus button to open new tab
+                    if ui
+                        .button("➕")
+                        .on_hover_text("New blank document (Ctrl+N)")
+                        .clicked()
+                    {
+                        create_new = true;
                     }
-                }
-            }
+                });
+            });
+
+        if let Some(idx) = tab_to_select {
+            self.active_tab_idx = Some(idx);
+            self.status_message = format!("Active: {}", self.tabs[idx].title);
+        }
+        if let Some(idx) = tab_to_close {
+            self.close_tab(idx);
+        }
+        if create_new {
+            self.create_new_blank_document();
         }
     }
 
+    /// Renders top application menu bar (EI-01.1).
     fn render_menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
+                let has_doc = self.active_tab().is_some();
+
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open Document... (Ctrl+O)").clicked() {
-                        self.open_file_dialog();
-                        ui.close_menu();
-                    }
-                    if ui.button("New Blank Document (Ctrl+N)").clicked() {
+                    if ui.button("New Blank PDF (Ctrl+N)").clicked() {
                         self.create_new_blank_document();
                         ui.close_menu();
                     }
-
+                    if ui.button("Open... (Ctrl+O)").clicked() {
+                        self.open_file_dialog();
+                        ui.close_menu();
+                    }
                     ui.separator();
-
-                    let has_doc = self.doc.is_some();
-                    if ui
-                        .add_enabled(has_doc, Button::new("Save (Ctrl+S)"))
-                        .clicked()
-                    {
-                        if let Some(ref path) = self.file_path.clone() {
-                            if let Some(ref doc) = self.doc {
-                                let _ = doc.save_to_file(path);
-                                self.status_message = format!("Saved: {}", path.display());
+                    if ui.add_enabled(has_doc, Button::new("Save (Ctrl+S)")).clicked() {
+                        let needs_save_dialog = if let Some(tab) = self.active_tab_mut() {
+                            if tab.file_path.is_some() {
+                                let _ = tab.save();
+                                self.status_message = format!("Saved: {}", tab.title);
+                                false
+                            } else {
+                                true
                             }
                         } else {
+                            false
+                        };
+                        if needs_save_dialog {
                             self.save_file_dialog();
                         }
                         ui.close_menu();
@@ -415,20 +470,19 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Close Document (Ctrl+W)"))
+                        .add_enabled(has_doc, Button::new("Close Tab (Ctrl+W)"))
                         .clicked()
                     {
-                        self.close_document();
+                        if let Some(idx) = self.active_tab_idx {
+                            self.close_tab(idx);
+                        }
                         ui.close_menu();
                     }
-
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         std::process::exit(0);
                     }
                 });
-
-                let has_doc = self.doc.is_some();
 
                 ui.menu_button("Edit", |ui| {
                     if ui
@@ -443,16 +497,18 @@ impl RavPdfApp {
                         .add_enabled(has_doc, Button::new("Insert Blank Page"))
                         .clicked()
                     {
-                        if let Some(ref mut doc) = self.doc {
+                        if let Some(tab) = self.active_tab_mut() {
+                            let curr = tab.current_page;
                             let _ = insert_blank_page(
-                                doc,
-                                self.current_page + 1,
+                                &mut tab.doc,
+                                curr + 1,
                                 paper_sizes::LETTER.0,
                                 paper_sizes::LETTER.1,
                             );
-                            self.current_page += 1;
-                            self.page_input_buffer = (self.current_page + 1).to_string();
-                            self.invalidate_render();
+                            tab.current_page += 1;
+                            tab.page_input_buffer = (tab.current_page + 1).to_string();
+                            tab.is_modified = true;
+                            tab.invalidate_render();
                             self.status_message = "Inserted new page".into();
                         }
                         ui.close_menu();
@@ -461,14 +517,15 @@ impl RavPdfApp {
                         .add_enabled(has_doc, Button::new("Delete Current Page"))
                         .clicked()
                     {
-                        if let Some(ref mut doc) = self.doc {
-                            if doc.page_count() > 1 {
-                                let _ = delete_page(doc, self.current_page);
-                                if self.current_page >= doc.page_count() {
-                                    self.current_page = doc.page_count().saturating_sub(1);
+                        if let Some(tab) = self.active_tab_mut() {
+                            if tab.doc.page_count() > 1 {
+                                let _ = delete_page(&mut tab.doc, tab.current_page);
+                                if tab.current_page >= tab.doc.page_count() {
+                                    tab.current_page = tab.doc.page_count().saturating_sub(1);
                                 }
-                                self.page_input_buffer = (self.current_page + 1).to_string();
-                                self.invalidate_render();
+                                tab.page_input_buffer = (tab.current_page + 1).to_string();
+                                tab.is_modified = true;
+                                tab.invalidate_render();
                                 self.status_message = "Deleted current page".into();
                             }
                         }
@@ -481,22 +538,33 @@ impl RavPdfApp {
                         .add_enabled(has_doc, Button::new("Fit to Page (Ctrl+0)"))
                         .clicked()
                     {
-                        self.fit_to_page(ctx);
+                        let screen = ctx.screen_rect();
+                        let avail_w = screen.width() - (if self.sidebar_open { 260.0 } else { 60.0 });
+                        let avail_h = screen.height() - 140.0;
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.fit_to_page(avail_w, avail_h);
+                        }
                         ui.close_menu();
                     }
                     if ui
                         .add_enabled(has_doc, Button::new("Fit to Width (Ctrl+9)"))
                         .clicked()
                     {
-                        self.fit_to_width(ctx);
+                        let screen = ctx.screen_rect();
+                        let avail_w = screen.width() - (if self.sidebar_open { 240.0 } else { 40.0 });
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.fit_to_width(avail_w);
+                        }
                         ui.close_menu();
                     }
                     if ui
                         .add_enabled(has_doc, Button::new("Actual Size (100%)"))
                         .clicked()
                     {
-                        self.zoom = 1.0;
-                        self.invalidate_render();
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.zoom = 1.0;
+                            tab.invalidate_render();
+                        }
                         ui.close_menu();
                     }
                     ui.separator();
@@ -504,9 +572,11 @@ impl RavPdfApp {
                         .add_enabled(has_doc, Button::new("Rotate Clockwise 90°"))
                         .clicked()
                     {
-                        if let Some(ref mut doc) = self.doc {
-                            let _ = rotate_page(doc, self.current_page, 90);
-                            self.invalidate_render();
+                        if let Some(tab) = self.active_tab_mut() {
+                            let curr = tab.current_page;
+                            let _ = rotate_page(&mut tab.doc, curr, 90);
+                            tab.is_modified = true;
+                            tab.invalidate_render();
                         }
                         ui.close_menu();
                     }
@@ -527,19 +597,24 @@ impl RavPdfApp {
                         self.show_bates_dialog = true;
                         ui.close_menu();
                     }
-                    ui.separator();
                     if ui
-                        .add_enabled(has_doc, Button::new("Sticky Note Tool"))
+                        .add_enabled(has_doc, Button::new("Headers & Footers... (FR-18.1)"))
                         .clicked()
                     {
-                        self.active_tool = ActiveTool::StickyNote;
+                        self.show_header_footer_dialog = true;
                         ui.close_menu();
                     }
+                    ui.separator();
                     if ui
-                        .add_enabled(has_doc, Button::new("Highlight Tool"))
+                        .add_enabled(has_doc, Button::new("Flatten All Forms (FR-11.3.4)"))
                         .clicked()
                     {
-                        self.active_tool = ActiveTool::Highlight;
+                        if let Some(tab) = self.active_tab_mut() {
+                            let _ = flatten_form(&mut tab.doc);
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = "All form fields flattened to page content".into();
+                        }
                         ui.close_menu();
                     }
                 });
@@ -555,6 +630,7 @@ impl RavPdfApp {
         });
     }
 
+    /// Renders primary toolbar (EI-01.2).
     fn render_toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -562,7 +638,7 @@ impl RavPdfApp {
                     self.open_file_dialog();
                 }
 
-                let has_doc = self.doc.is_some();
+                let has_doc = self.active_tab().is_some();
 
                 if ui
                     .add_enabled(has_doc, Button::new("💾 Save"))
@@ -582,35 +658,42 @@ impl RavPdfApp {
 
                 ui.separator();
 
-                let total_pages = self.doc.as_ref().map(|d| d.page_count()).unwrap_or(0);
-                let can_prev = has_doc && self.current_page > 0;
-                let can_next = has_doc && self.current_page + 1 < total_pages;
+                let total_pages = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
+                let current_page = self.active_tab().map(|t| t.current_page).unwrap_or(0);
+                let can_prev = has_doc && current_page > 0;
+                let can_next = has_doc && current_page + 1 < total_pages;
 
                 if ui.add_enabled(can_prev, Button::new("⏮")).clicked() {
-                    self.current_page = 0;
-                    self.page_input_buffer = "1".into();
-                    self.invalidate_render();
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.current_page = 0;
+                        tab.page_input_buffer = "1".into();
+                        tab.invalidate_render();
+                    }
                 }
                 if ui.add_enabled(can_prev, Button::new("◀")).clicked() {
-                    self.current_page -= 1;
-                    self.page_input_buffer = (self.current_page + 1).to_string();
-                    self.invalidate_render();
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.current_page -= 1;
+                        tab.page_input_buffer = (tab.current_page + 1).to_string();
+                        tab.invalidate_render();
+                    }
                 }
 
                 // Go to page quick input box (FR-01.2.6)
                 if has_doc {
                     ui.label("Page");
-                    let text_edit = ui.add(
-                        egui::TextEdit::singleline(&mut self.page_input_buffer)
-                            .desired_width(32.0),
-                    );
-                    if text_edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        if let Ok(p) = self.page_input_buffer.trim().parse::<usize>() {
-                            if p >= 1 && p <= total_pages {
-                                self.current_page = p - 1;
-                                self.invalidate_render();
-                            } else {
-                                self.page_input_buffer = (self.current_page + 1).to_string();
+                    if let Some(tab) = self.active_tab_mut() {
+                        let text_edit = ui.add(
+                            egui::TextEdit::singleline(&mut tab.page_input_buffer)
+                                .desired_width(32.0),
+                        );
+                        if text_edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            if let Ok(p) = tab.page_input_buffer.trim().parse::<usize>() {
+                                if p >= 1 && p <= total_pages {
+                                    tab.current_page = p - 1;
+                                    tab.invalidate_render();
+                                } else {
+                                    tab.page_input_buffer = (tab.current_page + 1).to_string();
+                                }
                             }
                         }
                     }
@@ -620,41 +703,61 @@ impl RavPdfApp {
                 }
 
                 if ui.add_enabled(can_next, Button::new("▶")).clicked() {
-                    self.current_page += 1;
-                    self.page_input_buffer = (self.current_page + 1).to_string();
-                    self.invalidate_render();
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.current_page += 1;
+                        tab.page_input_buffer = (tab.current_page + 1).to_string();
+                        tab.invalidate_render();
+                    }
                 }
                 if ui.add_enabled(can_next, Button::new("⏭")).clicked() {
-                    self.current_page = total_pages.saturating_sub(1);
-                    self.page_input_buffer = (self.current_page + 1).to_string();
-                    self.invalidate_render();
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.current_page = total_pages.saturating_sub(1);
+                        tab.page_input_buffer = (tab.current_page + 1).to_string();
+                        tab.invalidate_render();
+                    }
                 }
 
                 ui.separator();
 
                 // Zoom controls & fit modes (FR-01.3.2)
+                let zoom_pct = self.active_tab().map(|t| t.zoom * 100.0).unwrap_or(100.0);
                 if ui.add_enabled(has_doc, Button::new("➖")).clicked() {
-                    self.zoom = (self.zoom / 1.2).max(0.1);
-                    self.invalidate_render();
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.zoom = (tab.zoom / 1.2).max(0.1);
+                        tab.invalidate_render();
+                    }
                 }
-                ui.label(format!("{:.0}%", self.zoom * 100.0));
+                ui.label(format!("{:.0}%", zoom_pct));
                 if ui.add_enabled(has_doc, Button::new("➕")).clicked() {
-                    self.zoom = (self.zoom * 1.2).min(64.0);
-                    self.invalidate_render();
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.zoom = (tab.zoom * 1.2).min(64.0);
+                        tab.invalidate_render();
+                    }
                 }
                 if ui.add_enabled(has_doc, Button::new("Fit Page")).clicked() {
-                    self.fit_to_page(ctx);
+                    let screen = ctx.screen_rect();
+                    let avail_w = screen.width() - (if self.sidebar_open { 260.0 } else { 60.0 });
+                    let avail_h = screen.height() - 140.0;
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.fit_to_page(avail_w, avail_h);
+                    }
                 }
                 if ui.add_enabled(has_doc, Button::new("Fit Width")).clicked() {
-                    self.fit_to_width(ctx);
+                    let screen = ctx.screen_rect();
+                    let avail_w = screen.width() - (if self.sidebar_open { 240.0 } else { 40.0 });
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.fit_to_width(avail_w);
+                    }
                 }
 
                 ui.separator();
 
                 if ui.add_enabled(has_doc, Button::new("⟳ Rotate")).clicked() {
-                    if let Some(ref mut doc) = self.doc {
-                        let _ = rotate_page(doc, self.current_page, 90);
-                        self.invalidate_render();
+                    if let Some(tab) = self.active_tab_mut() {
+                        let curr = tab.current_page;
+                        let _ = rotate_page(&mut tab.doc, curr, 90);
+                        tab.is_modified = true;
+                        tab.invalidate_render();
                     }
                 }
 
@@ -667,7 +770,7 @@ impl RavPdfApp {
 
                 ui.separator();
 
-                // Tool Selector Buttons
+                // Tool Selector Buttons (FR-08, FR-09)
                 ui.add_enabled_ui(has_doc, |ui| {
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Select, "Select");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Hand, "Pan");
@@ -706,15 +809,23 @@ impl RavPdfApp {
 
                     if ui.button("▲ Prev").clicked() && self.current_search_idx > 0 {
                         self.current_search_idx -= 1;
-                        self.current_page = self.search_results[self.current_search_idx].page_index;
-                        self.page_input_buffer = (self.current_page + 1).to_string();
-                        self.invalidate_render();
+                        let target_page = self.search_results[self.current_search_idx].page_index;
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.current_page = target_page;
+                            tab.page_input_buffer = (target_page + 1).to_string();
+                            tab.invalidate_render();
+                        }
                     }
-                    if ui.button("▼ Next").clicked() && self.current_search_idx + 1 < self.search_results.len() {
+                    if ui.button("▼ Next").clicked()
+                        && self.current_search_idx + 1 < self.search_results.len()
+                    {
                         self.current_search_idx += 1;
-                        self.current_page = self.search_results[self.current_search_idx].page_index;
-                        self.page_input_buffer = (self.current_page + 1).to_string();
-                        self.invalidate_render();
+                        let target_page = self.search_results[self.current_search_idx].page_index;
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.current_page = target_page;
+                            tab.page_input_buffer = (target_page + 1).to_string();
+                            tab.invalidate_render();
+                        }
                     }
                 } else if !self.search_query.is_empty() {
                     ui.weak("(No matches)");
@@ -730,14 +841,15 @@ impl RavPdfApp {
         });
     }
 
+    /// Renders sidebar navigation and panels (EI-01.4, FR-01.2.4, FR-19).
     fn render_sidebar(&mut self, ctx: &egui::Context) {
         if !self.sidebar_open {
             return;
         }
 
         egui::SidePanel::left("left_sidebar")
-            .default_width(220.0)
-            .min_width(180.0)
+            .default_width(240.0)
+            .min_width(200.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Thumbnails, "Pages");
@@ -749,7 +861,7 @@ impl RavPdfApp {
 
                 ui.separator();
 
-                if self.doc.is_none() {
+                if self.active_tab().is_none() {
                     ui.vertical_centered(|ui| {
                         ui.add_space(30.0);
                         ui.weak("No document open");
@@ -764,30 +876,79 @@ impl RavPdfApp {
                 match self.sidebar_tab {
                     SidebarTab::Thumbnails => {
                         ScrollArea::vertical().show(ui, |ui| {
-                            let total = self.doc.as_ref().map(|d| d.page_count()).unwrap_or(0);
+                            let total = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
+                            let curr = self.active_tab().map(|t| t.current_page).unwrap_or(0);
+
                             for i in 0..total {
-                                let is_selected = self.current_page == i;
+                                let is_selected = curr == i;
                                 ui.horizontal(|ui| {
                                     if ui
                                         .selectable_label(is_selected, format!("Page {}", i + 1))
                                         .clicked()
                                     {
-                                        self.current_page = i;
-                                        self.page_input_buffer = (self.current_page + 1).to_string();
-                                        self.invalidate_render();
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            tab.current_page = i;
+                                            tab.page_input_buffer = (i + 1).to_string();
+                                            tab.invalidate_render();
+                                        }
                                     }
                                 });
                             }
                         });
                     }
+
                     SidebarTab::Bookmarks => {
-                        ui.label("Document Outlines");
-                        ui.weak("(No bookmarks defined)");
+                        // FR-19: Document Outlines / Bookmarks Tree
+                        ui.heading("Bookmarks");
+                        ui.add_space(4.0);
+
+                        // Bookmark creation section (FR-19.2)
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut self.new_bookmark_title);
+                            if ui
+                                .button("➕ Add")
+                                .on_hover_text("Bookmark current page")
+                                .clicked()
+                                && !self.new_bookmark_title.trim().is_empty()
+                            {
+                                let bm_title = self.new_bookmark_title.clone();
+                                if let Some(tab) = self.active_tab_mut() {
+                                    let curr_page = tab.current_page;
+                                    let _ = add_bookmark(&mut tab.doc, &bm_title, curr_page);
+                                    tab.reload_bookmarks();
+                                    tab.is_modified = true;
+                                    self.status_message = format!("Bookmarked page {}", curr_page + 1);
+                                }
+                                self.new_bookmark_title.clear();
+                            }
+                        });
+
+                        ui.separator();
+
+                        let mut target_page = None;
+                        ScrollArea::vertical().show(ui, |ui| {
+                            if let Some(tab) = self.active_tab() {
+                                if tab.bookmarks.is_empty() {
+                                    ui.weak("(No bookmarks in this document)");
+                                } else {
+                                    Self::render_bookmark_tree(ui, &tab.bookmarks, &mut target_page);
+                                }
+                            }
+                        });
+
+                        if let Some(page_idx) = target_page {
+                            if let Some(tab) = self.active_tab_mut() {
+                                tab.current_page = page_idx;
+                                tab.page_input_buffer = (page_idx + 1).to_string();
+                                tab.invalidate_render();
+                            }
+                        }
                     }
+
                     SidebarTab::Annotations => {
                         ui.label("Annotations on current page:");
-                        if let Some(ref doc) = self.doc {
-                            if let Ok(annots) = get_page_annotations(doc, self.current_page) {
+                        if let Some(tab) = self.active_tab() {
+                            if let Ok(annots) = get_page_annotations(&tab.doc, tab.current_page) {
                                 if annots.is_empty() {
                                     ui.weak("(No annotations on this page)");
                                 } else {
@@ -807,26 +968,30 @@ impl RavPdfApp {
                             }
                         }
                     }
+
                     SidebarTab::Properties => {
-                        ui.label("Document Metadata:");
-                        if let Some(ref info) = self.metadata {
-                            ui.label(format!("Title: {}", info.title.as_deref().unwrap_or("None")));
-                            ui.label(format!(
-                                "Author: {}",
-                                info.author.as_deref().unwrap_or("None")
-                            ));
-                            ui.label(format!(
-                                "Creator: {}",
-                                info.creator.as_deref().unwrap_or("None")
-                            ));
-                            ui.label(format!(
-                                "Producer: {}",
-                                info.producer.as_deref().unwrap_or("None")
-                            ));
-                        } else {
-                            ui.weak("No metadata available");
+                        ui.label("Document Metadata (FR-33):");
+                        if let Some(tab) = self.active_tab() {
+                            if let Some(ref info) = tab.metadata {
+                                ui.label(format!("Title: {}", info.title.as_deref().unwrap_or("None")));
+                                ui.label(format!(
+                                    "Author: {}",
+                                    info.author.as_deref().unwrap_or("None")
+                                ));
+                                ui.label(format!(
+                                    "Creator: {}",
+                                    info.creator.as_deref().unwrap_or("None")
+                                ));
+                                ui.label(format!(
+                                    "Producer: {}",
+                                    info.producer.as_deref().unwrap_or("None")
+                                ));
+                            } else {
+                                ui.weak("No metadata available");
+                            }
                         }
                     }
+
                     SidebarTab::Search => {
                         ui.label(format!("Search Results ({}):", self.search_results.len()));
                         let mut clicked_match = None;
@@ -849,24 +1014,69 @@ impl RavPdfApp {
 
                         if let Some((idx, p_idx)) = clicked_match {
                             self.current_search_idx = idx;
-                            self.current_page = p_idx;
-                            self.page_input_buffer = (self.current_page + 1).to_string();
-                            self.invalidate_render();
+                            if let Some(tab) = self.active_tab_mut() {
+                                tab.current_page = p_idx;
+                                tab.page_input_buffer = (p_idx + 1).to_string();
+                                tab.invalidate_render();
+                            }
                         }
                     }
                 }
             });
     }
 
+    /// Renders a hierarchical list of bookmarks (FR-19.1).
+    fn render_bookmark_tree(
+        ui: &mut egui::Ui,
+        bookmarks: &[Bookmark],
+        target_page: &mut Option<usize>,
+    ) {
+        for bm in bookmarks {
+            let label = if let Some(p) = bm.page_index {
+                format!("🔖 {} [p.{}]", bm.title, p + 1)
+            } else {
+                format!("🔖 {}", bm.title)
+            };
+
+            let mut rich = RichText::new(label);
+            if bm.is_bold {
+                rich = rich.strong();
+            }
+            if bm.is_italic {
+                rich = rich.italics();
+            }
+
+            if bm.children.is_empty() {
+                if ui.button(rich).clicked() {
+                    if let Some(p) = bm.page_index {
+                        *target_page = Some(p);
+                    }
+                }
+            } else {
+                egui::CollapsingHeader::new(rich)
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if let Some(p) = bm.page_index {
+                            if ui.small_button("Jump to section").clicked() {
+                                *target_page = Some(p);
+                            }
+                        }
+                        Self::render_bookmark_tree(ui, &bm.children, target_page);
+                    });
+            }
+        }
+    }
+
+    /// Renders bottom status bar (EI-01.5).
     fn render_status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status_message);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if let Some(ref doc) = self.doc {
-                        ui.label(format!("Zoom: {:.0}%", self.zoom * 100.0));
+                    if let Some(tab) = self.active_tab() {
+                        ui.label(format!("Zoom: {:.0}%", tab.zoom * 100.0));
                         ui.separator();
-                        if let Some(p) = doc.get_page(self.current_page) {
+                        if let Some(p) = tab.doc.get_page(tab.current_page) {
                             let w = (p.crop_box[2] - p.crop_box[0]).abs();
                             let h = (p.crop_box[3] - p.crop_box[1]).abs();
                             ui.label(format!("{:.1} x {:.1} pt", w, h));
@@ -879,67 +1089,252 @@ impl RavPdfApp {
         });
     }
 
+    /// Renders central canvas area with PDF rendering, interactive annotations, and form widgets (EI-01.3).
     fn render_canvas(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.doc.is_none() {
-                // Professional Welcome / Empty State View
+            if self.tabs.is_empty() || self.active_tab().is_none() {
                 self.render_welcome_screen(ui);
                 return;
             }
 
-            self.ensure_page_rendered(ctx);
+            // Ensure current active tab page texture is rendered
+            if let Some(tab) = self.active_tab_mut() {
+                tab.ensure_page_rendered(ctx);
+            }
+
+            // Read properties of current active page
+            let (page_size, page_h, zoom) = {
+                let tab = self.active_tab().unwrap();
+                let page = tab.doc.get_page(tab.current_page);
+                let page_h = page
+                    .as_ref()
+                    .map(|p| (p.crop_box[3] - p.crop_box[1]).abs() as f32)
+                    .unwrap_or(792.0);
+                let tex_size = tab.page_texture.as_ref().map(|t| t.size_vec2()).unwrap_or(Vec2::ZERO);
+                (tex_size, page_h, tab.zoom)
+            };
 
             ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if let Some(ref tex) = self.page_texture {
-                        let size = tex.size_vec2();
-                        let (rect, response) =
-                            ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                    if page_size.x <= 0.0 || page_size.y <= 0.0 {
+                        return;
+                    }
 
-                        // Draw page shadow and white background
-                        let painter = ui.painter();
-                        painter.rect_filled(
-                            rect.expand(2.0),
-                            0.0,
-                            Color32::from_black_alpha(40),
-                        );
-                        painter.rect_filled(rect, 0.0, Color32::WHITE);
+                    let (rect, response) =
+                        ui.allocate_exact_size(page_size, egui::Sense::click_and_drag());
 
-                        // Paint page image texture
-                        painter.image(
-                            tex.id(),
-                            rect,
-                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
+                    // 1. Draw page background and shadow
+                    ui.painter().rect_filled(
+                        rect.expand(2.0),
+                        0.0,
+                        Color32::from_black_alpha(40),
+                    );
+                    ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
 
-                        // Handle interactions
-                        if response.clicked() {
-                            if let Some(pos) = response.interact_pointer_pos() {
-                                let local_x = (pos.x - rect.min.x) / self.zoom;
-                                let local_y = (rect.max.y - pos.y) / self.zoom; // Invert to PDF space
+                    // 2. Paint raster page texture
+                    if let Some(tab) = self.active_tab() {
+                        if let Some(ref tex) = tab.page_texture {
+                            ui.painter().image(
+                                tex.id(),
+                                rect,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                    }
 
-                                if self.active_tool == ActiveTool::StickyNote {
-                                    if let Some(ref mut doc) = self.doc {
-                                        let annot = Annotation::new(
-                                            AnnotationType::Text,
-                                            [
-                                                local_x as f64,
-                                                local_y as f64,
-                                                (local_x + 30.0) as f64,
-                                                (local_y + 30.0) as f64,
-                                            ],
-                                        );
-                                        let _ = add_annotation_to_page(
-                                            doc,
-                                            self.current_page,
-                                            &annot,
-                                        );
-                                        self.status_message = "Added sticky note".into();
-                                        self.invalidate_render();
+                    // 3. Interactive Form Fields Overlay (FR-11.2)
+                    let current_page = self.active_tab().map(|t| t.current_page).unwrap_or(0);
+                    let mut field_updates: Vec<(ravpdf_core::object::ObjectId, String)> = Vec::new();
+
+                    if let Some(tab) = self.active_tab() {
+                        if let Ok(fields) = get_page_form_fields(&tab.doc, current_page) {
+                            for field in fields {
+                                if let Some(field_id) = field.id {
+                                    // Convert PDF coordinates (origin bottom-left) to canvas screen space
+                                    let x_min = rect.min.x + (field.rect[0] as f32) * zoom;
+                                    let x_max = rect.min.x + (field.rect[2] as f32) * zoom;
+                                    let y_min = rect.min.y + (page_h - field.rect[3] as f32) * zoom;
+                                    let y_max = rect.min.y + (page_h - field.rect[1] as f32) * zoom;
+
+                                    let field_rect = Rect::from_min_max(
+                                        Pos2::new(x_min, y_min),
+                                        Pos2::new(x_max, y_max),
+                                    );
+
+                                    match field.field_type {
+                                        FormFieldType::Text => {
+                                            let current_text = self
+                                                .form_field_text_buffers
+                                                .entry(field_id)
+                                                .or_insert_with(|| {
+                                                    field.value.clone().unwrap_or_default()
+                                                });
+
+                                            ui.allocate_new_ui(
+                                                egui::UiBuilder::new().max_rect(field_rect),
+                                                |ui| {
+                                                    egui::Frame::none()
+                                                        .fill(Color32::from_rgba_unmultiplied(225, 235, 255, 180))
+                                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 153, 225)))
+                                                        .show(ui, |ui| {
+                                                            let edit = ui.add_sized(
+                                                                field_rect.size(),
+                                                                egui::TextEdit::singleline(current_text),
+                                                            );
+                                                            if edit.changed() {
+                                                                field_updates.push((field_id, current_text.clone()));
+                                                            }
+                                                        });
+                                                },
+                                            );
+                                        }
+                                        FormFieldType::Checkbox => {
+                                            let is_checked = field.value.as_deref() == Some("Yes");
+                                            let mut val = is_checked;
+                                            ui.allocate_new_ui(
+                                                egui::UiBuilder::new().max_rect(field_rect),
+                                                |ui| {
+                                                    egui::Frame::none()
+                                                        .fill(Color32::from_rgba_unmultiplied(240, 245, 255, 200))
+                                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 153, 225)))
+                                                        .show(ui, |ui| {
+                                                            if ui.checkbox(&mut val, "").changed() {
+                                                                let new_val = if val { "Yes" } else { "Off" };
+                                                                field_updates.push((field_id, new_val.into()));
+                                                            }
+                                                        });
+                                                },
+                                            );
+                                        }
+                                        _ => {}
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // Apply any interactive form updates back to document (FR-11.2)
+                    if !field_updates.is_empty() {
+                        if let Some(tab) = self.active_tab_mut() {
+                            for (fid, val) in field_updates {
+                                let _ = set_form_field_value(&mut tab.doc, fid, &val);
+                            }
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                        }
+                    }
+
+                    // 4. Annotation Drag-Drawing and Click Handlers (FR-08, FR-09)
+                    if response.drag_started() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            self.drag_start_pos = Some(pos);
+                            self.drag_current_pos = Some(pos);
+                        }
+                    }
+
+                    if response.dragged() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            self.drag_current_pos = Some(pos);
+                        }
+                    }
+
+                    // Live bounding box preview while dragging
+                    if let (Some(start), Some(curr)) = (self.drag_start_pos, self.drag_current_pos) {
+                        let drag_rect = Rect::from_two_pos(start, curr);
+                        match self.active_tool {
+                            ActiveTool::Highlight => {
+                                ui.painter().rect_filled(
+                                    drag_rect,
+                                    0.0,
+                                    Color32::from_rgba_unmultiplied(255, 255, 0, 80),
+                                );
+                                ui.painter().rect_stroke(
+                                    drag_rect,
+                                    0.0,
+                                    Stroke::new(1.0_f32, Color32::from_rgb(200, 180, 0)),
+                                );
+                            }
+                            ActiveTool::Rectangle => {
+                                ui.painter().rect_stroke(
+                                    drag_rect,
+                                    0.0,
+                                    Stroke::new(2.0_f32, Color32::from_rgb(220, 38, 38)),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if response.drag_stopped() {
+                        if let (Some(start), Some(curr)) = (self.drag_start_pos.take(), self.drag_current_pos.take()) {
+                            let drag_rect = Rect::from_two_pos(start, curr);
+                            if drag_rect.width() > 4.0 && drag_rect.height() > 4.0 {
+                                // Convert to PDF coordinate space
+                                let local_x1 = ((drag_rect.min.x - rect.min.x) / zoom) as f64;
+                                let local_x2 = ((drag_rect.max.x - rect.min.x) / zoom) as f64;
+                                let local_y1 = ((rect.max.y - drag_rect.max.y) / zoom) as f64;
+                                let local_y2 = ((rect.max.y - drag_rect.min.y) / zoom) as f64;
+
+                                let pdf_rect = [local_x1, local_y1, local_x2, local_y2];
+
+                                match self.active_tool {
+                                    ActiveTool::Highlight => {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let mut annot = Annotation::new(AnnotationType::Highlight, pdf_rect);
+                                            annot.color = Some((1.0, 1.0, 0.0));
+                                            annot.opacity = 0.5;
+                                            let curr_page = tab.current_page;
+                                            let _ = add_annotation_to_page(&mut tab.doc, curr_page, &annot);
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = "Added highlight annotation".into();
+                                        }
+                                    }
+                                    ActiveTool::Rectangle => {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let mut annot = Annotation::new(AnnotationType::Square, pdf_rect);
+                                            annot.color = Some((0.85, 0.15, 0.15));
+                                            let curr_page = tab.current_page;
+                                            let _ = add_annotation_to_page(&mut tab.doc, curr_page, &annot);
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = "Added rectangle shape".into();
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+
+                    // Click handlers for point-based tools
+                    if response.clicked() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let local_x = ((pos.x - rect.min.x) / zoom) as f64;
+                            let local_y = ((rect.max.y - pos.y) / zoom) as f64;
+
+                            match self.active_tool {
+                                ActiveTool::StickyNote => {
+                                    if let Some(tab) = self.active_tab_mut() {
+                                        let annot = Annotation::new(
+                                            AnnotationType::Text,
+                                            [local_x, local_y, local_x + 30.0, local_y + 30.0],
+                                        );
+                                        let curr_page = tab.current_page;
+                                        let _ = add_annotation_to_page(&mut tab.doc, curr_page, &annot);
+                                        tab.is_modified = true;
+                                        tab.invalidate_render();
+                                        self.status_message = "Added sticky note".into();
+                                    }
+                                }
+                                ActiveTool::Text => {
+                                    self.free_text_coords = Some([local_x, local_y, local_x + 120.0, local_y + 24.0]);
+                                    self.free_text_content.clear();
+                                    self.show_free_text_dialog = true;
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -947,7 +1342,7 @@ impl RavPdfApp {
         });
     }
 
-    /// Renders a modern, rich welcome screen when no document is loaded.
+    /// Renders welcome screen when no documents are loaded (EI-01.7).
     fn render_welcome_screen(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
@@ -988,7 +1383,7 @@ impl RavPdfApp {
 
             ui.add_space(40.0);
 
-            // Drag and drop target box
+            // Drag and drop target box (EI-01.7)
             let drop_box_size = Vec2::new(420.0, 120.0);
             let (rect, _resp) = ui.allocate_exact_size(drop_box_size, egui::Sense::hover());
             let painter = ui.painter();
@@ -1030,11 +1425,12 @@ impl RavPdfApp {
         });
     }
 
-    /// Renders modal dialogs for tools like Watermarking and Bates Numbering.
+    /// Renders modal dialogs for Watermarking, Bates Numbering, and Headers/Footers (FR-18).
     fn render_dialogs(&mut self, ctx: &egui::Context) {
+        // 1. Watermark Dialog (FR-18.2)
         if self.show_watermark_dialog {
             let mut close = false;
-            egui::Window::new("Add Text Watermark")
+            egui::Window::new("Add Text Watermark (FR-18.2)")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1044,22 +1440,25 @@ impl RavPdfApp {
                         ui.text_edit_singleline(&mut self.watermark_text);
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Opacity (0.0 - 1.0):");
+                        ui.label("Opacity (0.05 - 1.0):");
                         ui.add(egui::Slider::new(&mut self.watermark_opacity, 0.05..=1.0));
                     });
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui.button("Apply Watermark").clicked() {
-                            if let Some(ref mut doc) = self.doc {
+                            let text = self.watermark_text.clone();
+                            let opacity = self.watermark_opacity;
+                            if let Some(tab) = self.active_tab_mut() {
                                 let _ = apply_text_watermark(
-                                    doc,
-                                    &self.watermark_text,
-                                    self.watermark_opacity,
+                                    &mut tab.doc,
+                                    &text,
+                                    opacity,
                                     45.0,
                                     54.0,
                                 );
+                                tab.is_modified = true;
+                                tab.invalidate_render();
                                 self.status_message = "Applied watermark to document".into();
-                                self.invalidate_render();
                             }
                             close = true;
                         }
@@ -1073,9 +1472,10 @@ impl RavPdfApp {
             }
         }
 
+        // 2. Bates Numbering Dialog (FR-18.3)
         if self.show_bates_dialog {
             let mut close = false;
-            egui::Window::new("Apply Bates Numbering")
+            egui::Window::new("Apply Bates Numbering (FR-18.3)")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1095,16 +1495,20 @@ impl RavPdfApp {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui.button("Apply Bates Numbering").clicked() {
-                            if let Some(ref mut doc) = self.doc {
+                            let prefix = self.bates_prefix.clone();
+                            let start = self.bates_start;
+                            let digits = self.bates_digits;
+                            if let Some(tab) = self.active_tab_mut() {
                                 let _ = apply_bates_numbering(
-                                    doc,
-                                    &self.bates_prefix,
-                                    self.bates_start,
-                                    self.bates_digits,
+                                    &mut tab.doc,
+                                    &prefix,
+                                    start,
+                                    digits,
                                     "",
                                 );
+                                tab.is_modified = true;
+                                tab.invalidate_render();
                                 self.status_message = "Applied Bates numbering".into();
-                                self.invalidate_render();
                             }
                             close = true;
                         }
@@ -1117,58 +1521,171 @@ impl RavPdfApp {
                 self.show_bates_dialog = false;
             }
         }
-    }
 
-    fn ensure_page_rendered(&mut self, ctx: &egui::Context) {
-        let needs_render = self.page_texture.is_none()
-            || self.cached_page_index != Some(self.current_page)
-            || self.cached_zoom != Some(self.zoom)
-            || self.cached_rotation != Some(self.rotation);
+        // 3. Headers and Footers Dialog (FR-18.1)
+        if self.show_header_footer_dialog {
+            let mut close = false;
+            egui::Window::new("Add Headers & Footers (FR-18.1)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.heading("Header Positions");
+                    ui.horizontal(|ui| {
+                        ui.label("Left:");
+                        let mut left_h = self.hf_config.left_header.clone().unwrap_or_default();
+                        if ui.text_edit_singleline(&mut left_h).changed() {
+                            self.hf_config.left_header = if left_h.is_empty() { None } else { Some(left_h) };
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Center:");
+                        let mut center_h = self.hf_config.center_header.clone().unwrap_or_default();
+                        if ui.text_edit_singleline(&mut center_h).changed() {
+                            self.hf_config.center_header = if center_h.is_empty() { None } else { Some(center_h) };
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Right:");
+                        let mut right_h = self.hf_config.right_header.clone().unwrap_or_default();
+                        if ui.text_edit_singleline(&mut right_h).changed() {
+                            self.hf_config.right_header = if right_h.is_empty() { None } else { Some(right_h) };
+                        }
+                    });
 
-        if needs_render {
-            if let Some(ref doc) = self.doc {
-                if self.current_page < doc.page_count() {
-                    let options = RenderOptions {
-                        zoom: self.zoom,
-                        rotation: self.rotation,
-                        background_color: Color::WHITE,
-                    };
+                    ui.separator();
+                    ui.heading("Footer Positions");
+                    ui.horizontal(|ui| {
+                        ui.label("Left:");
+                        let mut left_f = self.hf_config.left_footer.clone().unwrap_or_default();
+                        if ui.text_edit_singleline(&mut left_f).changed() {
+                            self.hf_config.left_footer = if left_f.is_empty() { None } else { Some(left_f) };
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Center:");
+                        let mut center_f = self.hf_config.center_footer.clone().unwrap_or_default();
+                        if ui.text_edit_singleline(&mut center_f).changed() {
+                            self.hf_config.center_footer = if center_f.is_empty() { None } else { Some(center_f) };
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Right:");
+                        let mut right_f = self.hf_config.right_footer.clone().unwrap_or_default();
+                        if ui.text_edit_singleline(&mut right_f).changed() {
+                            self.hf_config.right_footer = if right_f.is_empty() { None } else { Some(right_f) };
+                        }
+                    });
 
-                    if let Ok(pixmap) = render_page(doc, self.current_page, &options) {
-                        let width = pixmap.width() as usize;
-                        let height = pixmap.height() as usize;
-                        let pixels: Vec<Color32> = pixmap
-                            .data()
-                            .chunks_exact(4)
-                            .map(|rgba| {
-                                Color32::from_rgba_unmultiplied(
-                                    rgba[0], rgba[1], rgba[2], rgba[3],
-                                )
-                            })
-                            .collect();
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Font Size:");
+                        ui.add(egui::Slider::new(&mut self.hf_config.font_size, 6.0..=24.0));
+                    });
 
-                        let color_image = egui::ColorImage {
-                            size: [width, height],
-                            pixels,
-                        };
+                    ui.weak("Tokens: <<Page>> = Page #, <<TotalPages>> = Total Pages, <<Date>> = Date, <<Title>> = Title");
 
-                        let tex = ctx.load_texture(
-                            "page_view",
-                            color_image,
-                            TextureOptions::LINEAR,
-                        );
-                        self.page_texture = Some(tex);
-                        self.cached_page_index = Some(self.current_page);
-                        self.cached_zoom = Some(self.zoom);
-                        self.cached_rotation = Some(self.rotation);
-                    }
-                }
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply Headers & Footers").clicked() {
+                            let config = self.hf_config.clone();
+                            if let Some(tab) = self.active_tab_mut() {
+                                let doc_title = tab.metadata.as_ref().and_then(|m| m.title.as_deref());
+                                let _ = apply_headers_and_footers(
+                                    &mut tab.doc,
+                                    &config,
+                                    doc_title,
+                                    None,
+                                );
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                self.status_message = "Applied headers and footers".into();
+                            }
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.show_header_footer_dialog = false;
+            }
+        }
+
+        // 4. FreeText Annotation Dialog (FR-08.1.4)
+        if self.show_free_text_dialog {
+            let mut close = false;
+            egui::Window::new("Add Text Box Annotation (FR-08.1.4)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Text Content:");
+                    ui.text_edit_multiline(&mut self.free_text_content);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Insert Text").clicked() {
+                            let text = self.free_text_content.clone();
+                            let coords = self.free_text_coords;
+                            if let (Some(c), Some(tab)) = (coords, self.active_tab_mut()) {
+                                let mut annot = Annotation::new(AnnotationType::FreeText, c);
+                                annot.contents = Some(text);
+                                annot.color = Some((0.1, 0.4, 0.8));
+                                let curr_page = tab.current_page;
+                                let _ = add_annotation_to_page(&mut tab.doc, curr_page, &annot);
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                self.status_message = "Added text box annotation".into();
+                            }
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.show_free_text_dialog = false;
             }
         }
     }
+}
 
-    fn invalidate_render(&mut self) {
-        self.page_texture = None;
+impl eframe::App for RavPdfApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 1. Handle Drag-and-Drop files onto the window (EI-01.7)
+        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
+        for dropped in dropped_files {
+            if let Some(path) = dropped.path {
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+                {
+                    self.open_file(path);
+                    break;
+                }
+            }
+        }
+
+        // 2. Handle Global Keyboard Shortcuts (FR-01.2.1, FR-34.1)
+        self.handle_keyboard_shortcuts(ctx);
+
+        // 3. Render UI Components (EI-01.1 - EI-01.6)
+        self.render_menu_bar(ctx);
+        self.render_toolbar(ctx);
+        self.render_tab_bar(ctx);
+
+        if self.search_bar_open && self.active_tab().is_some() {
+            self.render_search_bar(ctx);
+        }
+
+        self.render_status_bar(ctx);
+        self.render_sidebar(ctx);
+        self.render_canvas(ctx);
+
+        // 4. Render Modals (Watermark, Bates, Headers & Footers, Text Box)
+        self.render_dialogs(ctx);
     }
 }
 

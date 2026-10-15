@@ -15,9 +15,8 @@ pub fn apply_bates_numbering(
     suffix: &str,
 ) -> Result<()> {
     let page_ids = doc.page_ids();
-    let total_pages = page_ids.len();
 
-    for i in 0..total_pages {
+    for (i, &page_id) in page_ids.iter().enumerate() {
         let bates_number = start_num + (i as u32);
         let bates_str = format!("{}{:0width$}{}", prefix, bates_number, suffix, width = digits);
 
@@ -41,11 +40,10 @@ pub fn apply_bates_numbering(
         let _ = stream.compress_flate();
         doc.objects.insert(stream_id, Object::Stream(stream));
 
-        let page_id = page_ids[i];
         let page_obj = doc
             .objects
             .get_mut(&page_id)
-            .ok_or_else(|| PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
+            .ok_or(PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
         let page_dict = page_obj
             .as_dict_mut()
             .ok_or_else(|| PdfError::InvalidStructure("Expected page dictionary".into()))?;
