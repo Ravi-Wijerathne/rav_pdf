@@ -27,6 +27,7 @@ pub struct DocumentTab {
     pub metadata: Option<DocumentInfo>,
     pub bookmarks: Vec<Bookmark>,
     pub page_texture: Option<egui::TextureHandle>,
+    pub thumbnail_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     pub cached_page_index: Option<usize>,
     pub cached_zoom: Option<f32>,
     pub cached_rotation: Option<i64>,
@@ -51,15 +52,56 @@ impl DocumentTab {
             metadata,
             bookmarks,
             page_texture: None,
+            thumbnail_textures: std::collections::HashMap::new(),
             cached_page_index: None,
             cached_zoom: None,
             cached_rotation: None,
         }
     }
 
-    /// Invalidates the rendered page texture so it is re-rasterized on the next frame.
+    /// Invalidates rendered textures so they are re-rasterized on the next frame.
     pub fn invalidate_render(&mut self) {
         self.page_texture = None;
+        self.thumbnail_textures.clear();
+    }
+
+    /// Retrieves an existing thumbnail texture or rasterizes it on demand (FR-01.2.3).
+    pub fn get_or_render_thumbnail(
+        &mut self,
+        ctx: &egui::Context,
+        page_idx: usize,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(tex) = self.thumbnail_textures.get(&page_idx) {
+            return Some(tex.clone());
+        }
+        if page_idx >= self.doc.page_count() {
+            return None;
+        }
+
+        if let Ok(pixmap) = ravpdf_render::render_thumbnail(&self.doc, page_idx, 160) {
+            let width = pixmap.width() as usize;
+            let height = pixmap.height() as usize;
+            let pixels: Vec<Color32> = pixmap
+                .data()
+                .chunks_exact(4)
+                .map(|rgba| Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]))
+                .collect();
+
+            let color_image = egui::ColorImage {
+                size: [width, height],
+                pixels,
+            };
+
+            let tex = ctx.load_texture(
+                format!("thumb_tab_{}_{}", self.id, page_idx),
+                color_image,
+                TextureOptions::LINEAR,
+            );
+            self.thumbnail_textures.insert(page_idx, tex.clone());
+            Some(tex)
+        } else {
+            None
+        }
     }
 
     /// Refreshes bookmarks from the underlying PDF document.

@@ -7,9 +7,11 @@
 //! - FR-01.3.4 (Page rotation)
 //! - NFR-01.2 (Sub-second page rendering performance)
 
+pub mod annotation;
 pub mod color;
 pub mod interpreter;
 
+pub use annotation::render_page_annotations;
 pub use color::PdfColor;
 pub use interpreter::{ContentInterpreter, GraphicsState, RenderOptions};
 pub use tiny_skia::{Color, Pixmap};
@@ -44,6 +46,9 @@ pub fn render_page(
             ContentInterpreter::new(&mut pixmap, page.crop_box, options.zoom);
         let _ = interpreter.interpret(&content_bytes, page.resources.as_ref());
     }
+
+    // Render annotations on top of content streams (FR-01.1.1, FR-08, FR-09, FR-10)
+    render_page_annotations(&mut pixmap, doc, page_index, page.crop_box, options.zoom);
 
     Ok(pixmap)
 }
@@ -110,4 +115,39 @@ mod tests {
         let pixmap = render_page(&doc, 0, &options).expect("render vector content");
         assert_eq!(pixmap.width(), 612);
     }
+
+    #[test]
+    fn test_render_annotations() {
+        use ravpdf_core::object::{Object, PdfDictionary, PdfName};
+
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(612.0, 792.0);
+
+        // Add a Highlight annotation object to the page
+        let annot_id = doc.next_object_id();
+        let mut annot_dict = PdfDictionary::new();
+        annot_dict.insert("Type", PdfName::new("Annot"));
+        annot_dict.insert("Subtype", PdfName::new("Highlight"));
+        annot_dict.insert(
+            "Rect",
+            vec![
+                Object::Real(100.0),
+                Object::Real(500.0),
+                Object::Real(300.0),
+                Object::Real(540.0),
+            ],
+        );
+        doc.objects.insert(annot_id, Object::Dictionary(annot_dict));
+
+        let page_id = doc.page_ids()[0];
+        if let Some(Object::Dictionary(page_dict)) = doc.objects.get_mut(&page_id) {
+            page_dict.insert("Annots", vec![Object::Reference(annot_id)]);
+        }
+
+        let options = RenderOptions::default();
+        let pixmap = render_page(&doc, 0, &options).expect("render page with annotation");
+        assert_eq!(pixmap.width(), 612);
+        assert_eq!(pixmap.height(), 792);
+    }
 }
+
