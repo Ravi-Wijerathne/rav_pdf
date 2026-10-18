@@ -16,6 +16,7 @@ ravpdf-render.workspace = true
 ravpdf-edit.workspace = true
 ravpdf-annot.workspace = true
 ravpdf-forms.workspace = true
+ravpdf-crypto.workspace = true
 ravpdf-tools.workspace = true
 eframe.workspace = true
 rfd = "0.15"

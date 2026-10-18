@@ -30,13 +30,16 @@ use ravpdf_edit::{
     create_pdf_from_images, create_pdf_from_text, delete_page, extract_pages, insert_blank_page,
     merge_documents, reorder_pages, rotate_page, split_document, ImagePdfOptions, TextPdfOptions,
 };
+use ravpdf_crypto::{encrypt_document, Permissions};
 use ravpdf_forms::{
     flatten_form, get_page_form_fields, set_form_field_value, FormFieldType,
 };
 use ravpdf_render::{pixmap_to_png, render_page, RenderOptions};
 use ravpdf_tools::{
-    apply_bates_numbering, apply_headers_and_footers, apply_text_watermark, extract_all_text,
-    search_document, HeaderFooterConfig, SearchMatch,
+    apply_bates_numbering, apply_headers_and_footers, apply_text_watermark, audit_space_usage,
+    compare_documents, extract_all_text, optimize_document, redact_page_area, redact_pattern,
+    search_document, set_document_info, ComparisonReport, HeaderFooterConfig, OptimizationStats,
+    SearchMatch, SpaceAudit,
 };
 use std::path::PathBuf;
 use tab::DocumentTab;
@@ -94,6 +97,7 @@ enum ActiveTool {
     Highlight,
     Rectangle,
     Text,
+    Redact,
 }
 
 struct RavPdfApp {
@@ -132,6 +136,38 @@ struct RavPdfApp {
     // Split Document Dialog (FR-07.3)
     show_split_dialog: bool,
     split_ranges_input: String,
+
+    // Document Properties dialog state (FR-33)
+    show_properties_dialog: bool,
+    prop_title: String,
+    prop_author: String,
+    prop_subject: String,
+    prop_keywords: String,
+
+    // Redaction dialog state (FR-15.4)
+    show_redact_pattern_dialog: bool,
+    redact_pattern_input: String,
+    redact_replacement_input: String,
+
+    // Encryption dialog state (FR-14)
+    show_encrypt_dialog: bool,
+    encrypt_user_pass: String,
+    encrypt_owner_pass: String,
+    encrypt_allow_print: bool,
+    encrypt_allow_copy: bool,
+    encrypt_allow_modify: bool,
+
+    // Optimization & Space Audit state (FR-25)
+    show_optimize_dialog: bool,
+    optimization_stats: Option<OptimizationStats>,
+    show_space_audit_dialog: bool,
+    space_audit: Option<SpaceAudit>,
+
+    // Document Comparison state (FR-17)
+    show_compare_dialog: bool,
+    compare_file_a: Option<PathBuf>,
+    compare_file_b: Option<PathBuf>,
+    comparison_report: Option<ComparisonReport>,
 
     // Bookmark creation modal state (FR-19.2)
     new_bookmark_title: String,
@@ -181,6 +217,33 @@ impl Default for RavPdfApp {
 
             show_split_dialog: false,
             split_ranges_input: "1-2".into(),
+
+            show_properties_dialog: false,
+            prop_title: String::new(),
+            prop_author: String::new(),
+            prop_subject: String::new(),
+            prop_keywords: String::new(),
+
+            show_redact_pattern_dialog: false,
+            redact_pattern_input: String::new(),
+            redact_replacement_input: "[REDACTED]".into(),
+
+            show_encrypt_dialog: false,
+            encrypt_user_pass: String::new(),
+            encrypt_owner_pass: String::new(),
+            encrypt_allow_print: true,
+            encrypt_allow_copy: true,
+            encrypt_allow_modify: false,
+
+            show_optimize_dialog: false,
+            optimization_stats: None,
+            show_space_audit_dialog: false,
+            space_audit: None,
+
+            show_compare_dialog: false,
+            compare_file_a: None,
+            compare_file_b: None,
+            comparison_report: None,
 
             new_bookmark_title: String::new(),
 
@@ -412,6 +475,51 @@ impl RavPdfApp {
         }
     }
 
+    /// Opens the Document Properties dialog and populates editable fields (FR-33).
+    fn open_properties_dialog(&mut self) {
+        let meta = self.active_tab().and_then(|t| t.metadata.clone());
+        if let Some(meta) = meta {
+            self.prop_title = meta.title.unwrap_or_default();
+            self.prop_author = meta.author.unwrap_or_default();
+            self.prop_subject = meta.subject.unwrap_or_default();
+            self.prop_keywords = meta.keywords.unwrap_or_default();
+        } else {
+            self.prop_title.clear();
+            self.prop_author.clear();
+            self.prop_subject.clear();
+            self.prop_keywords.clear();
+        }
+        self.show_properties_dialog = true;
+    }
+
+    /// Inserts a standard rubber stamp onto the current page (FR-10.1 - FR-10.4).
+    pub fn insert_rubber_stamp(&mut self, stamp_name: &str, color: (f32, f32, f32)) {
+        if let Some(tab) = self.active_tab_mut() {
+            let curr_page = tab.current_page;
+            if let Some(page) = tab.doc.get_page(curr_page) {
+                let p_w = (page.crop_box[2] - page.crop_box[0]).abs();
+                let p_h = (page.crop_box[3] - page.crop_box[1]).abs();
+
+                // Position stamp at top-right of page
+                let stamp_w = 160.0;
+                let stamp_h = 48.0;
+                let x1 = page.crop_box[0] + (p_w - stamp_w - 40.0).max(10.0);
+                let y1 = page.crop_box[1] + (p_h - stamp_h - 40.0).max(10.0);
+                let rect = [x1, y1, x1 + stamp_w, y1 + stamp_h];
+
+                let mut annot = Annotation::new(
+                    AnnotationType::Stamp(stamp_name.to_string()),
+                    rect,
+                );
+                annot.color = Some(color);
+                let _ = add_annotation_to_page(&mut tab.doc, curr_page, &annot);
+                tab.is_modified = true;
+                tab.invalidate_render();
+                self.status_message = format!("Inserted '{}' stamp on page {}", stamp_name, curr_page + 1);
+            }
+        }
+    }
+
     /// Executes full-text search on the active document (FR-34.1).
     fn execute_search(&mut self) {
         self.search_results.clear();
@@ -472,6 +580,11 @@ impl RavPdfApp {
             // Find (Ctrl+F)
             if i.modifiers.ctrl && i.key_pressed(Key::F) && has_doc {
                 self.search_bar_open = !self.search_bar_open;
+            }
+
+            // Document Properties (Ctrl+D)
+            if i.modifiers.ctrl && i.key_pressed(Key::D) && has_doc {
+                self.open_properties_dialog();
             }
 
             // Zoom shortcuts
@@ -660,6 +773,21 @@ impl RavPdfApp {
                     });
                     ui.separator();
                     if ui
+                        .add_enabled(has_doc, Button::new("Document Properties... (Ctrl+D)"))
+                        .clicked()
+                    {
+                        self.open_properties_dialog();
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Reduce File Size... (FR-25.1)"))
+                        .clicked()
+                    {
+                        self.show_optimize_dialog = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
                         .add_enabled(has_doc, Button::new("Close Tab (Ctrl+W)"))
                         .clicked()
                     {
@@ -782,14 +910,14 @@ impl RavPdfApp {
 
                 ui.menu_button("Tools", |ui| {
                     if ui
-                        .add_enabled(has_doc, Button::new("Add Watermark..."))
+                        .add_enabled(has_doc, Button::new("Add Watermark... (FR-18.2)"))
                         .clicked()
                     {
                         self.show_watermark_dialog = true;
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Bates Numbering..."))
+                        .add_enabled(has_doc, Button::new("Bates Numbering... (FR-18.3)"))
                         .clicked()
                     {
                         self.show_bates_dialog = true;
@@ -803,6 +931,29 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    ui.menu_button("Rubber Stamps (FR-10)", |ui| {
+                        if ui.add_enabled(has_doc, Button::new("✓ APPROVED (Green)")).clicked() {
+                            self.insert_rubber_stamp("APPROVED", (0.1, 0.7, 0.2));
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(has_doc, Button::new("🔒 CONFIDENTIAL (Red)")).clicked() {
+                            self.insert_rubber_stamp("CONFIDENTIAL", (0.8, 0.1, 0.1));
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(has_doc, Button::new("📝 DRAFT (Blue)")).clicked() {
+                            self.insert_rubber_stamp("DRAFT", (0.1, 0.4, 0.8));
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(has_doc, Button::new("★ FINAL (Purple)")).clicked() {
+                            self.insert_rubber_stamp("FINAL", (0.5, 0.2, 0.7));
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(has_doc, Button::new("⊘ VOID (Dark Red)")).clicked() {
+                            self.insert_rubber_stamp("VOID", (0.7, 0.0, 0.0));
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
                     if ui
                         .add_enabled(has_doc, Button::new("Flatten All Forms (FR-11.3.4)"))
                         .clicked()
@@ -815,12 +966,45 @@ impl RavPdfApp {
                         }
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_doc, Button::new("Sanitize / Redact Patterns... (FR-15.4)"))
+                        .clicked()
+                    {
+                        self.show_redact_pattern_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Protect & Encrypt Document... (FR-14)"))
+                        .clicked()
+                    {
+                        self.show_encrypt_dialog = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_doc, Button::new("Audit Space Usage... (FR-25.9)"))
+                        .clicked()
+                    {
+                        if let Some(tab) = self.active_tab() {
+                            self.space_audit = Some(audit_space_usage(&tab.doc));
+                            self.show_space_audit_dialog = true;
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Compare Two Documents... (FR-17)").clicked() {
+                        if let Some(tab) = self.active_tab() {
+                            self.compare_file_a = tab.file_path.clone();
+                        }
+                        self.show_compare_dialog = true;
+                        ui.close_menu();
+                    }
                 });
 
                 ui.menu_button("Help", |ui| {
-                    if ui.button("About RavPDF").clicked() {
+                    if ui.button("About RAV PDF").clicked() {
                         self.status_message =
-                            "RavPDF 1.0 — High Performance Rust PDF Editor (ISO 32000 Conformance)".into();
+                            "RAV PDF 1.0 (ISO 32000 Conformance)".into();
                         ui.close_menu();
                     }
                 });
@@ -976,6 +1160,7 @@ impl RavPdfApp {
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Highlight, "Highlight");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Rectangle, "Shape");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Text, "Text");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Redact, "Redact");
                 });
             });
         });
@@ -1376,25 +1561,63 @@ impl RavPdfApp {
                     }
 
                     SidebarTab::Properties => {
-                        ui.label("Document Metadata (FR-33):");
-                        if let Some(tab) = self.active_tab() {
-                            if let Some(ref info) = tab.metadata {
-                                ui.label(format!("Title: {}", info.title.as_deref().unwrap_or("None")));
-                                ui.label(format!(
-                                    "Author: {}",
-                                    info.author.as_deref().unwrap_or("None")
-                                ));
-                                ui.label(format!(
-                                    "Creator: {}",
-                                    info.creator.as_deref().unwrap_or("None")
-                                ));
-                                ui.label(format!(
-                                    "Producer: {}",
-                                    info.producer.as_deref().unwrap_or("None")
-                                ));
+                        ui.heading("Properties & Metadata");
+                        ui.add_space(4.0);
+
+                        let mut open_full = false;
+                        if let Some(tab) = self.active_tab_mut() {
+                            let page_count = tab.doc.page_count();
+                            let dims_str = if let Some(page) = tab.doc.get_page(tab.current_page) {
+                                let pw = (page.crop_box[2] - page.crop_box[0]).abs();
+                                let ph = (page.crop_box[3] - page.crop_box[1]).abs();
+                                format!("{:.0} × {:.0} pt ({:.1} × {:.1} in)", pw, ph, pw / 72.0, ph / 72.0)
                             } else {
-                                ui.weak("No metadata available");
+                                "Unknown".into()
+                            };
+
+                            let mut title_buf = tab.metadata.as_ref().and_then(|m| m.title.clone()).unwrap_or_default();
+                            let mut author_buf = tab.metadata.as_ref().and_then(|m| m.author.clone()).unwrap_or_default();
+                            let mut subject_buf = tab.metadata.as_ref().and_then(|m| m.subject.clone()).unwrap_or_default();
+                            let mut kw_buf = tab.metadata.as_ref().and_then(|m| m.keywords.clone()).unwrap_or_default();
+
+                            ui.label(RichText::new("Title:").strong());
+                            let t_changed = ui.text_edit_singleline(&mut title_buf).changed();
+
+                            ui.label(RichText::new("Author:").strong());
+                            let a_changed = ui.text_edit_singleline(&mut author_buf).changed();
+
+                            ui.label(RichText::new("Subject:").strong());
+                            let s_changed = ui.text_edit_singleline(&mut subject_buf).changed();
+
+                            ui.label(RichText::new("Keywords:").strong());
+                            let k_changed = ui.text_edit_singleline(&mut kw_buf).changed();
+
+                            if t_changed || a_changed || s_changed || k_changed {
+                                let mut info = tab.metadata.clone().unwrap_or_default();
+                                info.title = if title_buf.trim().is_empty() { None } else { Some(title_buf) };
+                                info.author = if author_buf.trim().is_empty() { None } else { Some(author_buf) };
+                                info.subject = if subject_buf.trim().is_empty() { None } else { Some(subject_buf) };
+                                info.keywords = if kw_buf.trim().is_empty() { None } else { Some(kw_buf) };
+                                let _ = set_document_info(&mut tab.doc, &info);
+                                tab.metadata = Some(info);
+                                tab.is_modified = true;
                             }
+
+                            ui.separator();
+                            ui.label(format!("Pages: {}", page_count));
+                            ui.label(format!("Page Size: {}", dims_str));
+                            ui.label(format!("PDF Version: {}.{}", tab.doc.version.0, tab.doc.version.1));
+                            let enc = tab.doc.trailer.contains_key("Encrypt");
+                            ui.label(format!("Security: {}", if enc { "AES-128 Encrypted" } else { "None" }));
+
+                            ui.add_space(8.0);
+                            if ui.button("Full Details Dialog (Ctrl+D)").clicked() {
+                                open_full = true;
+                            }
+                        }
+
+                        if open_full {
+                            self.open_properties_dialog();
                         }
                     }
 
@@ -1669,6 +1892,25 @@ impl RavPdfApp {
                                     Stroke::new(2.0_f32, Color32::from_rgb(220, 38, 38)),
                                 );
                             }
+                            ActiveTool::Redact => {
+                                ui.painter().rect_filled(
+                                    drag_rect,
+                                    0.0,
+                                    Color32::from_rgba_unmultiplied(220, 38, 38, 80),
+                                );
+                                ui.painter().rect_stroke(
+                                    drag_rect,
+                                    0.0,
+                                    Stroke::new(2.0_f32, Color32::from_rgb(220, 38, 38)),
+                                );
+                                ui.painter().text(
+                                    drag_rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    "REDACT",
+                                    FontId::proportional(12.0),
+                                    Color32::WHITE,
+                                );
+                            }
                             _ => {}
                         }
                     }
@@ -1707,6 +1949,20 @@ impl RavPdfApp {
                                             tab.is_modified = true;
                                             tab.invalidate_render();
                                             self.status_message = "Added rectangle shape".into();
+                                        }
+                                    }
+                                    ActiveTool::Redact => {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let curr_page = tab.current_page;
+                                            let _ = redact_page_area(
+                                                &mut tab.doc,
+                                                curr_page,
+                                                pdf_rect,
+                                                Some("[REDACTED]"),
+                                            );
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = format!("Permanently redacted area on page {}", curr_page + 1);
                                         }
                                     }
                                     _ => {}
@@ -1755,15 +2011,10 @@ impl RavPdfApp {
 
             // Title
             ui.heading(
-                RichText::new("RavPDF")
+                RichText::new("RAV PDF")
                     .size(36.0)
                     .strong()
                     .color(Color32::from_rgb(60, 130, 246)),
-            );
-            ui.label(
-                RichText::new("Professional, Memory-Safe Rust PDF Editor")
-                    .size(16.0)
-                    .color(Color32::GRAY),
             );
 
             ui.add_space(40.0);
@@ -2241,11 +2492,479 @@ impl RavPdfApp {
                 self.show_split_dialog = false;
             }
         }
+
+        // 7. Document Properties Dialog (FR-33)
+        if self.show_properties_dialog {
+            let mut close = false;
+            let mut apply = false;
+            egui::Window::new("Document Properties (FR-33)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([500.0, 420.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.heading("General Metadata");
+                    ui.add_space(4.0);
+                    egui::Grid::new("prop_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                        ui.label("Title:");
+                        ui.text_edit_singleline(&mut self.prop_title);
+                        ui.end_row();
+
+                        ui.label("Author:");
+                        ui.text_edit_singleline(&mut self.prop_author);
+                        ui.end_row();
+
+                        ui.label("Subject:");
+                        ui.text_edit_singleline(&mut self.prop_subject);
+                        ui.end_row();
+
+                        ui.label("Keywords:");
+                        ui.text_edit_singleline(&mut self.prop_keywords);
+                        ui.end_row();
+                    });
+
+                    ui.separator();
+                    ui.heading("File Metrics & Security");
+                    ui.add_space(4.0);
+
+                    if let Some(tab) = self.active_tab() {
+                        let path_str = tab.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<Unsaved Document>".into());
+                        ui.label(format!("File Path: {}", path_str));
+                        ui.label(format!("Page Count: {}", tab.doc.page_count()));
+                        ui.label(format!("PDF Version: %PDF-{}.{}", tab.doc.version.0, tab.doc.version.1));
+                        if let Some(page) = tab.doc.get_page(tab.current_page) {
+                            let w_pt = (page.crop_box[2] - page.crop_box[0]).abs();
+                            let h_pt = (page.crop_box[3] - page.crop_box[1]).abs();
+                            ui.label(format!("Page {} Size: {:.1} x {:.1} pt ({:.2}\" x {:.2}\")", tab.current_page + 1, w_pt, h_pt, w_pt / 72.0, h_pt / 72.0));
+                        }
+                    }
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("💾 Save Metadata").clicked() {
+                            apply = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if apply {
+                let info = ravpdf_tools::DocumentInfo {
+                    title: if self.prop_title.trim().is_empty() { None } else { Some(self.prop_title.clone()) },
+                    author: if self.prop_author.trim().is_empty() { None } else { Some(self.prop_author.clone()) },
+                    subject: if self.prop_subject.trim().is_empty() { None } else { Some(self.prop_subject.clone()) },
+                    keywords: if self.prop_keywords.trim().is_empty() { None } else { Some(self.prop_keywords.clone()) },
+                    creator: Some("RAV PDF (ISO 32000 Conforming)".into()),
+                    producer: Some("RAV PDF Engine".into()),
+                    creation_date: None,
+                    mod_date: None,
+                };
+                if let Some(tab) = self.active_tab_mut() {
+                    let _ = set_document_info(&mut tab.doc, &info);
+                    tab.metadata = Some(info);
+                    tab.is_modified = true;
+                    self.status_message = "Document properties updated successfully".into();
+                }
+            }
+            if close {
+                self.show_properties_dialog = false;
+            }
+        }
+
+        // 8. Sanitize & Redact Patterns Dialog (FR-15.4)
+        if self.show_redact_pattern_dialog {
+            let mut close = false;
+            let mut apply = false;
+            egui::Window::new("Sanitize & Redact Patterns (FR-15.4)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Permanently search and sanitize sensitive patterns across the document:");
+                    ui.add_space(6.0);
+
+                    ui.label(RichText::new("Quick Presets:").strong());
+                    ui.horizontal(|ui| {
+                        if ui.button("SSN").on_hover_text(r"\d{3}-\d{2}-\d{4}").clicked() {
+                            self.redact_pattern_input = r"\d{3}-\d{2}-\d{4}".into();
+                        }
+                        if ui.button("Email").on_hover_text(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").clicked() {
+                            self.redact_pattern_input = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}".into();
+                        }
+                        if ui.button("Phone").on_hover_text(r"\d{3}[-.]?\d{3}[-.]?\d{4}").clicked() {
+                            self.redact_pattern_input = r"\d{3}[-.]?\d{3}[-.]?\d{4}".into();
+                        }
+                        if ui.button("Credit Card").on_hover_text(r"\b(?:\d{4}[ -]?){3}\d{4}\b").clicked() {
+                            self.redact_pattern_input = r"\b(?:\d{4}[ -]?){3}\d{4}\b".into();
+                        }
+                    });
+
+                    ui.add_space(8.0);
+                    egui::Grid::new("redact_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                        ui.label("Pattern / Regex:");
+                        ui.text_edit_singleline(&mut self.redact_pattern_input);
+                        ui.end_row();
+
+                        ui.label("Replacement Text:");
+                        ui.text_edit_singleline(&mut self.redact_replacement_input);
+                        ui.end_row();
+                    });
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let can_redact = !self.redact_pattern_input.trim().is_empty();
+                        if ui.add_enabled(can_redact, Button::new("✂ Redact All Occurrences")).clicked() {
+                            apply = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if apply {
+                let pattern = self.redact_pattern_input.clone();
+                let replacement = self.redact_replacement_input.clone();
+                if let Some(tab) = self.active_tab_mut() {
+                    match redact_pattern(&mut tab.doc, &pattern, &replacement) {
+                        Ok(count) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Redacted {} occurrences of pattern '{}'", count, pattern);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Redaction failed: {}", e);
+                        }
+                    }
+                }
+            }
+            if close {
+                self.show_redact_pattern_dialog = false;
+            }
+        }
+
+        // 9. Password Protect & Encrypt Dialog (FR-14)
+        if self.show_encrypt_dialog {
+            let mut close = false;
+            egui::Window::new("Password Protect & Encrypt (FR-14)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Encrypts the document using standard AES-128 security handler.");
+                    ui.add_space(8.0);
+
+                    egui::Grid::new("enc_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                        ui.label("User Password (to open):");
+                        ui.add(egui::TextEdit::singleline(&mut self.encrypt_user_pass).password(true));
+                        ui.end_row();
+
+                        ui.label("Owner Password (permissions):");
+                        ui.add(egui::TextEdit::singleline(&mut self.encrypt_owner_pass).password(true));
+                        ui.end_row();
+                    });
+
+                    ui.add_space(8.0);
+                    ui.heading("Permissions (FR-14.2)");
+                    ui.checkbox(&mut self.encrypt_allow_print, "Allow Printing");
+                    ui.checkbox(&mut self.encrypt_allow_copy, "Allow Copying Text & Graphics");
+                    ui.checkbox(&mut self.encrypt_allow_modify, "Allow Modifying Content");
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("🔒 Encrypt & Save As...").clicked() {
+                            if let Some(tab) = self.active_tab() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("PDF files", &["pdf"])
+                                    .save_file()
+                                {
+                                    let mut flags = -4;
+                                    if !self.encrypt_allow_print {
+                                        flags &= !Permissions::PRINT;
+                                    }
+                                    if !self.encrypt_allow_modify {
+                                        flags &= !Permissions::MODIFY;
+                                    }
+                                    if !self.encrypt_allow_copy {
+                                        flags &= !Permissions::COPY;
+                                    }
+                                    let perms = Permissions::new(flags);
+                                    let mut enc_doc = tab.doc.clone();
+                                    match encrypt_document(&mut enc_doc, &self.encrypt_user_pass, &self.encrypt_owner_pass, perms) {
+                                        Ok(()) => {
+                                            if let Err(e) = enc_doc.save_to_file(&path) {
+                                                self.status_message = format!("Save error: {}", e);
+                                            } else {
+                                                self.status_message = format!("Encrypted PDF saved to '{}'", path.display());
+                                                close = true;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            self.status_message = format!("Encryption error: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.show_encrypt_dialog = false;
+            }
+        }
+
+        // 10. PDF Optimizer / Reduce File Size Dialog (FR-25.1)
+        if self.show_optimize_dialog {
+            let mut close = false;
+            let mut apply = false;
+            egui::Window::new("Reduce File Size & Optimize (FR-25.1)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Optimizes document streams using Flate compression and removes orphaned objects.");
+                    ui.add_space(6.0);
+
+                    if let Some(tab) = self.active_tab() {
+                        let cur_len = tab.doc.to_bytes().map(|b| b.len()).unwrap_or(0);
+                        ui.label(format!("Current File Size: {:.1} KB ({} bytes)", cur_len as f64 / 1024.0, cur_len));
+                    }
+
+                    if let Some(ref stats) = self.optimization_stats {
+                        ui.separator();
+                        ui.heading("Optimization Results:");
+                        ui.label(format!("Original Size: {:.1} KB", stats.original_bytes as f64 / 1024.0));
+                        ui.label(format!("Optimized Size: {:.1} KB", stats.optimized_bytes as f64 / 1024.0));
+                        ui.label(RichText::new(format!(
+                            "Saved: {:.1} KB ({:.1}% reduction)",
+                            stats.saved_bytes() as f64 / 1024.0,
+                            stats.reduction_percent()
+                        )).strong().color(Color32::from_rgb(46, 160, 67)));
+                        ui.label(format!("Streams Compressed: {}", stats.streams_compressed));
+                        ui.label(format!("Orphaned Objects Discarded: {}", stats.objects_removed));
+                    }
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("⚡ Optimize Document").clicked() {
+                            apply = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if apply {
+                if let Some(tab) = self.active_tab_mut() {
+                    match optimize_document(&mut tab.doc) {
+                        Ok(stats) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Optimization complete: {:.1}% reduction", stats.reduction_percent());
+                            self.optimization_stats = Some(stats);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Optimization error: {}", e);
+                        }
+                    }
+                }
+            }
+            if close {
+                self.show_optimize_dialog = false;
+                self.optimization_stats = None;
+            }
+        }
+
+        // 11. Audit Space Usage Dialog (FR-25.9)
+        if self.show_space_audit_dialog {
+            let mut close = false;
+            egui::Window::new("Audit Space Usage (FR-25.9)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    if let Some(ref audit) = self.space_audit {
+                        ui.heading("Space Breakdown by Component");
+                        ui.add_space(6.0);
+
+                        egui::Grid::new("audit_grid").num_columns(3).spacing([16.0, 8.0]).show(ui, |ui| {
+                            ui.label(RichText::new("Category").strong());
+                            ui.label(RichText::new("Bytes").strong());
+                            ui.label(RichText::new("% of Total").strong());
+                            ui.end_row();
+
+                            ui.label("Content Streams:");
+                            ui.label(format!("{} bytes", audit.content_stream_bytes));
+                            ui.label(format!("{:.1}%", audit.content_percent()));
+                            ui.end_row();
+
+                            ui.label("Images & Rasters:");
+                            ui.label(format!("{} bytes", audit.image_bytes));
+                            ui.label(format!("{:.1}%", audit.image_percent()));
+                            ui.end_row();
+
+                            ui.label("Fonts:");
+                            ui.label(format!("{} bytes", audit.font_bytes));
+                            ui.label(format!("{:.1}%", audit.font_percent()));
+                            ui.end_row();
+
+                            ui.label("Metadata & Info:");
+                            ui.label(format!("{} bytes", audit.metadata_bytes));
+                            ui.label(format!("{:.1}%", audit.metadata_percent()));
+                            ui.end_row();
+
+                            ui.label("Structure & Cross-Ref:");
+                            ui.label(format!("{} bytes", audit.structure_bytes));
+                            ui.label(format!("{:.1}%", audit.structure_percent()));
+                            ui.end_row();
+
+                            ui.label(RichText::new("Total Document Size:").strong());
+                            ui.label(RichText::new(format!("{} bytes", audit.total_bytes)).strong());
+                            ui.label(RichText::new("100.0%").strong());
+                            ui.end_row();
+                        });
+                    } else {
+                        ui.label("No space audit data available.");
+                    }
+
+                    ui.add_space(10.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+            if close {
+                self.show_space_audit_dialog = false;
+            }
+        }
+
+        // 12. Document Comparison Dialog (FR-17)
+        if self.show_compare_dialog {
+            let mut close = false;
+            let mut run_compare = false;
+            egui::Window::new("Compare Two Documents (FR-17)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([580.0, 460.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Compare two PDF files and generate a detailed change and text difference report.");
+                    ui.add_space(8.0);
+
+                    // Document A
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Document A (Original):").strong());
+                        let name_a = self.compare_file_a.as_ref()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("<Select File...>");
+                        ui.label(name_a);
+                        if ui.button("Browse...").clicked() {
+                            if let Some(file) = rfd::FileDialog::new().add_filter("PDF files", &["pdf"]).pick_file() {
+                                self.compare_file_a = Some(file);
+                            }
+                        }
+                    });
+
+                    // Document B
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Document B (Revised):").strong());
+                        let name_b = self.compare_file_b.as_ref()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("<Select File...>");
+                        ui.label(name_b);
+                        if ui.button("Browse...").clicked() {
+                            if let Some(file) = rfd::FileDialog::new().add_filter("PDF files", &["pdf"]).pick_file() {
+                                self.compare_file_b = Some(file);
+                            }
+                        }
+                    });
+
+                    ui.add_space(8.0);
+                    let can_run = self.compare_file_a.is_some() && self.compare_file_b.is_some();
+                    if ui.add_enabled(can_run, Button::new("🔍 Compare Documents")).clicked() {
+                        run_compare = true;
+                    }
+
+                    if let Some(ref rep) = self.comparison_report {
+                        ui.separator();
+                        ui.heading("Comparison Summary");
+                        if rep.is_identical() {
+                            ui.colored_label(Color32::from_rgb(46, 160, 67), "✓ Documents are identical in text and metadata.");
+                        } else {
+                            ui.colored_label(
+                                Color32::from_rgb(220, 100, 30),
+                                format!("Found {} total difference(s). Document A has {} pages, Document B has {} pages.", rep.total_differences, rep.doc_a_pages, rep.doc_b_pages),
+                            );
+
+                            if !rep.metadata_diffs.is_empty() {
+                                ui.label(RichText::new("Metadata Changes:").strong());
+                                for md in &rep.metadata_diffs {
+                                    ui.label(format!("• {}", md));
+                                }
+                            }
+
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("Page-by-Page Content Differences:").strong());
+                            ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                                for p in &rep.page_diffs {
+                                    if p.has_differences {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(format!("Page {}:", p.page_number)).strong());
+                                            ui.weak(&p.summary);
+                                        });
+                                        for add in &p.additions {
+                                            ui.colored_label(Color32::from_rgb(46, 160, 67), format!("  + {}", add));
+                                        }
+                                        for del in &p.deletions {
+                                            ui.colored_label(Color32::from_rgb(200, 50, 50), format!("  - {}", del));
+                                        }
+                                        ui.separator();
+                                    }
+                                }
+                            });
+                        }
+                    }
+
+                    ui.add_space(10.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+            if run_compare {
+                if let (Some(ref pa), Some(ref pb)) = (&self.compare_file_a, &self.compare_file_b) {
+                    match (PdfDocument::load_from_file(pa), PdfDocument::load_from_file(pb)) {
+                        (Ok(da), Ok(db)) => {
+                            self.comparison_report = Some(compare_documents(&da, &db));
+                            self.status_message = "Comparison generated successfully".into();
+                        }
+                        (Err(e), _) => self.status_message = format!("Failed to load Document A: {}", e),
+                        (_, Err(e)) => self.status_message = format!("Failed to load Document B: {}", e),
+                    }
+                }
+            }
+            if close {
+                self.show_compare_dialog = false;
+            }
+        }
     }
 }
 
 impl eframe::App for RavPdfApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Enforce window title header strictly as "RAV PDF"
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title("RAV PDF".to_string()));
+
         // 1. Handle Drag-and-Drop files onto the window (EI-01.7)
         let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
         for dropped in dropped_files {
@@ -2296,14 +3015,14 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("RavPDF — Rust PDF Editor")
+            .with_title("RAV PDF")
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([800.0, 600.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "RavPDF",
+        "RAV PDF",
         options,
         Box::new(|_cc| Ok(Box::new(initial_app))),
     )
