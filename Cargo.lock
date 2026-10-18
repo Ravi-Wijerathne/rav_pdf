@@ -2585,6 +2585,7 @@ dependencies = [
  "eframe",
  "ravpdf-annot",
  "ravpdf-core",
+ "ravpdf-crypto",
  "ravpdf-edit",
  "ravpdf-forms",
  "ravpdf-render",
