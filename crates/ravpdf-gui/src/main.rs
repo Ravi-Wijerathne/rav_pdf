@@ -23,25 +23,33 @@ use eframe::egui::{
     self, Align, Align2, Button, Color32, FontId, Key, Layout, Pos2, Rect, RichText, ScrollArea,
     Stroke, Vec2,
 };
-use ravpdf_annot::{add_annotation_to_page, get_page_annotations, Annotation, AnnotationType};
+use ravpdf_annot::{
+    add_annotation_to_page, get_page_annotations, Annotation, AnnotationType, LinkAction,
+};
 use ravpdf_core::document::{paper_sizes, PdfDocument};
 use ravpdf_core::outline::{add_bookmark, Bookmark};
 use ravpdf_edit::{
-    create_pdf_from_images, create_pdf_from_text, delete_page, extract_pages, insert_blank_page,
-    merge_documents, reorder_pages, rotate_page, split_document, ImagePdfOptions, TextPdfOptions,
+    create_pdf_from_images, create_pdf_from_text, crop_page, delete_page, duplicate_page,
+    extract_pages, get_page_label, get_page_labels, insert_blank_page, insert_image_file,
+    merge_documents, reorder_pages, rotate_page, set_page_labels, split_document,
+    ImagePdfOptions, PageLabelRange, PageLabelStyle, TextPdfOptions,
 };
-use ravpdf_crypto::{encrypt_document, Permissions};
+use ravpdf_crypto::{
+    create_signature_field, encrypt_document, get_document_signatures, Permissions,
+    SignatureStatus,
+};
 use ravpdf_forms::{
-    flatten_form, get_page_form_fields, set_form_field_value, FormFieldType,
+    add_form_field, flatten_form, get_form_fields, get_page_form_fields, set_form_field_value,
+    FormField, FormFieldType,
 };
 use ravpdf_render::{pixmap_to_png, render_page, RenderOptions};
 use ravpdf_tools::{
     add_attachment, apply_bates_numbering, apply_headers_and_footers, apply_text_watermark,
-    audit_space_usage, compare_documents, execute_batch, extract_all_text, get_attachments,
-    optimize_document, redact_page_area, redact_pattern, remove_attachment, run_preflight,
-    search_document, set_document_info, BatchAction, BatchJob, BatchResult, ComparisonReport,
-    FileAttachment, HeaderFooterConfig, OptimizationStats, PreflightProfile,
-    PreflightReport, PreflightSeverity, SearchMatch, SpaceAudit,
+    audit_space_usage, compare_documents, execute_batch, extract_all_text, find_and_replace,
+    find_and_replace_page, get_attachments, optimize_document, redact_page_area, redact_pattern,
+    remove_attachment, run_preflight, search_document, set_document_info, BatchAction, BatchJob,
+    BatchResult, ComparisonReport, FileAttachment, HeaderFooterConfig, OptimizationStats,
+    PreflightProfile, PreflightReport, PreflightSeverity, SearchMatch, SpaceAudit,
 };
 use std::path::PathBuf;
 use tab::DocumentTab;
@@ -52,6 +60,8 @@ enum PageAction {
     Select(usize),
     Rotate(usize),
     Delete(usize),
+    Duplicate(usize),
+    Crop(usize),
     MoveUp(usize),
     MoveDown(usize),
     Extract(usize),
@@ -88,6 +98,8 @@ enum SidebarTab {
     Bookmarks,
     Annotations,
     Attachments,
+    Signatures,
+    Forms,
     Properties,
     Search,
 }
@@ -100,6 +112,7 @@ enum ActiveTool {
     Highlight,
     Rectangle,
     Text,
+    Link,
     Redact,
     MeasureDistance,
     MeasureArea,
@@ -203,6 +216,54 @@ struct RavPdfApp {
 
     // Inline form editing buffer: field_id -> current string value
     form_field_text_buffers: std::collections::HashMap<ravpdf_core::object::ObjectId, String>,
+
+    // Find & Replace state (FR-04.8)
+    search_replace_mode: bool,
+    search_replace_text: String,
+    search_case_sensitive: bool,
+    search_whole_word: bool,
+    search_is_regex: bool,
+
+    // Page Crop Modal (FR-06.8)
+    show_crop_dialog: bool,
+    crop_target_page: usize,
+    crop_left: f64,
+    crop_bottom: f64,
+    crop_right: f64,
+    crop_top: f64,
+    crop_all_pages: bool,
+
+    // Digital Signatures state (FR-13)
+    show_add_signature_dialog: bool,
+    sig_target_page: usize,
+    sig_field_name: String,
+    sig_signer_name: String,
+    sig_reason: String,
+    sig_location: String,
+    sig_is_visible: bool,
+
+    // Page Labels state (FR-06.9)
+    show_page_labels_dialog: bool,
+    page_labels_start_page: usize,
+    page_labels_style_idx: usize,
+    page_labels_prefix: String,
+    page_labels_start_num: u32,
+
+    // Hyperlinks state (FR-20)
+    show_link_dialog: bool,
+    link_type_idx: usize,
+    link_url: String,
+    link_target_page: usize,
+    link_border_width: f64,
+    link_rect: [f64; 4],
+
+    // Interactive Form Creation state (FR-11.1)
+    show_add_form_field_dialog: bool,
+    form_field_type_idx: usize,
+    form_field_name: String,
+    form_field_value: String,
+    form_field_options_csv: String,
+    form_field_rect: [f64; 4],
 }
 
 impl Default for RavPdfApp {
@@ -221,6 +282,48 @@ impl Default for RavPdfApp {
             search_query: String::new(),
             search_results: Vec::new(),
             current_search_idx: 0,
+
+            search_replace_mode: false,
+            search_replace_text: String::new(),
+            search_case_sensitive: false,
+            search_whole_word: false,
+            search_is_regex: false,
+
+            show_crop_dialog: false,
+            crop_target_page: 0,
+            crop_left: 0.0,
+            crop_bottom: 0.0,
+            crop_right: 612.0,
+            crop_top: 792.0,
+            crop_all_pages: false,
+
+            show_add_signature_dialog: false,
+            sig_target_page: 0,
+            sig_field_name: "Signature1".into(),
+            sig_signer_name: "Authorized Signer".into(),
+            sig_reason: "Document Approved".into(),
+            sig_location: "Headquarters".into(),
+            sig_is_visible: true,
+
+            show_page_labels_dialog: false,
+            page_labels_start_page: 1,
+            page_labels_style_idx: 0,
+            page_labels_prefix: String::new(),
+            page_labels_start_num: 1,
+
+            show_link_dialog: false,
+            link_type_idx: 0,
+            link_url: "https://".into(),
+            link_target_page: 1,
+            link_border_width: 0.0,
+            link_rect: [72.0, 700.0, 200.0, 720.0],
+
+            show_add_form_field_dialog: false,
+            form_field_type_idx: 0,
+            form_field_name: "FieldName1".into(),
+            form_field_value: String::new(),
+            form_field_options_csv: "Option 1, Option 2, Option 3".into(),
+            form_field_rect: [72.0, 650.0, 220.0, 672.0],
 
             show_watermark_dialog: false,
             watermark_text: "CONFIDENTIAL".into(),
@@ -564,7 +667,12 @@ impl RavPdfApp {
 
         if let Some(tab) = self.active_tab() {
             if !self.search_query.trim().is_empty() {
-                if let Ok(matches) = search_document(&tab.doc, &self.search_query, false, false) {
+                if let Ok(matches) = search_document(
+                    &tab.doc,
+                    &self.search_query,
+                    self.search_is_regex,
+                    self.search_case_sensitive,
+                ) {
                     self.search_results = matches;
                     if let Some(first) = self.search_results.first() {
                         let page_idx = first.page_index;
@@ -573,6 +681,47 @@ impl RavPdfApp {
                             t.page_input_buffer = (page_idx + 1).to_string();
                             t.invalidate_render();
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Opens file dialog to insert an image onto the current page (FR-05.1).
+    fn insert_image_dialog(&mut self) {
+        if let Some(tab) = self.active_tab_mut() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "gif", "webp"])
+                .pick_file()
+            {
+                let curr = tab.current_page;
+                let (page_w, page_h) = if let Some(p) = tab.doc.get_page(curr) {
+                    (
+                        (p.media_box[2] - p.media_box[0]).abs(),
+                        (p.media_box[3] - p.media_box[1]).abs(),
+                    )
+                } else {
+                    (612.0, 792.0)
+                };
+
+                let img_w = 200.0;
+                let img_h = 200.0;
+                let x = (page_w - img_w) * 0.5;
+                let y = (page_h - img_h) * 0.5;
+
+                match insert_image_file(&mut tab.doc, curr, &path, x, y, img_w, img_h) {
+                    Ok(()) => {
+                        tab.is_modified = true;
+                        tab.invalidate_render();
+                        let fname = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("image");
+                        self.status_message =
+                            format!("Inserted image '{}' onto page {}", fname, curr + 1);
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Failed to insert image: {}", e);
                     }
                 }
             }
@@ -617,6 +766,13 @@ impl RavPdfApp {
             // Find (Ctrl+F)
             if i.modifiers.ctrl && i.key_pressed(Key::F) && has_doc {
                 self.search_bar_open = !self.search_bar_open;
+                self.search_replace_mode = false;
+            }
+
+            // Find & Replace (Ctrl+H) (FR-04.8)
+            if i.modifiers.ctrl && i.key_pressed(Key::H) && has_doc {
+                self.search_bar_open = true;
+                self.search_replace_mode = true;
             }
 
             // Document Properties (Ctrl+D)
@@ -845,6 +1001,23 @@ impl RavPdfApp {
                         .clicked()
                     {
                         self.search_bar_open = true;
+                        self.search_replace_mode = false;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Find & Replace... (Ctrl+H) (FR-04.8)"))
+                        .clicked()
+                    {
+                        self.search_bar_open = true;
+                        self.search_replace_mode = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_doc, Button::new("Insert Image File... (FR-05.1)"))
+                        .clicked()
+                    {
+                        self.insert_image_dialog();
                         ui.close_menu();
                     }
                     ui.separator();
@@ -869,6 +1042,39 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
+                        .add_enabled(has_doc, Button::new("Duplicate Current Page (FR-06.11)"))
+                        .clicked()
+                    {
+                        if let Some(tab) = self.active_tab_mut() {
+                            let curr = tab.current_page;
+                            if let Ok(_new_id) = duplicate_page(&mut tab.doc, curr) {
+                                tab.current_page += 1;
+                                tab.page_input_buffer = (tab.current_page + 1).to_string();
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                self.status_message = format!("Duplicated page {}", curr + 1);
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Crop Page... (FR-06.8)"))
+                        .clicked()
+                    {
+                        if let Some((page, crop)) = self.active_tab().and_then(|tab| {
+                            let p = tab.doc.get_page(tab.current_page)?;
+                            Some((tab.current_page, p.crop_box))
+                        }) {
+                            self.crop_target_page = page;
+                            self.crop_left = crop[0];
+                            self.crop_bottom = crop[1];
+                            self.crop_right = crop[2];
+                            self.crop_top = crop[3];
+                        }
+                        self.show_crop_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
                         .add_enabled(has_doc, Button::new("Delete Current Page"))
                         .clicked()
                     {
@@ -884,6 +1090,33 @@ impl RavPdfApp {
                                 self.status_message = "Deleted current page".into();
                             }
                         }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Page Numbering & Labels... (FR-06.9)"))
+                        .clicked()
+                    {
+                        if let Some(tab) = self.active_tab() {
+                            self.page_labels_start_page = tab.current_page + 1;
+                        }
+                        self.show_page_labels_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Add Hyperlink... (FR-20.1)"))
+                        .clicked()
+                    {
+                        if let Some(tab) = self.active_tab() {
+                            self.link_target_page = (tab.current_page + 2).min(tab.doc.page_count());
+                        }
+                        self.show_link_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Add Form Field... (FR-11.1)"))
+                        .clicked()
+                    {
+                        self.show_add_form_field_dialog = true;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -1044,6 +1277,14 @@ impl RavPdfApp {
                         self.show_preflight_dialog = true;
                         ui.close_menu();
                     }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Digital Signatures & Certificates... (FR-13)"))
+                        .clicked()
+                    {
+                        self.sidebar_tab = SidebarTab::Signatures;
+                        self.sidebar_open = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Action Wizard (Batch Processing)... (FR-30)").clicked() {
                         self.show_batch_dialog = true;
                         ui.close_menu();
@@ -1109,8 +1350,9 @@ impl RavPdfApp {
                     }
                 }
 
-                // Go to page quick input box (FR-01.2.6)
+                // Go to page quick input box (FR-01.2.6) with Page Label support (FR-06.9)
                 if has_doc {
+                    let page_label_opt = self.active_tab().map(|t| get_page_label(&t.doc, current_page));
                     ui.label("Page");
                     if let Some(tab) = self.active_tab_mut() {
                         let text_edit = ui.add(
@@ -1128,7 +1370,15 @@ impl RavPdfApp {
                             }
                         }
                     }
-                    ui.label(format!("of {}", total_pages));
+                    if let Some(lbl) = page_label_opt {
+                        if lbl != (current_page + 1).to_string() {
+                            ui.label(format!("(\"{}\") of {}", lbl, total_pages));
+                        } else {
+                            ui.label(format!("of {}", total_pages));
+                        }
+                    } else {
+                        ui.label(format!("of {}", total_pages));
+                    }
                 } else {
                     ui.label("Page 0 of 0");
                 }
@@ -1194,14 +1444,26 @@ impl RavPdfApp {
 
                 ui.separator();
 
-                // Find in document trigger
+                // Find & Replace in document triggers (FR-34.1, FR-04.8)
                 if ui.add_enabled(has_doc, Button::new("🔍 Find")).clicked() {
                     self.search_bar_open = !self.search_bar_open;
+                    self.search_replace_mode = false;
+                }
+                if ui.add_enabled(has_doc, Button::new("🔍✏ Replace")).clicked() {
+                    self.search_bar_open = true;
+                    self.search_replace_mode = true;
+                }
+                if ui
+                    .add_enabled(has_doc, Button::new("🖼 Image"))
+                    .on_hover_text("Insert image onto page (FR-05.1)")
+                    .clicked()
+                {
+                    self.insert_image_dialog();
                 }
 
                 ui.separator();
 
-                // Tool Selector Buttons (FR-08, FR-09)
+                // Tool Selector Buttons (FR-08, FR-09, FR-20)
                 ui.add_enabled_ui(has_doc, |ui| {
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Select, "Select");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Hand, "Pan");
@@ -1209,6 +1471,7 @@ impl RavPdfApp {
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Highlight, "Highlight");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Rectangle, "Shape");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Text, "Text");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Link, "🔗 Link");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Redact, "Redact");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::MeasureDistance, "📏 Distance");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::MeasureArea, "📐 Area");
@@ -1217,7 +1480,7 @@ impl RavPdfApp {
         });
     }
 
-    /// Renders search bar panel (FR-34.1).
+    /// Renders search and replace bar panel (FR-34.1, FR-04.8).
     fn render_search_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("search_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1265,6 +1528,9 @@ impl RavPdfApp {
                     ui.weak("(No matches)");
                 }
 
+                ui.separator();
+                ui.checkbox(&mut self.search_replace_mode, "Replace Mode");
+
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("✕ Close").clicked() {
                         self.search_bar_open = false;
@@ -1272,6 +1538,81 @@ impl RavPdfApp {
                     }
                 });
             });
+
+            if self.search_replace_mode {
+                ui.horizontal(|ui| {
+                    ui.label("✏ Replace:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.search_replace_text)
+                            .desired_width(180.0)
+                            .hint_text("Replacement text..."),
+                    );
+
+                    ui.checkbox(&mut self.search_case_sensitive, "Match Case");
+                    ui.checkbox(&mut self.search_whole_word, "Whole Word");
+                    ui.checkbox(&mut self.search_is_regex, "Regex");
+
+                    let query = self.search_query.clone();
+                    let replacement = self.search_replace_text.clone();
+                    let case_sens = self.search_case_sensitive;
+                    let whole_word = self.search_whole_word;
+                    let is_regex = self.search_is_regex;
+
+                    if ui.button("Replace Page").clicked() && !query.is_empty() {
+                        let mut msg = None;
+                        if let Some(tab) = self.active_tab_mut() {
+                            let curr = tab.current_page;
+                            match find_and_replace_page(
+                                &mut tab.doc,
+                                curr,
+                                &query,
+                                &replacement,
+                                case_sens,
+                                whole_word,
+                                is_regex,
+                            ) {
+                                Ok(count) => {
+                                    tab.is_modified = true;
+                                    tab.invalidate_render();
+                                    msg = Some(format!("Replaced {} occurrences on page {}", count, curr + 1));
+                                }
+                                Err(e) => {
+                                    msg = Some(format!("Replace failed: {}", e));
+                                }
+                            }
+                        }
+                        if let Some(m) = msg {
+                            self.status_message = m;
+                        }
+                    }
+
+                    if ui.button("Replace All").clicked() && !query.is_empty() {
+                        let mut msg = None;
+                        if let Some(tab) = self.active_tab_mut() {
+                            match find_and_replace(
+                                &mut tab.doc,
+                                &query,
+                                &replacement,
+                                case_sens,
+                                whole_word,
+                                is_regex,
+                            ) {
+                                Ok(count) => {
+                                    tab.is_modified = true;
+                                    tab.invalidate_render();
+                                    msg = Some(format!("Replaced {} occurrences across document", count));
+                                }
+                                Err(e) => {
+                                    msg = Some(format!("Replace all failed: {}", e));
+                                }
+                            }
+                        }
+                        if let Some(m) = msg {
+                            self.status_message = m;
+                        }
+                    }
+                });
+            }
         });
     }
 
@@ -1285,11 +1626,13 @@ impl RavPdfApp {
             .default_width(240.0)
             .min_width(200.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Thumbnails, "Pages");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Bookmarks, "Outline");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Annotations, "Notes");
+                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Forms, "Forms");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Attachments, "Files");
+                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Signatures, "Sign");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Properties, "Info");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Search, "Results");
                 });
@@ -1332,6 +1675,16 @@ impl RavPdfApp {
                                         tab.invalidate_render();
                                         self.status_message = format!("Inserted blank page {}", total + 1);
                                     }
+                                }
+                                if ui
+                                    .button("🏷 Labels")
+                                    .on_hover_text("Configure page numbering schemes (FR-06.9)")
+                                    .clicked()
+                                {
+                                    if let Some(tab) = self.active_tab() {
+                                        self.page_labels_start_page = tab.current_page + 1;
+                                    }
+                                    self.show_page_labels_dialog = true;
                                 }
                             });
                         });
@@ -1393,8 +1746,13 @@ impl RavPdfApp {
 
                                             ui.add_space(3.0);
                                             ui.horizontal(|ui| {
+                                                let lbl = if let Some(tab) = self.active_tab() {
+                                                    get_page_label(&tab.doc, i)
+                                                } else {
+                                                    (i + 1).to_string()
+                                                };
                                                 ui.label(
-                                                    RichText::new(format!("{}", i + 1))
+                                                    RichText::new(lbl)
                                                         .size(11.0)
                                                         .strong(),
                                                 );
@@ -1427,6 +1785,20 @@ impl RavPdfApp {
                                                     .clicked()
                                                 {
                                                     page_action = Some(PageAction::Extract(i));
+                                                }
+                                                if ui
+                                                    .small_button("📋")
+                                                    .on_hover_text("Duplicate page (FR-06.11)")
+                                                    .clicked()
+                                                {
+                                                    page_action = Some(PageAction::Duplicate(i));
+                                                }
+                                                if ui
+                                                    .small_button("✂")
+                                                    .on_hover_text("Crop page (FR-06.8)")
+                                                    .clicked()
+                                                {
+                                                    page_action = Some(PageAction::Crop(i));
                                                 }
                                                 if total_pages > 1
                                                     && ui
@@ -1535,6 +1907,29 @@ impl RavPdfApp {
                                         self.status_message =
                                             format!("Extracted page {} into new tab", idx + 1);
                                     }
+                                }
+                                PageAction::Duplicate(idx) => {
+                                    if let Some(tab) = self.active_tab_mut() {
+                                        if let Ok(_new_id) = duplicate_page(&mut tab.doc, idx) {
+                                            tab.current_page = idx + 1;
+                                            tab.page_input_buffer = (idx + 2).to_string();
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = format!("Duplicated page {} into page {}", idx + 1, idx + 2);
+                                        }
+                                    }
+                                }
+                                PageAction::Crop(idx) => {
+                                    self.crop_target_page = idx;
+                                    if let Some(tab) = self.active_tab() {
+                                        if let Some(p) = tab.doc.get_page(idx) {
+                                            self.crop_left = p.crop_box[0];
+                                            self.crop_bottom = p.crop_box[1];
+                                            self.crop_right = p.crop_box[2];
+                                            self.crop_top = p.crop_box[3];
+                                        }
+                                    }
+                                    self.show_crop_dialog = true;
                                 }
                             }
                         }
@@ -1758,6 +2153,175 @@ impl RavPdfApp {
                         }
                     }
 
+                    SidebarTab::Signatures => {
+                        ui.heading("Digital Signatures (FR-13)");
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            if ui.button("➕ Sign Document...").on_hover_text("Add digital signature field (FR-13.1, FR-13.10)").clicked() {
+                                if let Some(tab) = self.active_tab() {
+                                    self.sig_target_page = tab.current_page;
+                                }
+                                self.show_add_signature_dialog = true;
+                            }
+                        });
+
+                        ui.separator();
+
+                        let signatures = self.active_tab().and_then(|tab| get_document_signatures(&tab.doc, None).ok()).unwrap_or_default();
+                        if signatures.is_empty() {
+                            ui.weak("(No digital signatures detected in this document)");
+                        } else {
+                            let mut jump_page = None;
+                            ScrollArea::vertical().show(ui, |ui| {
+                                for sig in &signatures {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            let icon = match &sig.status {
+                                                SignatureStatus::Valid(_) => RichText::new("✔").color(Color32::from_rgb(46, 204, 113)).strong(),
+                                                SignatureStatus::Invalid(_) => RichText::new("✖").color(Color32::from_rgb(231, 76, 60)).strong(),
+                                                SignatureStatus::Indeterminate(_) => RichText::new("❓").color(Color32::from_rgb(241, 196, 15)).strong(),
+                                            };
+                                            ui.label(icon);
+                                            ui.label(RichText::new(&sig.field_name).strong());
+                                        });
+
+                                        if let Some(ref name) = sig.signer_name {
+                                            ui.label(format!("Signer: {}", name));
+                                        }
+                                        if let Some(ref reason) = sig.reason {
+                                            ui.weak(format!("Reason: {}", reason));
+                                        }
+                                        if let Some(ref loc) = sig.location {
+                                            ui.weak(format!("Location: {}", loc));
+                                        }
+                                        if let Some(ref date) = sig.signing_time {
+                                            ui.weak(format!("Date: {}", date));
+                                        }
+
+                                        match &sig.status {
+                                            SignatureStatus::Valid(msg) => {
+                                                ui.label(RichText::new(format!("Status: Valid ({})", msg)).color(Color32::from_rgb(46, 204, 113)).size(11.0));
+                                            }
+                                            SignatureStatus::Invalid(msg) => {
+                                                ui.label(RichText::new(format!("Status: Invalid ({})", msg)).color(Color32::from_rgb(231, 76, 60)).size(11.0));
+                                            }
+                                            SignatureStatus::Indeterminate(msg) => {
+                                                ui.label(RichText::new(format!("Status: Unverified ({})", msg)).color(Color32::from_rgb(241, 196, 15)).size(11.0));
+                                            }
+                                        }
+
+                                        if let Some(p_idx) = sig.page_index {
+                                            if sig.is_visible
+                                                && ui.small_button(format!("Go to page {}", p_idx + 1)).clicked()
+                                            {
+                                                jump_page = Some(p_idx);
+                                            }
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                }
+                            });
+
+                            if let Some(p) = jump_page {
+                                if let Some(tab) = self.active_tab_mut() {
+                                    tab.current_page = p;
+                                    tab.page_input_buffer = (p + 1).to_string();
+                                    tab.invalidate_render();
+                                }
+                            }
+                        }
+                    }
+
+                    SidebarTab::Forms => {
+                        ui.horizontal(|ui| {
+                            ui.heading("Form Fields");
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui
+                                    .button("➕ Add")
+                                    .on_hover_text("Add interactive form field (FR-11.1)")
+                                    .clicked()
+                                {
+                                    self.show_add_form_field_dialog = true;
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+
+                        let mut flatten = false;
+
+                        if let Some(tab) = self.active_tab() {
+                            let fields = get_form_fields(&tab.doc).unwrap_or_default();
+                            if fields.is_empty() {
+                                ui.add_space(20.0);
+                                ui.weak("No interactive form fields in document.");
+                                ui.add_space(10.0);
+                                if ui.button("➕ Add Interactive Field").clicked() {
+                                    self.show_add_form_field_dialog = true;
+                                }
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("{} fields", fields.len())).strong());
+                                    if ui
+                                        .button("Flatten All")
+                                        .on_hover_text("Permanently burn form fields into content (FR-11.6)")
+                                        .clicked()
+                                    {
+                                        flatten = true;
+                                    }
+                                });
+                                ui.separator();
+
+                                ScrollArea::vertical().show(ui, |ui| {
+                                    for f in &fields {
+                                        egui::Frame::none()
+                                            .fill(Color32::from_rgb(25, 30, 40))
+                                            .stroke(Stroke::new(1.0_f32, Color32::from_gray(60)))
+                                            .rounding(4.0)
+                                            .inner_margin(egui::Margin::same(6.0))
+                                            .show(ui, |ui| {
+                                                let type_str = match f.field_type {
+                                                    FormFieldType::Text => "📝 Text",
+                                                    FormFieldType::Checkbox => "☑ Checkbox",
+                                                    FormFieldType::Choice => "▾ Choice",
+                                                    FormFieldType::PushButton => "🔘 Button",
+                                                    FormFieldType::Signature => "🔏 Signature",
+                                                };
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new(type_str)
+                                                            .color(Color32::from_rgb(66, 153, 225))
+                                                            .size(11.0),
+                                                    );
+                                                    ui.label(RichText::new(&f.name).strong());
+                                                });
+                                                if let Some(ref val) = f.value {
+                                                    ui.label(RichText::new(format!("Value: {}", val)).size(11.0).weak());
+                                                }
+                                                if !f.options.is_empty() {
+                                                    ui.label(
+                                                        RichText::new(format!("Options: {}", f.options.join(", ")))
+                                                            .size(10.0)
+                                                            .weak(),
+                                                    );
+                                                }
+                                            });
+                                        ui.add_space(4.0);
+                                    }
+                                });
+                            }
+                        }
+
+                        if flatten {
+                            if let Some(tab) = self.active_tab_mut() {
+                                let _ = flatten_form(&mut tab.doc);
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                self.status_message = "All form fields flattened to page content".into();
+                            }
+                        }
+                    }
+
                     SidebarTab::Search => {
                         ui.label(format!("Search Results ({}):", self.search_results.len()));
                         let mut clicked_match = None;
@@ -1974,9 +2538,102 @@ impl RavPdfApp {
                                                 },
                                             );
                                         }
+                                        FormFieldType::Choice => {
+                                            let mut selected = field.value.clone().unwrap_or_default();
+                                            ui.allocate_new_ui(
+                                                egui::UiBuilder::new().max_rect(field_rect),
+                                                |ui| {
+                                                    egui::Frame::none()
+                                                        .fill(Color32::from_rgba_unmultiplied(240, 245, 255, 220))
+                                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 153, 225)))
+                                                        .show(ui, |ui| {
+                                                            egui::ComboBox::from_id_salt(format!("choice_{}_{}", field_id.number, field_id.generation))
+                                                                .selected_text(&selected)
+                                                                .show_ui(ui, |ui| {
+                                                                    for opt in &field.options {
+                                                                        if ui.selectable_value(&mut selected, opt.clone(), opt).clicked() {
+                                                                            field_updates.push((field_id, opt.clone()));
+                                                                        }
+                                                                    }
+                                                                });
+                                                        });
+                                                },
+                                            );
+                                        }
+                                        FormFieldType::PushButton => {
+                                            let label = field.value.as_deref().unwrap_or(&field.name);
+                                            ui.allocate_new_ui(
+                                                egui::UiBuilder::new().max_rect(field_rect),
+                                                |ui| {
+                                                    if ui.add_sized(field_rect.size(), egui::Button::new(label)).clicked() {
+                                                        // Push button clicked feedback
+                                                    }
+                                                },
+                                            );
+                                        }
                                         _ => {}
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // 3b. Interactive Hyperlinks Overlay (FR-20.1, FR-20.2)
+                    let mut jump_target_page: Option<usize> = None;
+                    if let Some(tab) = self.active_tab() {
+                        if let Ok(annots) = get_page_annotations(&tab.doc, current_page) {
+                            for annot in annots {
+                                if let AnnotationType::Link { ref action, border_width, .. } = annot.annot_type {
+                                    let x_min = rect.min.x + (annot.rect[0] as f32) * zoom;
+                                    let x_max = rect.min.x + (annot.rect[2] as f32) * zoom;
+                                    let y_min = rect.min.y + (page_h - annot.rect[3] as f32) * zoom;
+                                    let y_max = rect.min.y + (page_h - annot.rect[1] as f32) * zoom;
+                                    let link_rect = Rect::from_min_max(Pos2::new(x_min, y_min), Pos2::new(x_max, y_max));
+
+                                    if border_width > 0.0 {
+                                        ui.painter().rect_stroke(
+                                            link_rect,
+                                            0.0,
+                                            Stroke::new((border_width as f32 * zoom).max(1.0), Color32::from_rgb(0, 102, 204)),
+                                        );
+                                    }
+
+                                    let mut resp = ui.allocate_rect(link_rect, egui::Sense::click());
+                                    match action {
+                                        LinkAction::Uri(ref u) => {
+                                            resp = resp.on_hover_ui(|ui| {
+                                                ui.label(format!("🔗 Open: {}", u));
+                                            });
+                                            if resp.clicked() {
+                                                ctx.open_url(egui::OpenUrl::same_tab(u));
+                                            }
+                                        }
+                                        LinkAction::GoToPage(tp) => {
+                                            let target = *tp;
+                                            resp = resp.on_hover_ui(|ui| {
+                                                ui.label(format!("➔ Jump to Page {}", target + 1));
+                                            });
+                                            if resp.clicked() {
+                                                jump_target_page = Some(target);
+                                            }
+                                        }
+                                        LinkAction::Named(ref n) => {
+                                            resp.on_hover_ui(|ui| {
+                                                ui.label(format!("➔ Destination: {}", n));
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(target) = jump_target_page {
+                        if let Some(tab) = self.active_tab_mut() {
+                            if target < tab.doc.page_count() {
+                                tab.current_page = target;
+                                tab.page_input_buffer = (target + 1).to_string();
+                                tab.invalidate_render();
                             }
                         }
                     }
@@ -2085,6 +2742,13 @@ impl RavPdfApp {
                                 ui.painter().rect_filled(Rect::from_center_size(center, Vec2::new(140.0, 20.0)), 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
                                 ui.painter().text(center, Align2::CENTER_CENTER, text, FontId::proportional(11.0), Color32::WHITE);
                             }
+                            ActiveTool::Link => {
+                                let blue = Color32::from_rgb(0, 102, 204);
+                                ui.painter().rect_filled(drag_rect, 0.0, Color32::from_rgba_unmultiplied(0, 102, 204, 40));
+                                ui.painter().rect_stroke(drag_rect, 0.0, Stroke::new(1.5_f32, blue));
+                                let center = drag_rect.center();
+                                ui.painter().text(center, Align2::CENTER_CENTER, "🔗 Link Hotspot", FontId::proportional(12.0), blue);
+                            }
                             _ => {}
                         }
                     }
@@ -2124,6 +2788,13 @@ impl RavPdfApp {
                                             tab.invalidate_render();
                                             self.status_message = "Added rectangle shape".into();
                                         }
+                                    }
+                                    ActiveTool::Link => {
+                                        self.link_rect = pdf_rect;
+                                        let current_page = self.active_tab().map(|t| t.current_page).unwrap_or(0);
+                                        let total_pages = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(1);
+                                        self.link_target_page = (current_page + 2).min(total_pages);
+                                        self.show_link_dialog = true;
                                     }
                                     ActiveTool::Redact => {
                                         if let Some(tab) = self.active_tab_mut() {
@@ -3358,6 +4029,530 @@ impl RavPdfApp {
             }
             if close {
                 self.show_batch_dialog = false;
+            }
+        }
+
+        // Crop Page Dialog (FR-06.8)
+        if self.show_crop_dialog {
+            let mut close = false;
+            let mut apply = false;
+            egui::Window::new(format!("Crop Page {} (FR-06.8)", self.crop_target_page + 1))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Specify new CropBox boundary coordinates (points):");
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Left (X1):");
+                        ui.add(egui::DragValue::new(&mut self.crop_left).speed(1.0));
+                        ui.label("Right (X2):");
+                        ui.add(egui::DragValue::new(&mut self.crop_right).speed(1.0));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Bottom (Y1):");
+                        ui.add(egui::DragValue::new(&mut self.crop_bottom).speed(1.0));
+                        ui.label("Top (Y2):");
+                        ui.add(egui::DragValue::new(&mut self.crop_top).speed(1.0));
+                    });
+
+                    let width = (self.crop_right - self.crop_left).abs();
+                    let height = (self.crop_top - self.crop_bottom).abs();
+                    ui.weak(format!("Resulting dimensions: {:.1} × {:.1} pt ({:.2} × {:.2} in)", width, height, width / 72.0, height / 72.0));
+
+                    ui.checkbox(&mut self.crop_all_pages, "Apply crop to all pages in document");
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("✂ Apply Crop").clicked() {
+                            apply = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if apply {
+                let crop_box = [self.crop_left, self.crop_bottom, self.crop_right, self.crop_top];
+                let all_pages = self.crop_all_pages;
+                let target_page = self.crop_target_page;
+                let mut msg = String::new();
+
+                if let Some(tab) = self.active_tab_mut() {
+                    if all_pages {
+                        let total = tab.doc.page_count();
+                        for i in 0..total {
+                            let _ = crop_page(&mut tab.doc, i, crop_box);
+                        }
+                        msg = format!("Cropped all {} pages", total);
+                    } else {
+                        let _ = crop_page(&mut tab.doc, target_page, crop_box);
+                        msg = format!("Cropped page {}", target_page + 1);
+                    }
+                    tab.is_modified = true;
+                    tab.invalidate_render();
+                }
+
+                if !msg.is_empty() {
+                    self.status_message = msg;
+                }
+            }
+
+            if close {
+                self.show_crop_dialog = false;
+            }
+        }
+
+        // Digital Signature Placement Dialog (FR-13.1, FR-13.10)
+        if self.show_add_signature_dialog {
+            let mut close = false;
+            let mut create_sig = false;
+            egui::Window::new("Add Digital Signature Field (FR-13.1)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Field Name:");
+                        ui.text_edit_singleline(&mut self.sig_field_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Signer Name:");
+                        ui.text_edit_singleline(&mut self.sig_signer_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Reason:");
+                        ui.text_edit_singleline(&mut self.sig_reason);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Location:");
+                        ui.text_edit_singleline(&mut self.sig_location);
+                    });
+                    ui.checkbox(&mut self.sig_is_visible, "Visible Signature Appearance Box (FR-13.10)");
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("🔏 Sign & Place Field").clicked() {
+                            create_sig = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if create_sig {
+                let target_page = self.sig_target_page;
+                let field_name = self.sig_field_name.clone();
+                let signer = self.sig_signer_name.clone();
+                let reason = self.sig_reason.clone();
+                let location = self.sig_location.clone();
+                let is_visible = self.sig_is_visible;
+                let mut status = None;
+
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = target_page.min(tab.doc.page_count().saturating_sub(1));
+                    let rect = if is_visible {
+                        Some([72.0, 72.0, 260.0, 130.0])
+                    } else {
+                        None
+                    };
+
+                    match create_signature_field(
+                        &mut tab.doc,
+                        curr,
+                        &field_name,
+                        &signer,
+                        &reason,
+                        &location,
+                        rect,
+                    ) {
+                        Ok(_) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            status = Some((
+                                format!("Created digital signature field '{}' on page {}", field_name, curr + 1),
+                                true,
+                            ));
+                        }
+                        Err(e) => {
+                            status = Some((format!("Failed to create signature: {}", e), false));
+                        }
+                    }
+                }
+
+                if let Some((msg, success)) = status {
+                    self.status_message = msg;
+                    if success {
+                        self.sidebar_tab = SidebarTab::Signatures;
+                        self.sidebar_open = true;
+                    }
+                }
+            }
+
+            if close {
+                self.show_add_signature_dialog = false;
+            }
+        }
+
+        // Page Numbering & Labels Dialog (FR-06.9)
+        if self.show_page_labels_dialog {
+            let mut close = false;
+            let mut apply = false;
+            let mut clear = false;
+            egui::Window::new("Page Numbering & Labels (FR-06.9)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Configure ISO 32000-1 Section 8.3.1 page numbering schemes:");
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Starting at page:");
+                        ui.add(egui::DragValue::new(&mut self.page_labels_start_page).range(1..=9999));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Numbering Style:");
+                        egui::ComboBox::from_id_salt("page_label_style_combo")
+                            .selected_text(match self.page_labels_style_idx {
+                                0 => "1, 2, 3, ... (Decimal)",
+                                1 => "i, ii, iii, ... (Lowercase Roman)",
+                                2 => "I, II, III, ... (Uppercase Roman)",
+                                3 => "a, b, c, ... (Lowercase Letters)",
+                                4 => "A, B, C, ... (Uppercase Letters)",
+                                _ => "None (Prefix only)",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.page_labels_style_idx, 0, "1, 2, 3, ... (Decimal)");
+                                ui.selectable_value(&mut self.page_labels_style_idx, 1, "i, ii, iii, ... (Lowercase Roman)");
+                                ui.selectable_value(&mut self.page_labels_style_idx, 2, "I, II, III, ... (Uppercase Roman)");
+                                ui.selectable_value(&mut self.page_labels_style_idx, 3, "a, b, c, ... (Lowercase Letters)");
+                                ui.selectable_value(&mut self.page_labels_style_idx, 4, "A, B, C, ... (Uppercase Letters)");
+                                ui.selectable_value(&mut self.page_labels_style_idx, 5, "None (Prefix only)");
+                            });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Prefix:");
+                        ui.text_edit_singleline(&mut self.page_labels_prefix);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Start numbering at:");
+                        ui.add(egui::DragValue::new(&mut self.page_labels_start_num).range(1..=9999));
+                    });
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("✓ Apply Labels").clicked() {
+                            apply = true;
+                            close = true;
+                        }
+                        if ui.button("🗑 Reset to Default").clicked() {
+                            clear = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if apply {
+                let start_idx = self.page_labels_start_page.saturating_sub(1);
+                let style = match self.page_labels_style_idx {
+                    0 => Some(PageLabelStyle::Decimal),
+                    1 => Some(PageLabelStyle::LowercaseRoman),
+                    2 => Some(PageLabelStyle::UppercaseRoman),
+                    3 => Some(PageLabelStyle::LowercaseLetters),
+                    4 => Some(PageLabelStyle::UppercaseLetters),
+                    _ => None,
+                };
+                let prefix = if self.page_labels_prefix.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.page_labels_prefix.trim().to_string())
+                };
+                let start_num = self.page_labels_start_num.max(1);
+
+                let mut range = PageLabelRange::new(start_idx, style).with_start_number(start_num);
+                if let Some(p) = prefix {
+                    range = range.with_prefix(p);
+                }
+
+                let mut msg = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    let mut existing = get_page_labels(&tab.doc).unwrap_or_default();
+                    existing.retain(|r| r.start_page_index != start_idx);
+                    existing.push(range);
+                    existing.sort_by_key(|r| r.start_page_index);
+
+                    match set_page_labels(&mut tab.doc, &existing) {
+                        Ok(_) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            msg = Some("Page labeling scheme applied".into());
+                        }
+                        Err(e) => {
+                            msg = Some(format!("Failed to set page labels: {}", e));
+                        }
+                    }
+                }
+                if let Some(m) = msg {
+                    self.status_message = m;
+                }
+            }
+
+            if clear {
+                if let Some(tab) = self.active_tab_mut() {
+                    let _ = set_page_labels(&mut tab.doc, &[]);
+                    tab.is_modified = true;
+                    tab.invalidate_render();
+                    self.status_message = "Page labels reset to standard numbers".into();
+                }
+            }
+
+            if close {
+                self.show_page_labels_dialog = false;
+            }
+        }
+
+        // Add Hyperlink Dialog (FR-20.1)
+        if self.show_link_dialog {
+            let mut close = false;
+            let mut insert = false;
+            egui::Window::new("Add Hyperlink (FR-20.1)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Link Action:");
+                        ui.selectable_value(&mut self.link_type_idx, 0, "External Web URL");
+                        ui.selectable_value(&mut self.link_type_idx, 1, "Go to Page");
+                    });
+
+                    if self.link_type_idx == 0 {
+                        ui.horizontal(|ui| {
+                            ui.label("Web URL:");
+                            ui.text_edit_singleline(&mut self.link_url);
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("Target Page:");
+                            ui.add(egui::DragValue::new(&mut self.link_target_page).range(1..=9999));
+                        });
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.label("Border Width (0 = invisible hotspot):");
+                        ui.add(egui::DragValue::new(&mut self.link_border_width).range(0.0..=5.0).speed(0.5));
+                    });
+
+                    ui.weak(format!("Region: [{:.1}, {:.1}, {:.1}, {:.1}] pt", self.link_rect[0], self.link_rect[1], self.link_rect[2], self.link_rect[3]));
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("🔗 Insert Link").clicked() {
+                            insert = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if insert {
+                let rect = self.link_rect;
+                let border_width = self.link_border_width;
+                let is_url = self.link_type_idx == 0;
+                let url = self.link_url.trim().to_string();
+                let target_p = self.link_target_page.saturating_sub(1);
+
+                let annot = if is_url {
+                    let mut a = Annotation::new_link_uri(rect, url);
+                    if let AnnotationType::Link { border_width: ref mut bw, .. } = a.annot_type {
+                        *bw = border_width;
+                    }
+                    a
+                } else {
+                    let mut a = Annotation::new_link_goto(rect, target_p);
+                    if let AnnotationType::Link { border_width: ref mut bw, .. } = a.annot_type {
+                        *bw = border_width;
+                    }
+                    a
+                };
+
+                let mut msg = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    match add_annotation_to_page(&mut tab.doc, curr, &annot) {
+                        Ok(_) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            msg = Some("Hyperlink created successfully".into());
+                        }
+                        Err(e) => {
+                            msg = Some(format!("Failed to create link: {}", e));
+                        }
+                    }
+                }
+                if let Some(m) = msg {
+                    self.status_message = m;
+                }
+            }
+
+            if close {
+                self.show_link_dialog = false;
+            }
+        }
+
+        // Add Form Field Dialog (FR-11.1)
+        if self.show_add_form_field_dialog {
+            let mut close = false;
+            let mut create_field = false;
+            egui::Window::new("Add Interactive Form Field (FR-11.1)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Field Type:");
+                        egui::ComboBox::from_id_salt("form_field_type_combo")
+                            .selected_text(match self.form_field_type_idx {
+                                0 => "📝 Text Field (Tx)",
+                                1 => "☑ Checkbox (Btn)",
+                                2 => "▾ Dropdown Choice (Ch)",
+                                _ => "🔘 Push Button (Btn)",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.form_field_type_idx, 0, "📝 Text Field (Tx)");
+                                ui.selectable_value(&mut self.form_field_type_idx, 1, "☑ Checkbox (Btn)");
+                                ui.selectable_value(&mut self.form_field_type_idx, 2, "▾ Dropdown Choice (Ch)");
+                                ui.selectable_value(&mut self.form_field_type_idx, 3, "🔘 Push Button (Btn)");
+                            });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Field Name:");
+                        ui.text_edit_singleline(&mut self.form_field_name);
+                    });
+
+                    match self.form_field_type_idx {
+                        0 => {
+                            ui.horizontal(|ui| {
+                                ui.label("Default Text:");
+                                ui.text_edit_singleline(&mut self.form_field_value);
+                            });
+                        }
+                        1 => {
+                            let mut checked = self.form_field_value == "Yes";
+                            if ui.checkbox(&mut checked, "Checked by default").changed() {
+                                self.form_field_value = if checked { "Yes".into() } else { "Off".into() };
+                            }
+                        }
+                        2 => {
+                            ui.horizontal(|ui| {
+                                ui.label("Options (comma-separated):");
+                                ui.text_edit_singleline(&mut self.form_field_options_csv);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Default Selected:");
+                                ui.text_edit_singleline(&mut self.form_field_value);
+                            });
+                        }
+                        _ => {
+                            ui.horizontal(|ui| {
+                                ui.label("Button Label:");
+                                ui.text_edit_singleline(&mut self.form_field_value);
+                            });
+                        }
+                    }
+
+                    ui.add_space(4.0);
+                    ui.weak(format!("Dimensions: [{:.1}, {:.1}, {:.1}, {:.1}] pt", self.form_field_rect[0], self.form_field_rect[1], self.form_field_rect[2], self.form_field_rect[3]));
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("➕ Create Field").clicked() {
+                            create_field = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if create_field {
+                let rect = self.form_field_rect;
+                let name = self.form_field_name.trim().to_string();
+                let type_idx = self.form_field_type_idx;
+                let val_str = self.form_field_value.clone();
+                let opts_csv = self.form_field_options_csv.clone();
+
+                let field = match type_idx {
+                    0 => {
+                        let mut f = FormField::new_text(name, rect);
+                        if !val_str.is_empty() {
+                            f.value = Some(val_str);
+                        }
+                        f
+                    }
+                    1 => {
+                        let checked = val_str == "Yes";
+                        FormField::new_checkbox(name, rect, checked)
+                    }
+                    2 => {
+                        let opts: Vec<String> = opts_csv
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        let sel = if val_str.is_empty() {
+                            opts.first().cloned()
+                        } else {
+                            Some(val_str)
+                        };
+                        FormField::new_choice(name, rect, opts, sel)
+                    }
+                    _ => {
+                        let label = if val_str.is_empty() { "Button" } else { &val_str };
+                        FormField::new_pushbutton(name, rect, label)
+                    }
+                };
+
+                let mut msg = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    match add_form_field(&mut tab.doc, curr, &field) {
+                        Ok(_) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            msg = Some(format!("Created form field '{}' on page {}", field.name, curr + 1));
+                        }
+                        Err(e) => {
+                            msg = Some(format!("Failed to create form field: {}", e));
+                        }
+                    }
+                }
+                if let Some(m) = msg {
+                    self.status_message = m;
+                    self.sidebar_tab = SidebarTab::Forms;
+                    self.sidebar_open = true;
+                }
+            }
+
+            if close {
+                self.show_add_form_field_dialog = false;
             }
         }
     }

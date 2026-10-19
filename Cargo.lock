@@ -2506,6 +2506,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ravpdf-core",
+ "regex",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -2551,6 +2552,7 @@ dependencies = [
  "cipher",
  "md-5",
  "ravpdf-core",
+ "serde",
  "sha2",
  "thiserror 2.0.21",
  "tracing",

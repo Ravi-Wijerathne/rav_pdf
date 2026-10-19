@@ -12,6 +12,7 @@ pub enum FormFieldType {
     Text,
     Checkbox,
     Choice,
+    PushButton,
     Signature,
 }
 
@@ -19,7 +20,7 @@ impl FormFieldType {
     pub fn ft_name(&self) -> &'static str {
         match self {
             FormFieldType::Text => "Tx",
-            FormFieldType::Checkbox => "Btn",
+            FormFieldType::Checkbox | FormFieldType::PushButton => "Btn",
             FormFieldType::Choice => "Ch",
             FormFieldType::Signature => "Sig",
         }
@@ -37,6 +38,7 @@ pub struct FormField {
     pub rect: [f64; 4],
     pub read_only: bool,
     pub required: bool,
+    pub options: Vec<String>,
 }
 
 impl FormField {
@@ -50,6 +52,7 @@ impl FormField {
             rect,
             read_only: false,
             required: false,
+            options: Vec::new(),
         }
     }
 
@@ -63,6 +66,48 @@ impl FormField {
             rect,
             read_only: false,
             required: false,
+            options: Vec::new(),
+        }
+    }
+
+    /// Creates a dropdown / choice combo box field (FR-11.1.4).
+    pub fn new_choice(
+        name: impl Into<String>,
+        rect: [f64; 4],
+        options: Vec<String>,
+        selected: Option<String>,
+    ) -> Self {
+        let value = selected.or_else(|| options.first().cloned());
+        Self {
+            id: None,
+            field_type: FormFieldType::Choice,
+            name: name.into(),
+            value: value.clone(),
+            default_value: value,
+            rect,
+            read_only: false,
+            required: false,
+            options,
+        }
+    }
+
+    /// Creates a push button field (FR-11.1.6).
+    pub fn new_pushbutton(
+        name: impl Into<String>,
+        rect: [f64; 4],
+        label: impl Into<String>,
+    ) -> Self {
+        let label_str = label.into();
+        Self {
+            id: None,
+            field_type: FormFieldType::PushButton,
+            name: name.into(),
+            value: Some(label_str.clone()),
+            default_value: Some(label_str),
+            rect,
+            read_only: false,
+            required: false,
+            options: Vec::new(),
         }
     }
 
@@ -102,6 +147,30 @@ impl FormField {
         if self.required {
             flags |= 2;
         }
+
+        match self.field_type {
+            FormFieldType::PushButton => {
+                flags |= 1 << 16; // Pushbutton flag (ISO 32000-1 Table 226)
+                if let Some(ref label) = self.value {
+                    let mut mk = PdfDictionary::new();
+                    mk.insert("CA", PdfString::from_str(label));
+                    dict.insert("MK", Object::Dictionary(mk));
+                }
+            }
+            FormFieldType::Choice => {
+                flags |= 1 << 17; // Combo flag (dropdown)
+                if !self.options.is_empty() {
+                    let opt_arr: Vec<Object> = self
+                        .options
+                        .iter()
+                        .map(|s| Object::String(PdfString::from_str(s)))
+                        .collect();
+                    dict.insert("Opt", Object::Array(opt_arr));
+                }
+            }
+            _ => {}
+        }
+
         dict.insert("Ff", flags);
 
         dict
@@ -109,17 +178,49 @@ impl FormField {
 
     pub fn from_dictionary(id: ObjectId, dict: &PdfDictionary) -> Option<Self> {
         let ft = dict.get_name("FT")?;
+        let flags = dict.get_i64("Ff").unwrap_or(0);
+        let read_only = (flags & 1) != 0;
+        let required = (flags & 2) != 0;
+
         let field_type = match ft {
             "Tx" => FormFieldType::Text,
-            "Btn" => FormFieldType::Checkbox,
+            "Btn" => {
+                if (flags & (1 << 16)) != 0 {
+                    FormFieldType::PushButton
+                } else {
+                    FormFieldType::Checkbox
+                }
+            }
             "Ch" => FormFieldType::Choice,
             "Sig" => FormFieldType::Signature,
             _ => return None,
         };
 
         let name = dict.get_str("T").unwrap_or_default();
-        let value = dict.get_str("V");
         let default_value = dict.get_str("DV");
+
+        let value = if field_type == FormFieldType::PushButton && dict.get_str("V").is_none() {
+            if let Some(Object::Dictionary(mk)) = dict.get("MK") {
+                mk.get_str("CA")
+            } else {
+                dict.get_str("V")
+            }
+        } else {
+            dict.get_str("V")
+        };
+
+        let mut options = Vec::new();
+        if let Some(opt_arr) = dict.get_array("Opt") {
+            for item in opt_arr {
+                if let Some(s) = item.as_str() {
+                    options.push(s.to_string());
+                } else if let Object::Array(sub_arr) = item {
+                    if let Some(first) = sub_arr.first().and_then(Object::as_str) {
+                        options.push(first.to_string());
+                    }
+                }
+            }
+        }
 
         let rect_arr = dict.get_array("Rect")?;
         if rect_arr.len() < 4 {
@@ -132,10 +233,6 @@ impl FormField {
             rect_arr[3].as_f64()?,
         ];
 
-        let flags = dict.get_i64("Ff").unwrap_or(0);
-        let read_only = (flags & 1) != 0;
-        let required = (flags & 2) != 0;
-
         Some(Self {
             id: Some(id),
             field_type,
@@ -145,6 +242,7 @@ impl FormField {
             rect,
             read_only,
             required,
+            options,
         })
     }
 }

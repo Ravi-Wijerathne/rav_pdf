@@ -7,9 +7,13 @@
 //! - NFR-04.7 (NIST-approved algorithms via audited crates)
 
 pub mod permissions;
+pub mod signatures;
 pub mod standard;
 
 pub use permissions::Permissions;
+pub use signatures::{
+    create_signature_field, get_document_signatures, SignatureInfo, SignatureStatus,
+};
 pub use standard::{
     compute_encryption_key, decrypt_aes128, derive_object_key, encrypt_aes128, pad_password,
 };

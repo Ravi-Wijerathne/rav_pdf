@@ -32,7 +32,10 @@ pub use metadata::{get_document_info, set_document_info, DocumentInfo};
 pub use optimize::{audit_space_usage, optimize_document, OptimizationStats, SpaceAudit};
 pub use preflight::{run_preflight, PreflightCheck, PreflightProfile, PreflightReport, PreflightSeverity};
 pub use redact::{redact_page_area, redact_pattern};
-pub use search::{extract_all_text, extract_page_text, search_document, SearchMatch};
+pub use search::{
+    build_search_regex, extract_all_text, extract_page_text, find_and_replace,
+    find_and_replace_page, search_document, SearchMatch,
+};
 pub use watermark::apply_text_watermark;
 
 #[cfg(test)]

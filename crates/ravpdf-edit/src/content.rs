@@ -156,6 +156,48 @@ pub fn insert_raw_image(
     Ok(())
 }
 
+/// Reads an image from disk using the `image` crate (supporting PNG, JPEG, BMP, TIFF, GIF, WebP)
+/// and inserts it onto the specified page as an XObject with dimensions (width, height) at coordinates (x, y).
+/// If `width <= 0.0` or `height <= 0.0`, uses the natural pixel dimensions of the image.
+///
+/// Conforms to ISO 32000-1 Clause 8.9 (Images). Traceability: FR-05.1.
+pub fn insert_image_file(
+    doc: &mut PdfDocument,
+    page_index: usize,
+    image_path: &std::path::Path,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<()> {
+    let img = image::open(image_path).map_err(|e| {
+        PdfError::InvalidStructure(format!(
+            "Failed to open image '{}': {}",
+            image_path.display(),
+            e
+        ))
+    })?;
+
+    let rgb = img.to_rgb8();
+    let img_w = rgb.width();
+    let img_h = rgb.height();
+
+    let display_w = if width > 0.0 { width } else { img_w as f64 };
+    let display_h = if height > 0.0 { height } else { img_h as f64 };
+
+    insert_raw_image(
+        doc,
+        page_index,
+        rgb.into_raw(),
+        img_w,
+        img_h,
+        x,
+        y,
+        display_w,
+        display_h,
+    )
+}
+
 fn ensure_standard_font(page_dict: &mut PdfDictionary) {
     let resources = page_dict
         .map
@@ -179,3 +221,44 @@ fn ensure_standard_font(page_dict: &mut PdfDictionary) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_append_text_and_raw_image() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(612.0, 792.0);
+
+        append_text_block(
+            &mut doc,
+            0,
+            "Interactive Content Insertion",
+            72.0,
+            700.0,
+            14.0,
+            (0.1, 0.2, 0.8),
+        )
+        .expect("append text");
+
+        let raw_pixels = vec![255u8; 10 * 10 * 3]; // 10x10 white RGB image
+        insert_raw_image(
+            &mut doc,
+            0,
+            raw_pixels,
+            10,
+            10,
+            100.0,
+            500.0,
+            100.0,
+            100.0,
+        )
+        .expect("insert raw image");
+
+        let content = doc.get_page_content(0).expect("get content");
+        assert!(!content.is_empty());
+        assert!(String::from_utf8_lossy(&content).contains("Interactive Content Insertion"));
+    }
+}
+
