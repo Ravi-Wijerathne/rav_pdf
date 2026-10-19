@@ -9,6 +9,8 @@ rust-version.workspace = true
 [dependencies]
 ravpdf-core.workspace = true
 ravpdf-edit.workspace = true
+ravpdf-forms.workspace = true
+ravpdf-crypto.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

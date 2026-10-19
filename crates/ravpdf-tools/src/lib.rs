@@ -4,24 +4,33 @@
 //! - FR-15 (Redaction)
 //! - FR-17 (Document Comparison)
 //! - FR-18 (Headers, Footers, Watermarks, Bates Numbering)
+//! - FR-22 & FR-23 (Standards Conformance & Preflight)
 //! - FR-25 (Optimization & Compression)
+//! - FR-29 (File Attachments)
+//! - FR-30 (Batch Processing & Action Wizard)
 //! - FR-33 (Document Metadata)
 //! - FR-34 (Search & Text Extraction)
 
+pub mod attachments;
+pub mod batch;
 pub mod bates;
 pub mod compare;
 pub mod header_footer;
 pub mod metadata;
 pub mod optimize;
+pub mod preflight;
 pub mod redact;
 pub mod search;
 pub mod watermark;
 
+pub use attachments::{add_attachment, get_attachments, remove_attachment, FileAttachment};
+pub use batch::{execute_batch, BatchAction, BatchFileResult, BatchJob, BatchResult};
 pub use bates::apply_bates_numbering;
 pub use compare::{compare_documents, ComparisonReport, PageDiff};
 pub use header_footer::{apply_headers_and_footers, HeaderFooterConfig};
 pub use metadata::{get_document_info, set_document_info, DocumentInfo};
 pub use optimize::{audit_space_usage, optimize_document, OptimizationStats, SpaceAudit};
+pub use preflight::{run_preflight, PreflightCheck, PreflightProfile, PreflightReport, PreflightSeverity};
 pub use redact::{redact_page_area, redact_pattern};
 pub use search::{extract_all_text, extract_page_text, search_document, SearchMatch};
 pub use watermark::apply_text_watermark;
