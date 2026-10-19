@@ -5,8 +5,57 @@
 use ravpdf_core::document::PdfDocument;
 use ravpdf_core::error::{PdfError, Result};
 use ravpdf_core::object::{ObjectId, Object, PdfDictionary, PdfName, PdfString};
+use regex::Regex;
 
-/// Subtypes of PDF annotations.
+/// Action associated with a link annotation conforming to ISO 32000-1 Section 12.6.
+///
+/// Traceability: FR-20.2.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkAction {
+    /// External web URI (/S /URI /URI (https://...))
+    Uri(String),
+    /// Jump to 0-based page index (/S /GoTo or /Dest)
+    GoToPage(usize),
+    /// Jump to named destination (/Dest (name))
+    Named(String),
+}
+
+/// Visual effect when link annotation is activated conforming to ISO 32000-1 Section 12.5.6.5 Table 173.
+///
+/// Traceability: FR-20.6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkHighlight {
+    /// /N: No highlighting
+    None,
+    /// /I: Invert the contents of the annotation rectangle (default)
+    Invert,
+    /// /O: Invert the annotation's border
+    Outline,
+    /// /P: Push effect (display annotation as if being pressed)
+    Push,
+}
+
+impl LinkHighlight {
+    pub fn to_pdf_name(&self) -> &'static str {
+        match self {
+            LinkHighlight::None => "N",
+            LinkHighlight::Invert => "I",
+            LinkHighlight::Outline => "O",
+            LinkHighlight::Push => "P",
+        }
+    }
+
+    pub fn from_pdf_name(name: &str) -> Self {
+        match name {
+            "N" => LinkHighlight::None,
+            "O" => LinkHighlight::Outline,
+            "P" => LinkHighlight::Push,
+            _ => LinkHighlight::Invert,
+        }
+    }
+}
+
+/// Subtypes of PDF annotations conforming to ISO 32000-1 Section 12.5.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnnotationType {
     Text,        // Sticky Note
@@ -19,6 +68,11 @@ pub enum AnnotationType {
     Line,        // Line
     Ink,         // Freehand drawing
     Stamp(String), // Rubber stamp
+    Link {
+        action: LinkAction,
+        border_width: f64,
+        highlight: LinkHighlight,
+    },
 }
 
 impl AnnotationType {
@@ -34,6 +88,7 @@ impl AnnotationType {
             AnnotationType::Line => "Line",
             AnnotationType::Ink => "Ink",
             AnnotationType::Stamp(_) => "Stamp",
+            AnnotationType::Link { .. } => "Link",
         }
     }
 
@@ -79,6 +134,40 @@ impl Annotation {
         }
     }
 
+    /// Creates a clickable web hyperlink annotation (FR-20.1, FR-20.2).
+    pub fn new_link_uri(rect: [f64; 4], uri: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            annot_type: AnnotationType::Link {
+                action: LinkAction::Uri(uri.into()),
+                border_width: 0.0,
+                highlight: LinkHighlight::Invert,
+            },
+            rect,
+            contents: None,
+            color: Some((0.0, 0.45, 0.85)),
+            opacity: 1.0,
+            author: None,
+        }
+    }
+
+    /// Creates an internal page navigation link annotation (FR-20.1, FR-20.2).
+    pub fn new_link_goto(rect: [f64; 4], target_page: usize) -> Self {
+        Self {
+            id: None,
+            annot_type: AnnotationType::Link {
+                action: LinkAction::GoToPage(target_page),
+                border_width: 0.0,
+                highlight: LinkHighlight::Invert,
+            },
+            rect,
+            contents: None,
+            color: Some((0.0, 0.45, 0.85)),
+            opacity: 1.0,
+            author: None,
+        }
+    }
+
     /// Serializes this annotation into an ISO 32000-1 Section 12.5 annotation dictionary.
     pub fn to_dictionary(&self) -> PdfDictionary {
         let mut dict = PdfDictionary::new();
@@ -117,6 +206,43 @@ impl Annotation {
             dict.insert("Name", PdfName::new(stamp_name.as_str()));
         }
 
+        if let AnnotationType::Link { ref action, border_width, highlight } = self.annot_type {
+            dict.insert("H", PdfName::new(highlight.to_pdf_name()));
+            dict.insert(
+                "Border",
+                vec![
+                    Object::Real(0.0),
+                    Object::Real(0.0),
+                    Object::Real(border_width),
+                ],
+            );
+            match action {
+                LinkAction::Uri(ref uri) => {
+                    let mut action_dict = PdfDictionary::new();
+                    action_dict.insert("Type", PdfName::new("Action"));
+                    action_dict.insert("S", PdfName::new("URI"));
+                    action_dict.insert("URI", PdfString::from_str(uri));
+                    dict.insert("A", Object::Dictionary(action_dict));
+                }
+                LinkAction::GoToPage(target_page) => {
+                    let mut action_dict = PdfDictionary::new();
+                    action_dict.insert("Type", PdfName::new("Action"));
+                    action_dict.insert("S", PdfName::new("GoTo"));
+                    action_dict.insert(
+                        "D",
+                        vec![
+                            Object::Integer(*target_page as i64),
+                            Object::Name(PdfName::new("Fit")),
+                        ],
+                    );
+                    dict.insert("A", Object::Dictionary(action_dict));
+                }
+                LinkAction::Named(ref name) => {
+                    dict.insert("Dest", PdfString::from_str(name));
+                }
+            }
+        }
+
         dict
     }
 
@@ -124,7 +250,55 @@ impl Annotation {
     pub fn from_dictionary(id: ObjectId, dict: &PdfDictionary) -> Option<Self> {
         let subtype = dict.get_name("Subtype")?;
         let stamp_name = dict.get_name("Name").map(|s| s.to_string());
-        let annot_type = AnnotationType::from_subtype_name(subtype, stamp_name)?;
+
+        let annot_type = if subtype == "Link" {
+            let highlight = dict
+                .get_name("H")
+                .map(LinkHighlight::from_pdf_name)
+                .unwrap_or(LinkHighlight::Invert);
+
+            let border_width = dict
+                .get_array("Border")
+                .and_then(|arr| arr.get(2))
+                .and_then(Object::as_f64)
+                .unwrap_or(0.0);
+
+            let action = if let Some(Object::Dictionary(a_dict)) = dict.get("A") {
+                let s = a_dict.get_name("S").unwrap_or("");
+                if s == "URI" {
+                    LinkAction::Uri(a_dict.get_str("URI").unwrap_or_default())
+                } else if s == "GoTo" {
+                    let page_idx = if let Some(Object::Array(d_arr)) = a_dict.get("D") {
+                        d_arr.first().and_then(Object::as_i64).unwrap_or(0).max(0) as usize
+                    } else {
+                        0
+                    };
+                    LinkAction::GoToPage(page_idx)
+                } else {
+                    LinkAction::Uri("https://".into())
+                }
+            } else if let Some(dest) = dict.get("Dest") {
+                match dest {
+                    Object::Array(d_arr) => {
+                        let page_idx = d_arr.first().and_then(Object::as_i64).unwrap_or(0).max(0) as usize;
+                        LinkAction::GoToPage(page_idx)
+                    }
+                    Object::String(s) => LinkAction::Named(s.to_string_lossy()),
+                    Object::Name(n) => LinkAction::Named(n.as_str().to_string()),
+                    _ => LinkAction::Uri("https://".into()),
+                }
+            } else {
+                LinkAction::Uri("https://".into())
+            };
+
+            AnnotationType::Link {
+                action,
+                border_width,
+                highlight,
+            }
+        } else {
+            AnnotationType::from_subtype_name(subtype, stamp_name)?
+        };
 
         let rect_arr = dict.get_array("Rect")?;
         if rect_arr.len() < 4 {
@@ -166,6 +340,19 @@ impl Annotation {
             author,
         })
     }
+}
+
+/// Automatically detects HTTP/HTTPS URLs within text along with their character span (start, end).
+///
+/// Traceability: FR-20.5.
+pub fn detect_urls_in_text(text: &str) -> Vec<(String, usize, usize)> {
+    let Ok(re) = Regex::new(r#"https?://[^\s<>"'{}|\\^`]+[^\s`!()\[\]{};:'".,<>?«»“”‘’]"#) else {
+        return Vec::new();
+    };
+
+    re.find_iter(text)
+        .map(|m| (m.as_str().to_string(), m.start(), m.end()))
+        .collect()
 }
 
 /// Retrieves all annotations attached to the specified page.

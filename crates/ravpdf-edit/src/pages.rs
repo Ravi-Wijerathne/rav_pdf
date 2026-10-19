@@ -195,6 +195,67 @@ pub fn extract_pages(src_doc: &PdfDocument, page_indices: &[usize]) -> Result<Pd
     Ok(new_doc)
 }
 
+/// Duplicates the page at `index` (0-based) and inserts the duplicate immediately after it (at `index + 1`).
+///
+/// Deep-copies the page dictionary (MediaBox, CropBox, Rotate, Resources, and cloned content streams).
+/// Conforms to ISO 32000-1 Clause 7.7.3.3. Traceability: FR-06.11.
+pub fn duplicate_page(doc: &mut PdfDocument, index: usize) -> Result<ObjectId> {
+    let page_ids = doc.page_ids();
+    let src_id = *page_ids
+        .get(index)
+        .ok_or_else(|| PdfError::InvalidStructure(format!("Page index {} out of range", index)))?;
+
+    let src_dict = doc
+        .objects
+        .get(&src_id)
+        .and_then(Object::as_dict)
+        .ok_or_else(|| PdfError::InvalidStructure("Expected page dictionary".into()))?
+        .clone();
+
+    // Clone content streams so edits on one do not unintentionally modify the other
+    let mut new_contents = Vec::new();
+    if let Some(contents_obj) = src_dict.get("Contents") {
+        match contents_obj {
+            Object::Reference(id) => {
+                if let Some(obj) = doc.objects.get(id) {
+                    let new_id = doc.next_object_id();
+                    doc.objects.insert(new_id, obj.clone());
+                    new_contents.push(Object::Reference(new_id));
+                }
+            }
+            Object::Array(arr) => {
+                for item in arr {
+                    if let Some(id) = item.as_reference() {
+                        if let Some(obj) = doc.objects.get(&id) {
+                            let new_id = doc.next_object_id();
+                            doc.objects.insert(new_id, obj.clone());
+                            new_contents.push(Object::Reference(new_id));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let new_page_id = doc.next_object_id();
+    let mut new_page_dict = src_dict;
+
+    if !new_contents.is_empty() {
+        if new_contents.len() == 1 {
+            new_page_dict.insert("Contents", new_contents[0].clone());
+        } else {
+            new_page_dict.insert("Contents", new_contents);
+        }
+    }
+
+    doc.objects.insert(new_page_id, Object::Dictionary(new_page_dict));
+
+    insert_page_id_at(doc, index + 1, new_page_id)?;
+
+    Ok(new_page_id)
+}
+
 fn insert_page_id_at(doc: &mut PdfDocument, index: usize, page_id: ObjectId) -> Result<()> {
     let pages_id = doc
         .pages_root_id()
@@ -230,3 +291,39 @@ fn insert_page_id_at(doc: &mut PdfDocument, index: usize, page_id: ObjectId) -> 
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_duplicate_and_manage_pages() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(612.0, 792.0);
+        assert_eq!(doc.page_count(), 1);
+
+        // Test insert blank page
+        insert_blank_page(&mut doc, 1, 595.0, 842.0).expect("insert blank page");
+        assert_eq!(doc.page_count(), 2);
+
+        // Test duplicate page
+        let dup_id = duplicate_page(&mut doc, 0).expect("duplicate page");
+        assert_eq!(doc.page_count(), 3);
+        assert!(doc.objects.contains_key(&dup_id));
+
+        // Test rotate page
+        rotate_page(&mut doc, 0, 90).expect("rotate page");
+        let page0 = doc.get_page(0).expect("page 0");
+        assert_eq!(page0.rotate, 90);
+
+        // Test crop page
+        crop_page(&mut doc, 0, [10.0, 10.0, 600.0, 780.0]).expect("crop page");
+        let page0_cropped = doc.get_page(0).expect("page 0 cropped");
+        assert_eq!(page0_cropped.crop_box, [10.0, 10.0, 600.0, 780.0]);
+
+        // Test delete page
+        delete_page(&mut doc, 1).expect("delete page");
+        assert_eq!(doc.page_count(), 2);
+    }
+}
+

@@ -55,5 +55,34 @@ mod tests {
         let updated_page_fields = get_page_form_fields(&doc, 0).expect("get updated page fields");
         assert_eq!(updated_page_fields[0].value.as_deref(), Some("test@example.com"));
     }
+
+    #[test]
+    fn test_choice_and_pushbutton_fields() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(612.0, 792.0);
+
+        // Choice field
+        let opts = vec!["Standard".into(), "Express".into(), "Overnight".into()];
+        let choice = FormField::new_choice("ShippingMethod", [100.0, 600.0, 250.0, 620.0], opts.clone(), Some("Express".into()));
+        let choice_id = add_form_field(&mut doc, 0, &choice).expect("add choice");
+        assert!(doc.objects.contains_key(&choice_id));
+
+        // Push button field
+        let btn = FormField::new_pushbutton("SubmitOrder", [100.0, 550.0, 180.0, 580.0], "Submit Order");
+        let btn_id = add_form_field(&mut doc, 0, &btn).expect("add button");
+        assert!(doc.objects.contains_key(&btn_id));
+
+        let fields = get_form_fields(&doc).expect("get form fields");
+        assert_eq!(fields.len(), 2);
+
+        let retrieved_choice = fields.iter().find(|f| f.name == "ShippingMethod").expect("choice found");
+        assert_eq!(retrieved_choice.field_type, FormFieldType::Choice);
+        assert_eq!(retrieved_choice.value.as_deref(), Some("Express"));
+        assert_eq!(retrieved_choice.options, opts);
+
+        let retrieved_btn = fields.iter().find(|f| f.name == "SubmitOrder").expect("btn found");
+        assert_eq!(retrieved_btn.field_type, FormFieldType::PushButton);
+        assert_eq!(retrieved_btn.value.as_deref(), Some("Submit Order"));
+    }
 }
 

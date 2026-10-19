@@ -11,3 +11,4 @@ ravpdf-core.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+regex.workspace = true

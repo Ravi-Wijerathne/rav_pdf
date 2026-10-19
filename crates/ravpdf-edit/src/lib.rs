@@ -10,15 +10,21 @@
 pub mod combine;
 pub mod content;
 pub mod create;
+pub mod labels;
 pub mod pages;
 
 pub use combine::{merge_documents, split_document};
-pub use content::{append_text_block, insert_raw_image};
+pub use content::{append_text_block, insert_image_file, insert_raw_image};
 pub use create::{
     create_pdf_from_images, create_pdf_from_raw_images, create_pdf_from_text,
     ImagePdfOptions, TextPdfOptions,
 };
+pub use labels::{
+    format_page_label, get_page_label, get_page_labels, set_page_labels, PageLabelRange,
+    PageLabelStyle,
+};
 pub use pages::{
-    crop_page, delete_page, extract_pages, insert_blank_page, reorder_pages, rotate_page,
+    crop_page, delete_page, duplicate_page, extract_pages, insert_blank_page, reorder_pages,
+    rotate_page,
 };
 
