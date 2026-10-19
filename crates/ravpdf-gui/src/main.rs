@@ -36,10 +36,12 @@ use ravpdf_forms::{
 };
 use ravpdf_render::{pixmap_to_png, render_page, RenderOptions};
 use ravpdf_tools::{
-    apply_bates_numbering, apply_headers_and_footers, apply_text_watermark, audit_space_usage,
-    compare_documents, extract_all_text, optimize_document, redact_page_area, redact_pattern,
-    search_document, set_document_info, ComparisonReport, HeaderFooterConfig, OptimizationStats,
-    SearchMatch, SpaceAudit,
+    add_attachment, apply_bates_numbering, apply_headers_and_footers, apply_text_watermark,
+    audit_space_usage, compare_documents, execute_batch, extract_all_text, get_attachments,
+    optimize_document, redact_page_area, redact_pattern, remove_attachment, run_preflight,
+    search_document, set_document_info, BatchAction, BatchJob, BatchResult, ComparisonReport,
+    FileAttachment, HeaderFooterConfig, OptimizationStats, PreflightProfile,
+    PreflightReport, PreflightSeverity, SearchMatch, SpaceAudit,
 };
 use std::path::PathBuf;
 use tab::DocumentTab;
@@ -85,6 +87,7 @@ enum SidebarTab {
     Thumbnails,
     Bookmarks,
     Annotations,
+    Attachments,
     Properties,
     Search,
 }
@@ -98,6 +101,8 @@ enum ActiveTool {
     Rectangle,
     Text,
     Redact,
+    MeasureDistance,
+    MeasureArea,
 }
 
 struct RavPdfApp {
@@ -168,6 +173,23 @@ struct RavPdfApp {
     compare_file_a: Option<PathBuf>,
     compare_file_b: Option<PathBuf>,
     comparison_report: Option<ComparisonReport>,
+
+    // Preflight state (FR-22, FR-23)
+    show_preflight_dialog: bool,
+    preflight_profile: PreflightProfile,
+    preflight_report: Option<PreflightReport>,
+
+    // Action Wizard / Batch processing state (FR-30)
+    show_batch_dialog: bool,
+    batch_input_files: Vec<PathBuf>,
+    batch_output_dir: Option<PathBuf>,
+    batch_action_watermark: bool,
+    batch_watermark_text: String,
+    batch_action_bates: bool,
+    batch_bates_prefix: String,
+    batch_action_flatten: bool,
+    batch_action_optimize: bool,
+    batch_result: Option<BatchResult>,
 
     // Bookmark creation modal state (FR-19.2)
     new_bookmark_title: String,
@@ -244,6 +266,21 @@ impl Default for RavPdfApp {
             compare_file_a: None,
             compare_file_b: None,
             comparison_report: None,
+
+            show_preflight_dialog: false,
+            preflight_profile: PreflightProfile::PdfA1b,
+            preflight_report: None,
+
+            show_batch_dialog: false,
+            batch_input_files: Vec::new(),
+            batch_output_dir: None,
+            batch_action_watermark: false,
+            batch_watermark_text: "APPROVED".into(),
+            batch_action_bates: false,
+            batch_bates_prefix: "BATCH".into(),
+            batch_action_flatten: false,
+            batch_action_optimize: true,
+            batch_result: None,
 
             new_bookmark_title: String::new(),
 
@@ -999,6 +1036,18 @@ impl RavPdfApp {
                         self.show_compare_dialog = true;
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_doc, Button::new("Preflight & Standards Validation... (FR-22, FR-23)"))
+                        .clicked()
+                    {
+                        self.show_preflight_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Action Wizard (Batch Processing)... (FR-30)").clicked() {
+                        self.show_batch_dialog = true;
+                        ui.close_menu();
+                    }
                 });
 
                 ui.menu_button("Help", |ui| {
@@ -1161,6 +1210,8 @@ impl RavPdfApp {
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Rectangle, "Shape");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Text, "Text");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Redact, "Redact");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::MeasureDistance, "📏 Distance");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::MeasureArea, "📐 Area");
                 });
             });
         });
@@ -1238,6 +1289,7 @@ impl RavPdfApp {
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Thumbnails, "Pages");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Bookmarks, "Outline");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Annotations, "Notes");
+                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Attachments, "Files");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Properties, "Info");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Search, "Results");
                 });
@@ -1621,6 +1673,91 @@ impl RavPdfApp {
                         }
                     }
 
+                    SidebarTab::Attachments => {
+                        ui.heading("Attachments (FR-29)");
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            if ui.button("➕ Add File...").on_hover_text("Embed a file into this PDF").clicked() {
+                                if let Some(file_path) = rfd::FileDialog::new().pick_file() {
+                                    if let Ok(bytes) = std::fs::read(&file_path) {
+                                        let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("attachment.bin").to_string();
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            match add_attachment(&mut tab.doc, &filename, None, &bytes) {
+                                                Ok(()) => {
+                                                    tab.is_modified = true;
+                                                    self.status_message = format!("Attached '{}' ({} bytes)", filename, bytes.len());
+                                                }
+                                                Err(e) => {
+                                                    self.status_message = format!("Failed to attach file: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.separator();
+
+                        let attachments = self.active_tab().and_then(|tab| get_attachments(&tab.doc).ok()).unwrap_or_default();
+                        if attachments.is_empty() {
+                            ui.weak("(No embedded attachments in this document)");
+                        } else {
+                            let mut save_target: Option<FileAttachment> = None;
+                            let mut remove_target: Option<String> = None;
+
+                            ScrollArea::vertical().show(ui, |ui| {
+                                for att in &attachments {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("📎").size(16.0));
+                                            ui.vertical(|ui| {
+                                                ui.label(RichText::new(&att.filename).strong());
+                                                let sz_kb = att.size as f64 / 1024.0;
+                                                ui.weak(format!("{:.1} KB ({} bytes)", sz_kb, att.size));
+                                                if let Some(ref desc) = att.description {
+                                                    ui.weak(desc);
+                                                }
+                                            });
+                                        });
+                                        ui.horizontal(|ui| {
+                                            if ui.small_button("💾 Save As...").clicked() {
+                                                save_target = Some(att.clone());
+                                            }
+                                            if ui.small_button("🗑 Remove").clicked() {
+                                                remove_target = Some(att.filename.clone());
+                                            }
+                                        });
+                                    });
+                                    ui.add_space(4.0);
+                                }
+                            });
+
+                            if let Some(att) = save_target {
+                                if let Some(out_path) = rfd::FileDialog::new().set_file_name(&att.filename).save_file() {
+                                    match std::fs::write(&out_path, &att.data) {
+                                        Ok(()) => self.status_message = format!("Saved attachment to '{}'", out_path.display()),
+                                        Err(e) => self.status_message = format!("Save failed: {}", e),
+                                    }
+                                }
+                            }
+
+                            if let Some(fname) = remove_target {
+                                if let Some(tab) = self.active_tab_mut() {
+                                    match remove_attachment(&mut tab.doc, &fname) {
+                                        Ok(true) => {
+                                            tab.is_modified = true;
+                                            self.status_message = format!("Removed attachment '{}'", fname);
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => self.status_message = format!("Removal failed: {}", e),
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     SidebarTab::Search => {
                         ui.label(format!("Search Results ({}):", self.search_results.len()));
                         let mut clicked_match = None;
@@ -1911,6 +2048,43 @@ impl RavPdfApp {
                                     Color32::WHITE,
                                 );
                             }
+                            ActiveTool::MeasureDistance => {
+                                let cyan = Color32::from_rgb(0, 180, 216);
+                                ui.painter().line_segment([start, curr], Stroke::new(2.0_f32, cyan));
+
+                                let dx = curr.x - start.x;
+                                let dy = curr.y - start.y;
+                                let len = (dx * dx + dy * dy).sqrt();
+                                if len > 2.0 {
+                                    let nx = -dy / len * 6.0;
+                                    let ny = dx / len * 6.0;
+                                    ui.painter().line_segment([Pos2::new(start.x + nx, start.y + ny), Pos2::new(start.x - nx, start.y - ny)], Stroke::new(2.0_f32, cyan));
+                                    ui.painter().line_segment([Pos2::new(curr.x + nx, curr.y + ny), Pos2::new(curr.x - nx, curr.y - ny)], Stroke::new(2.0_f32, cyan));
+                                }
+
+                                let pt_dist = len / zoom;
+                                let in_dist = pt_dist / 72.0;
+                                let cm_dist = in_dist * 2.54;
+                                let text = format!("{:.1} pt ({:.2}\" / {:.2} cm)", pt_dist, in_dist, cm_dist);
+                                let mid = Pos2::new((start.x + curr.x) * 0.5, (start.y + curr.y) * 0.5 - 12.0);
+                                ui.painter().rect_filled(Rect::from_center_size(mid, Vec2::new(140.0, 20.0)), 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
+                                ui.painter().text(mid, Align2::CENTER_CENTER, text, FontId::proportional(11.0), Color32::WHITE);
+                            }
+                            ActiveTool::MeasureArea => {
+                                let cyan = Color32::from_rgb(0, 180, 216);
+                                ui.painter().rect_filled(drag_rect, 0.0, Color32::from_rgba_unmultiplied(0, 180, 216, 50));
+                                ui.painter().rect_stroke(drag_rect, 0.0, Stroke::new(2.0_f32, cyan));
+
+                                let w_pt = drag_rect.width() / zoom;
+                                let h_pt = drag_rect.height() / zoom;
+                                let area_pt = (w_pt * h_pt) as f64;
+                                let area_in = area_pt / (72.0 * 72.0);
+                                let area_cm = area_in * 6.4516;
+                                let text = format!("{:.2} sq in ({:.1} sq cm)", area_in, area_cm);
+                                let center = drag_rect.center();
+                                ui.painter().rect_filled(Rect::from_center_size(center, Vec2::new(140.0, 20.0)), 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
+                                ui.painter().text(center, Align2::CENTER_CENTER, text, FontId::proportional(11.0), Color32::WHITE);
+                            }
                             _ => {}
                         }
                     }
@@ -1964,6 +2138,23 @@ impl RavPdfApp {
                                             tab.invalidate_render();
                                             self.status_message = format!("Permanently redacted area on page {}", curr_page + 1);
                                         }
+                                    }
+                                    ActiveTool::MeasureDistance => {
+                                        let dx = curr.x - start.x;
+                                        let dy = curr.y - start.y;
+                                        let len = (dx * dx + dy * dy).sqrt();
+                                        let pt_dist = len / zoom;
+                                        let in_dist = pt_dist / 72.0;
+                                        let cm_dist = in_dist * 2.54;
+                                        self.status_message = format!("Measured Distance: {:.1} pt ({:.2} in / {:.2} cm)", pt_dist, in_dist, cm_dist);
+                                    }
+                                    ActiveTool::MeasureArea => {
+                                        let w_pt = drag_rect.width() / zoom;
+                                        let h_pt = drag_rect.height() / zoom;
+                                        let area_pt = (w_pt * h_pt) as f64;
+                                        let area_in = area_pt / (72.0 * 72.0);
+                                        let area_cm = area_in * 6.4516;
+                                        self.status_message = format!("Measured Area: {:.1} sq pt ({:.2} sq in / {:.2} sq cm)", area_pt, area_in, area_cm);
                                     }
                                     _ => {}
                                 }
@@ -2955,6 +3146,218 @@ impl RavPdfApp {
             }
             if close {
                 self.show_compare_dialog = false;
+            }
+        }
+
+        // 13. Preflight & Standards Validation Dialog (FR-22, FR-23)
+        if self.show_preflight_dialog {
+            let mut close = false;
+            let mut run_check = false;
+            egui::Window::new("Preflight & Standards Validation (FR-22, FR-23)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([620.0, 500.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Audits the document against ISO standards and print production profiles.");
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Validation Profile:").strong());
+                        ui.selectable_value(&mut self.preflight_profile, PreflightProfile::PdfA1b, "PDF/A-1b Archival");
+                        ui.selectable_value(&mut self.preflight_profile, PreflightProfile::PrintProduction, "Print Prepress");
+                        ui.selectable_value(&mut self.preflight_profile, PreflightProfile::GeneralQuality, "General Quality");
+                    });
+
+                    ui.add_space(8.0);
+                    if ui.button("⚡ Run Preflight Audit").clicked() {
+                        run_check = true;
+                    }
+
+                    if let Some(ref rep) = self.preflight_report {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if rep.is_compliant {
+                                ui.colored_label(Color32::from_rgb(46, 160, 67), RichText::new("✓ COMPLIANT").strong().size(14.0));
+                            } else {
+                                ui.colored_label(Color32::from_rgb(220, 38, 38), RichText::new("✗ NON-COMPLIANT").strong().size(14.0));
+                            }
+                            ui.label(format!("(Passed: {}, Warnings: {}, Errors: {})", rep.total_passed, rep.total_warnings, rep.total_errors));
+                        });
+
+                        ui.add_space(6.0);
+                        ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                            for check in &rep.checks {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        let (icon, color) = if check.passed {
+                                            ("✓", Color32::from_rgb(46, 160, 67))
+                                        } else {
+                                            match check.severity {
+                                                PreflightSeverity::Error => ("✗", Color32::from_rgb(220, 38, 38)),
+                                                PreflightSeverity::Warning => ("⚠", Color32::from_rgb(230, 160, 0)),
+                                                PreflightSeverity::Info => ("ℹ", Color32::from_rgb(60, 130, 246)),
+                                            }
+                                        };
+                                        ui.colored_label(color, RichText::new(icon).strong().size(14.0));
+                                        ui.label(RichText::new(&check.title).strong());
+                                        ui.weak(format!("[{}]", check.category));
+                                    });
+                                    ui.label(&check.details);
+                                });
+                                ui.add_space(4.0);
+                            }
+                        });
+                    }
+
+                    ui.add_space(10.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+            if run_check {
+                if let Some(tab) = self.active_tab() {
+                    self.preflight_report = Some(run_preflight(&tab.doc, self.preflight_profile));
+                    self.status_message = format!("Preflight audit completed for {}", self.preflight_profile.display_name());
+                }
+            }
+            if close {
+                self.show_preflight_dialog = false;
+            }
+        }
+
+        // 14. Action Wizard / Batch Processing Dialog (FR-30)
+        if self.show_batch_dialog {
+            let mut close = false;
+            let mut run_batch = false;
+            egui::Window::new("Action Wizard & Batch Processing (FR-30)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([640.0, 520.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Automate multiple document operations across batches of PDF files.");
+                    ui.add_space(8.0);
+
+                    // Input files
+                    ui.horizontal(|ui| {
+                        if ui.button("➕ Add PDF Files...").clicked() {
+                            if let Some(files) = rfd::FileDialog::new().add_filter("PDF files", &["pdf"]).pick_files() {
+                                self.batch_input_files.extend(files);
+                            }
+                        }
+                        if ui.button("🗑 Clear Files").clicked() {
+                            self.batch_input_files.clear();
+                        }
+                        ui.label(format!("({} files selected)", self.batch_input_files.len()));
+                    });
+
+                    // Output directory
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Output Folder:").strong());
+                        let out_name = self.batch_output_dir.as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<Not Selected>".into());
+                        ui.label(out_name);
+                        if ui.button("Browse...").clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                self.batch_output_dir = Some(folder);
+                            }
+                        }
+                    });
+
+                    ui.separator();
+                    ui.heading("Action Sequence to Apply (FR-30.4):");
+                    ui.checkbox(&mut self.batch_action_optimize, "Optimize & Flate Compress (FR-25)");
+                    ui.checkbox(&mut self.batch_action_flatten, "Flatten All Interactive Forms (FR-11)");
+
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.batch_action_watermark, "Add Watermark (FR-18.2):");
+                        if self.batch_action_watermark {
+                            ui.text_edit_singleline(&mut self.batch_watermark_text);
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.batch_action_bates, "Apply Bates Numbering (FR-18.3):");
+                        if self.batch_action_bates {
+                            ui.label("Prefix:");
+                            ui.text_edit_singleline(&mut self.batch_bates_prefix);
+                        }
+                    });
+
+                    ui.add_space(8.0);
+                    let can_run = !self.batch_input_files.is_empty() && self.batch_output_dir.is_some();
+                    if ui.add_enabled(can_run, Button::new("▶ Execute Batch Sequence")).clicked() {
+                        run_batch = true;
+                    }
+
+                    if let Some(ref res) = self.batch_result {
+                        ui.separator();
+                        ui.heading("Execution Results:");
+                        ui.label(format!("Total: {}, Succeeded: {}, Failed: {}", res.total_files, res.successful_files, res.failed_files));
+
+                        ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                            for f in &res.details {
+                                ui.horizontal(|ui| {
+                                    let fname = f.path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                                    if f.success {
+                                        ui.colored_label(Color32::from_rgb(46, 160, 67), "✓");
+                                        ui.label(fname);
+                                    } else {
+                                        ui.colored_label(Color32::from_rgb(220, 38, 38), "✗");
+                                        ui.label(fname);
+                                        if let Some(ref err) = f.error_message {
+                                            ui.weak(format!("({})", err));
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    }
+
+                    ui.add_space(10.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+            if run_batch {
+                if let Some(ref out_dir) = self.batch_output_dir {
+                    let mut actions = Vec::new();
+                    if self.batch_action_watermark {
+                        actions.push(BatchAction::Watermark {
+                            text: self.batch_watermark_text.clone(),
+                            opacity: 0.25,
+                        });
+                    }
+                    if self.batch_action_bates {
+                        actions.push(BatchAction::BatesNumbering {
+                            prefix: self.batch_bates_prefix.clone(),
+                            start_number: 1,
+                            digits: 6,
+                        });
+                    }
+                    if self.batch_action_flatten {
+                        actions.push(BatchAction::FlattenForms);
+                    }
+                    if self.batch_action_optimize {
+                        actions.push(BatchAction::Optimize);
+                    }
+
+                    let job = BatchJob {
+                        input_files: self.batch_input_files.clone(),
+                        output_directory: out_dir.clone(),
+                        actions,
+                    };
+                    let result = execute_batch(&job);
+                    self.status_message = format!("Batch execution finished: {}/{} succeeded", result.successful_files, result.total_files);
+                    self.batch_result = Some(result);
+                }
+            }
+            if close {
+                self.show_batch_dialog = false;
             }
         }
     }
