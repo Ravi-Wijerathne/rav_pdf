@@ -2616,10 +2616,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "image",
+ "ravpdf-annot",
  "ravpdf-core",
  "ravpdf-crypto",
  "ravpdf-edit",
  "ravpdf-forms",
+ "ravpdf-render",
  "regex",
  "serde",
  "thiserror 2.0.21",

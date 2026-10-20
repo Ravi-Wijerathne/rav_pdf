@@ -11,10 +11,13 @@
 //! - FR-33 (Document Metadata)
 //! - FR-34 (Search & Text Extraction)
 
+pub mod accessibility;
 pub mod attachments;
 pub mod batch;
 pub mod bates;
+pub mod comments;
 pub mod compare;
+pub mod export;
 pub mod header_footer;
 pub mod metadata;
 pub mod optimize;
@@ -23,10 +26,22 @@ pub mod redact;
 pub mod search;
 pub mod watermark;
 
+pub use accessibility::{
+    audit_accessibility, fix_document_language, fix_document_title, fix_ensure_tagged_pdf,
+    fix_tab_order_to_structure, remediate_all_automatic, AccessibilityCategory,
+    AccessibilityReport, AccessibilityRule, AccessibilityStatus,
+};
 pub use attachments::{add_attachment, get_attachments, remove_attachment, FileAttachment};
 pub use batch::{execute_batch, BatchAction, BatchFileResult, BatchJob, BatchResult};
 pub use bates::apply_bates_numbering;
+pub use comments::{
+    compare_reviewer_comments, export_comments_to_csv, get_document_comments,
+    merge_reviewer_annotations, AnnotationDiff, ReviewComment,
+};
 pub use compare::{compare_documents, ComparisonReport, PageDiff};
+pub use export::{
+    export_page_to_image, export_to_html, export_to_plain_text, ExportImageFormat,
+};
 pub use header_footer::{apply_headers_and_footers, HeaderFooterConfig};
 pub use metadata::{get_document_info, set_document_info, DocumentInfo};
 pub use optimize::{audit_space_usage, optimize_document, OptimizationStats, SpaceAudit};

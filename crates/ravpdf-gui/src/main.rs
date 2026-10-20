@@ -45,11 +45,16 @@ use ravpdf_forms::{
 use ravpdf_render::{pixmap_to_png, render_page, RenderOptions};
 use ravpdf_tools::{
     add_attachment, apply_bates_numbering, apply_headers_and_footers, apply_text_watermark,
-    audit_space_usage, compare_documents, execute_batch, extract_all_text, find_and_replace,
-    find_and_replace_page, get_attachments, optimize_document, redact_page_area, redact_pattern,
-    remove_attachment, run_preflight, search_document, set_document_info, BatchAction, BatchJob,
-    BatchResult, ComparisonReport, FileAttachment, HeaderFooterConfig, OptimizationStats,
-    PreflightProfile, PreflightReport, PreflightSeverity, SearchMatch, SpaceAudit,
+    audit_accessibility, audit_space_usage, compare_documents,
+    execute_batch, export_comments_to_csv, export_page_to_image, export_to_html,
+    export_to_plain_text, extract_all_text, find_and_replace, find_and_replace_page,
+    fix_document_language, fix_document_title, fix_ensure_tagged_pdf, fix_tab_order_to_structure,
+    get_attachments, get_document_comments, merge_reviewer_annotations, optimize_document,
+    redact_page_area, redact_pattern, remediate_all_automatic, remove_attachment, run_preflight,
+    search_document, set_document_info, AccessibilityReport, AccessibilityStatus,
+    BatchAction, BatchJob, BatchResult, ComparisonReport, ExportImageFormat, FileAttachment,
+    HeaderFooterConfig, OptimizationStats, PreflightProfile, PreflightReport, PreflightSeverity,
+    ReviewComment, SearchMatch, SpaceAudit,
 };
 use std::path::PathBuf;
 use tab::DocumentTab;
@@ -91,7 +96,6 @@ fn parse_page_ranges(input: &str, total_pages: usize) -> Vec<(usize, usize)> {
     ranges
 }
 
-
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum SidebarTab {
     Thumbnails,
@@ -102,6 +106,7 @@ enum SidebarTab {
     Forms,
     Properties,
     Search,
+    Accessibility,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -264,6 +269,24 @@ struct RavPdfApp {
     form_field_value: String,
     form_field_options_csv: String,
     form_field_rect: [f64; 4],
+
+    // Accessibility state (FR-21)
+    show_accessibility_dialog: bool,
+    accessibility_report: Option<AccessibilityReport>,
+    accessibility_fix_title_input: String,
+    accessibility_fix_lang_input: String,
+
+    // Export Document state (FR-03.2)
+    show_export_dialog: bool,
+    export_format_idx: usize,
+    export_dpi: f32,
+    export_pages_all: bool,
+    export_pages_range: String,
+
+    // Collaboration & Comments state (FR-31)
+    show_comments_summary_dialog: bool,
+    comments_list: Vec<ReviewComment>,
+    show_merge_comments_dialog: bool,
 }
 
 impl Default for RavPdfApp {
@@ -394,6 +417,21 @@ impl Default for RavPdfApp {
             free_text_coords: None,
 
             form_field_text_buffers: std::collections::HashMap::new(),
+
+            show_accessibility_dialog: false,
+            accessibility_report: None,
+            accessibility_fix_title_input: String::new(),
+            accessibility_fix_lang_input: "en-US".into(),
+
+            show_export_dialog: false,
+            export_format_idx: 0,
+            export_dpi: 300.0,
+            export_pages_all: true,
+            export_pages_range: "1".into(),
+
+            show_comments_summary_dialog: false,
+            comments_list: Vec::new(),
+            show_merge_comments_dialog: false,
         }
     }
 }
@@ -609,6 +647,29 @@ impl RavPdfApp {
                     }
                     Err(e) => {
                         self.status_message = format!("Failed to extract text: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exports document to HTML file with structure and embedded styling (FR-03.2.6).
+    fn export_html_dialog(&mut self) {
+        if let Some(tab) = self.active_tab() {
+            if let Some(file) = rfd::FileDialog::new()
+                .add_filter("HTML Document", &["html", "htm"])
+                .save_file()
+            {
+                match export_to_html(&tab.doc, None) {
+                    Ok(html) => {
+                        if std::fs::write(&file, html).is_ok() {
+                            self.status_message = format!("Exported HTML to '{}'", file.display());
+                        } else {
+                            self.status_message = "Failed to write HTML export file".into();
+                        }
+                    }
+                    Err(e) => {
+                        self.status_message = format!("HTML export error: {}", e);
                     }
                 }
             }
@@ -955,6 +1016,14 @@ impl RavPdfApp {
                     }
                     ui.separator();
                     ui.menu_button("Export (FR-03.2)", |ui| {
+                        if ui.add_enabled(has_doc, Button::new("Export Document / Pages... (FR-03.2)")).clicked() {
+                            self.show_export_dialog = true;
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(has_doc, Button::new("Export HTML (.html)... (FR-03.2.6)")).clicked() {
+                            self.export_html_dialog();
+                            ui.close_menu();
+                        }
                         if ui.add_enabled(has_doc, Button::new("Export Pages as PNG... (FR-03.2.4)")).clicked() {
                             self.export_pages_as_png_dialog();
                             ui.close_menu();
@@ -1287,6 +1356,39 @@ impl RavPdfApp {
                     }
                     if ui.button("Action Wizard (Batch Processing)... (FR-30)").clicked() {
                         self.show_batch_dialog = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_doc, Button::new("Accessibility Checker... (FR-21.1)"))
+                        .clicked()
+                    {
+                        if let Some(tab) = self.active_tab() {
+                            let rep = audit_accessibility(&tab.doc).ok();
+                            let title = tab.metadata.as_ref().and_then(|m| m.title.clone()).unwrap_or_else(|| tab.title.clone());
+                            let lang = tab.doc.catalog().and_then(|c| c.get_str("Lang")).unwrap_or_else(|| "en-US".to_string());
+                            self.accessibility_report = rep;
+                            self.accessibility_fix_title_input = title;
+                            self.accessibility_fix_lang_input = lang;
+                            self.show_accessibility_dialog = true;
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Review & Comments Summary... (FR-31.5)"))
+                        .clicked()
+                    {
+                        if let Some(tab) = self.active_tab() {
+                            self.comments_list = get_document_comments(&tab.doc).unwrap_or_default();
+                            self.show_comments_summary_dialog = true;
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Merge Comments from Reviewer... (FR-31.3)"))
+                        .clicked()
+                    {
+                        self.show_merge_comments_dialog = true;
                         ui.close_menu();
                     }
                 });
@@ -1635,6 +1737,7 @@ impl RavPdfApp {
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Signatures, "Sign");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Properties, "Info");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Search, "Results");
+                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Accessibility, "A11y");
                 });
 
                 ui.separator();
@@ -2349,6 +2452,117 @@ impl RavPdfApp {
                                 tab.page_input_buffer = (p_idx + 1).to_string();
                                 tab.invalidate_render();
                             }
+                        }
+                    }
+
+                    SidebarTab::Accessibility => {
+                        ui.horizontal(|ui| {
+                            ui.heading("Accessibility");
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("Auditing...").on_hover_text("Refresh accessibility audit (FR-21.1)").clicked() {
+                                    if let Some(tab) = self.active_tab() {
+                                        self.accessibility_report = audit_accessibility(&tab.doc).ok();
+                                    }
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+
+                        let mut run_remediation = false;
+                        let mut open_dialog = false;
+
+                        if let Some(tab) = self.active_tab() {
+                            if self.accessibility_report.is_none() {
+                                self.accessibility_report = audit_accessibility(&tab.doc).ok();
+                            }
+
+                            if let Some(ref report) = self.accessibility_report {
+                                let (badge_color, status_text) = if report.is_compliant {
+                                    (Color32::from_rgb(46, 204, 113), "PDF/UA COMPLIANT")
+                                } else {
+                                    (Color32::from_rgb(231, 76, 60), "NON-COMPLIANT")
+                                };
+
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgb(25, 30, 40))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(60)))
+                                    .rounding(4.0)
+                                    .inner_margin(egui::Margin::same(8.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(status_text).color(badge_color).strong().size(12.0));
+                                        });
+                                        ui.add_space(2.0);
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "✓ {} Passed   ✕ {} Failed   ⚠ {} Check",
+                                                report.passed_count, report.failed_count, report.manual_check_count
+                                            ))
+                                            .size(11.0),
+                                        );
+                                    });
+
+                                ui.add_space(6.0);
+                                if !report.is_compliant {
+                                    if ui
+                                        .button("⚡ Quick Fix All Automatically")
+                                        .on_hover_text("Remediate title, language, tagged PDF structure, and tab order (FR-21.3-10)")
+                                        .clicked()
+                                    {
+                                        run_remediation = true;
+                                    }
+                                    ui.add_space(4.0);
+                                }
+
+                                ScrollArea::vertical().show(ui, |ui| {
+                                    for rule in &report.rules {
+                                        let (icon, icon_color) = match rule.status {
+                                            AccessibilityStatus::Passed => ("✓", Color32::from_rgb(46, 204, 113)),
+                                            AccessibilityStatus::Failed => ("✕", Color32::from_rgb(231, 76, 60)),
+                                            AccessibilityStatus::NeedsManualCheck => ("⚠", Color32::from_rgb(241, 196, 15)),
+                                        };
+
+                                        egui::Frame::none()
+                                            .fill(Color32::from_rgb(20, 24, 32))
+                                            .stroke(Stroke::new(1.0_f32, Color32::from_gray(50)))
+                                            .rounding(4.0)
+                                            .inner_margin(egui::Margin::same(6.0))
+                                            .show(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(RichText::new(icon).color(icon_color).strong());
+                                                    ui.label(RichText::new(&rule.title).strong().size(11.0));
+                                                });
+                                                ui.label(RichText::new(&rule.description).weak().size(10.0));
+                                            });
+                                        ui.add_space(3.0);
+                                    }
+
+                                    ui.add_space(8.0);
+                                    if ui.button("Full Accessibility Report...").clicked() {
+                                        open_dialog = true;
+                                    }
+                                });
+                            }
+                        }
+
+                        if run_remediation {
+                            let mut updated_opt = None;
+                            if let Some(tab) = self.active_tab_mut() {
+                                let default_title = tab.title.trim_end_matches(".pdf");
+                                if let Ok(updated_report) = remediate_all_automatic(&mut tab.doc, default_title, "en-US") {
+                                    tab.is_modified = true;
+                                    tab.invalidate_render();
+                                    updated_opt = Some(updated_report);
+                                }
+                            }
+                            if let Some(updated) = updated_opt {
+                                self.accessibility_report = Some(updated);
+                                self.status_message = "Applied automatic accessibility remediations (FR-21)".into();
+                            }
+                        }
+
+                        if open_dialog {
+                            self.show_accessibility_dialog = true;
                         }
                     }
                 }
@@ -4553,6 +4767,473 @@ impl RavPdfApp {
 
             if close {
                 self.show_add_form_field_dialog = false;
+            }
+        }
+
+        // 17. Accessibility Checker & Tagged PDF Dialog (FR-21.1 - FR-21.10)
+        if self.show_accessibility_dialog {
+            let mut close = false;
+            let mut run_remediation = false;
+            let mut reaudit = false;
+            let mut fix_lang = None;
+            let mut fix_title = None;
+            let mut fix_tabs = false;
+            let mut fix_tags = false;
+
+            if self.accessibility_report.is_none() {
+                if let Some(tab) = self.active_tab() {
+                    self.accessibility_report = audit_accessibility(&tab.doc).ok();
+                }
+            }
+
+            egui::Window::new("Accessibility Checker & PDF/UA Remediation (FR-21)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([650.0, 520.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Audits document against PDF/UA (ISO 14289) and WCAG 2.1 accessibility standards.");
+                    ui.add_space(6.0);
+
+                    if let Some(ref report) = self.accessibility_report {
+                        let (badge_col, status_lbl) = if report.is_compliant {
+                            (Color32::from_rgb(46, 204, 113), "COMPLIANT WITH PDF/UA (ISO 14289)")
+                        } else {
+                            (Color32::from_rgb(231, 76, 60), "NON-COMPLIANT (Accessibility Violations Detected)")
+                        };
+
+                        egui::Frame::none()
+                            .fill(Color32::from_rgb(25, 32, 45))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_gray(70)))
+                            .rounding(6.0)
+                            .inner_margin(egui::Margin::same(10.0))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(status_lbl).color(badge_col).strong().size(13.0));
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("✓ Passed: {}", report.passed_count)).color(Color32::from_rgb(46, 204, 113)).strong());
+                                    ui.label(RichText::new(format!("✕ Failed: {}", report.failed_count)).color(Color32::from_rgb(231, 76, 60)).strong());
+                                    ui.label(RichText::new(format!("⚠ Manual Check: {}", report.manual_check_count)).color(Color32::from_rgb(241, 196, 15)).strong());
+                                });
+                            });
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("⚡ Remediate All Automatically (FR-21.3-10)").on_hover_text("Fix title, display preference, natural language, tags, and structure tab order in one click").clicked() {
+                                run_remediation = true;
+                            }
+                            if ui.button("🔄 Re-Audit Document").clicked() {
+                                reaudit = true;
+                            }
+                        });
+
+                        ui.separator();
+                        ui.heading("Audit Rules & Verification Items");
+                        ui.add_space(4.0);
+
+                        ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                            for rule in &report.rules {
+                                let (icon, col) = match rule.status {
+                                    AccessibilityStatus::Passed => ("✓", Color32::from_rgb(46, 204, 113)),
+                                    AccessibilityStatus::Failed => ("✕", Color32::from_rgb(231, 76, 60)),
+                                    AccessibilityStatus::NeedsManualCheck => ("⚠", Color32::from_rgb(241, 196, 15)),
+                                };
+
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgb(22, 27, 36))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(50)))
+                                    .rounding(4.0)
+                                    .inner_margin(egui::Margin::same(8.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(icon).color(col).strong().size(14.0));
+                                            ui.label(RichText::new(&rule.title).strong());
+                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                ui.label(RichText::new(&rule.standard).weak().size(10.0));
+                                            });
+                                        });
+                                        ui.label(RichText::new(&rule.description).weak().size(11.0));
+                                        if rule.status == AccessibilityStatus::Failed {
+                                            ui.horizontal(|ui| {
+                                                ui.label(RichText::new(format!("Hint: {}", rule.remediation_hint)).color(Color32::from_rgb(226, 160, 60)).size(11.0));
+                                                if rule.can_auto_fix {
+                                                    if (rule.id == "PDF-UA-DocTitle" || rule.id == "PDF-UA-DisplayDocTitle")
+                                                        && ui.small_button("Fix Title").clicked()
+                                                    {
+                                                        fix_title = Some(self.accessibility_fix_title_input.clone());
+                                                    } else if rule.id == "PDF-UA-Lang"
+                                                        && ui.small_button("Fix Language").clicked()
+                                                    {
+                                                        fix_lang = Some(self.accessibility_fix_lang_input.clone());
+                                                    } else if rule.id == "PDF-UA-TabOrder"
+                                                        && ui.small_button("Fix Tab Order").clicked()
+                                                    {
+                                                        fix_tabs = true;
+                                                    } else if (rule.id == "PDF-UA-Marked" || rule.id == "PDF-UA-StructTreeRoot")
+                                                        && ui.small_button("Fix Tag Tree").clicked()
+                                                    {
+                                                        fix_tags = true;
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    });
+                                ui.add_space(4.0);
+                            }
+                        });
+                    }
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if reaudit {
+                if let Some(tab) = self.active_tab() {
+                    self.accessibility_report = audit_accessibility(&tab.doc).ok();
+                }
+            }
+            if run_remediation {
+                let lang = self.accessibility_fix_lang_input.clone();
+                let mut updated = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    let title = tab.title.trim_end_matches(".pdf");
+                    if let Ok(rep) = remediate_all_automatic(&mut tab.doc, title, &lang) {
+                        tab.is_modified = true;
+                        tab.invalidate_render();
+                        updated = Some(rep);
+                    }
+                }
+                if let Some(rep) = updated {
+                    self.accessibility_report = Some(rep);
+                    self.status_message = "Completed accessibility remediation (FR-21)".into();
+                }
+            }
+            if let Some(t) = fix_title {
+                let mut updated = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    let _ = fix_document_title(&mut tab.doc, &t);
+                    tab.is_modified = true;
+                    updated = audit_accessibility(&tab.doc).ok();
+                }
+                if let Some(rep) = updated {
+                    self.accessibility_report = Some(rep);
+                }
+            }
+            if let Some(l) = fix_lang {
+                let mut updated = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    let _ = fix_document_language(&mut tab.doc, &l);
+                    tab.is_modified = true;
+                    updated = audit_accessibility(&tab.doc).ok();
+                }
+                if let Some(rep) = updated {
+                    self.accessibility_report = Some(rep);
+                }
+            }
+            if fix_tabs {
+                let mut updated = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    let _ = fix_tab_order_to_structure(&mut tab.doc);
+                    tab.is_modified = true;
+                    updated = audit_accessibility(&tab.doc).ok();
+                }
+                if let Some(rep) = updated {
+                    self.accessibility_report = Some(rep);
+                }
+            }
+            if fix_tags {
+                let mut updated = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    let _ = fix_ensure_tagged_pdf(&mut tab.doc);
+                    tab.is_modified = true;
+                    updated = audit_accessibility(&tab.doc).ok();
+                }
+                if let Some(rep) = updated {
+                    self.accessibility_report = Some(rep);
+                }
+            }
+            if close {
+                self.show_accessibility_dialog = false;
+            }
+        }
+
+        // 18. Export Document Dialog (FR-03.2.4 - FR-03.2.6, FR-03.2.9)
+        if self.show_export_dialog {
+            let mut close = false;
+            let mut do_export = false;
+
+            egui::Window::new("Export Document (FR-03.2)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Export PDF content to other formats preserving structure and high quality:");
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Format:");
+                        egui::ComboBox::from_id_salt("export_fmt_combo")
+                            .selected_text(match self.export_format_idx {
+                                0 => "🌐 HTML5 Webpage (.html)",
+                                1 => "📄 Plain Text Document (.txt)",
+                                2 => "🖼 High-Res PNG Image (.png)",
+                                _ => "🖼 Compressed JPEG Image (.jpg)",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.export_format_idx, 0, "🌐 HTML5 Webpage (.html)");
+                                ui.selectable_value(&mut self.export_format_idx, 1, "📄 Plain Text Document (.txt)");
+                                ui.selectable_value(&mut self.export_format_idx, 2, "🖼 High-Res PNG Image (.png)");
+                                ui.selectable_value(&mut self.export_format_idx, 3, "🖼 Compressed JPEG Image (.jpg)");
+                            });
+                    });
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Page Range:");
+                        ui.radio_value(&mut self.export_pages_all, true, "All Pages");
+                        ui.radio_value(&mut self.export_pages_all, false, "Custom Range");
+                    });
+
+                    if !self.export_pages_all {
+                        ui.horizontal(|ui| {
+                            ui.label("Pages (e.g., 1-3, 5):");
+                            ui.text_edit_singleline(&mut self.export_pages_range);
+                        });
+                    }
+
+                    if self.export_format_idx == 2 || self.export_format_idx == 3 {
+                        ui.horizontal(|ui| {
+                            ui.label("Image DPI:");
+                            ui.radio_value(&mut self.export_dpi, 72.0, "72 DPI");
+                            ui.radio_value(&mut self.export_dpi, 150.0, "150 DPI");
+                            ui.radio_value(&mut self.export_dpi, 300.0, "300 DPI (Print)");
+                        });
+                    }
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Choose Destination & Export...").clicked() {
+                            do_export = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if do_export {
+                if let Some(tab) = self.active_tab() {
+                    let total_pages = tab.doc.page_count();
+                    let page_indices: Option<Vec<usize>> = if self.export_pages_all {
+                        None
+                    } else {
+                        let ranges = parse_page_ranges(&self.export_pages_range, total_pages);
+                        let mut set = Vec::new();
+                        for (s, e) in ranges {
+                            for p in s..=e {
+                                if !set.contains(&p) {
+                                    set.push(p);
+                                }
+                            }
+                        }
+                        Some(set)
+                    };
+
+                    match self.export_format_idx {
+                        0 => {
+                            if let Some(dest) = rfd::FileDialog::new()
+                                .add_filter("HTML Document", &["html", "htm"])
+                                .save_file()
+                            {
+                                if let Ok(html) = export_to_html(&tab.doc, page_indices.as_deref()) {
+                                    if std::fs::write(&dest, html).is_ok() {
+                                        self.status_message = format!("Exported HTML to '{}'", dest.display());
+                                        close = true;
+                                    }
+                                }
+                            }
+                        }
+                        1 => {
+                            if let Some(dest) = rfd::FileDialog::new()
+                                .add_filter("Text File", &["txt"])
+                                .save_file()
+                            {
+                                if let Ok(txt) = export_to_plain_text(&tab.doc, page_indices.as_deref()) {
+                                    if std::fs::write(&dest, txt).is_ok() {
+                                        self.status_message = format!("Exported text to '{}'", dest.display());
+                                        close = true;
+                                    }
+                                }
+                            }
+                        }
+                        2 | 3 => {
+                            let fmt = if self.export_format_idx == 2 {
+                                ExportImageFormat::Png
+                            } else {
+                                ExportImageFormat::Jpeg
+                            };
+                            let ext = if self.export_format_idx == 2 { "png" } else { "jpg" };
+
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                let targets: Vec<usize> = page_indices.unwrap_or_else(|| (0..total_pages).collect());
+                                let mut count = 0;
+                                for p in &targets {
+                                    if let Ok(bytes) = export_page_to_image(&tab.doc, *p, self.export_dpi, fmt) {
+                                        let out_path = folder.join(format!("page_{}.{}", p + 1, ext));
+                                        if std::fs::write(&out_path, bytes).is_ok() {
+                                            count += 1;
+                                        }
+                                    }
+                                }
+                                self.status_message = format!("Exported {} images to '{}'", count, folder.display());
+                                close = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if close {
+                self.show_export_dialog = false;
+            }
+        }
+
+        // 19. Comments & Review Summary Dialog (FR-31.5)
+        if self.show_comments_summary_dialog {
+            let mut close = false;
+            let mut do_csv = false;
+
+            egui::Window::new("Comments & Review Summary (FR-31.5)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([600.0, 420.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Review markup, sticky notes, annotations, and reviewer comments in document.");
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("Total Comments: {}", self.comments_list.len())).strong());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("📥 Export Comments as CSV (FR-31.5)").clicked() {
+                                do_csv = true;
+                            }
+                        });
+                    });
+                    ui.separator();
+
+                    if self.comments_list.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(20.0);
+                            ui.weak("No annotations or comments found in current document.");
+                        });
+                    } else {
+                        ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                            for (idx, c) in self.comments_list.iter().enumerate() {
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgb(22, 28, 38))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_gray(60)))
+                                    .rounding(4.0)
+                                    .inner_margin(egui::Margin::same(8.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(format!("#{}. Page {}", idx + 1, c.page_index + 1)).strong());
+                                            ui.label(RichText::new(format!("Type: {}", c.comment_type)).color(Color32::from_rgb(66, 153, 225)).size(11.0));
+                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                ui.label(RichText::new(&c.author).italics().size(11.0));
+                                            });
+                                        });
+                                        if !c.contents.is_empty() {
+                                            ui.add_space(2.0);
+                                            ui.label(&c.contents);
+                                        }
+                                    });
+                                ui.add_space(4.0);
+                            }
+                        });
+                    }
+
+                    ui.separator();
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+            if do_csv {
+                if let Some(dest) = rfd::FileDialog::new()
+                    .add_filter("CSV File", &["csv"])
+                    .save_file()
+                {
+                    let csv_content = export_comments_to_csv(&self.comments_list);
+                    if std::fs::write(&dest, csv_content).is_ok() {
+                        self.status_message = format!("Exported comments CSV to '{}'", dest.display());
+                        close = true;
+                    }
+                }
+            }
+
+            if close {
+                self.show_comments_summary_dialog = false;
+            }
+        }
+
+        // 20. Merge Comments from Reviewer Copy Dialog (FR-31.3)
+        if self.show_merge_comments_dialog {
+            let mut close = false;
+
+            egui::Window::new("Merge Reviewer Comments (FR-31.3)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Import annotations, stamps, notes, and highlights from a reviewer copy into this master PDF:");
+                    ui.add_space(8.0);
+
+                    if ui.button("📂 Select Reviewer PDF Copy...").clicked() {
+                        if let Some(reviewer_path) = rfd::FileDialog::new()
+                            .add_filter("PDF Document", &["pdf"])
+                            .pick_file()
+                        {
+                            match PdfDocument::load_from_file(&reviewer_path) {
+                                Ok(reviewer_doc) => {
+                                    if let Some(tab) = self.active_tab_mut() {
+                                        match merge_reviewer_annotations(&mut tab.doc, &reviewer_doc) {
+                                            Ok(count) => {
+                                                tab.is_modified = true;
+                                                tab.invalidate_render();
+                                                self.status_message = format!(
+                                                    "Successfully merged {} new comments/annotations from '{}'",
+                                                    count,
+                                                    reviewer_path.display()
+                                                );
+                                                close = true;
+                                            }
+                                            Err(e) => {
+                                                self.status_message = format!("Merge comments error: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.status_message = format!("Failed to read reviewer PDF: {}", e);
+                                }
+                            }
+                        }
+                    }
+
+                    ui.add_space(10.0);
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+
+            if close {
+                self.show_merge_comments_dialog = false;
             }
         }
     }
