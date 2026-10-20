@@ -10,8 +10,10 @@ use ravpdf_edit::{merge_documents, rotate_page, split_document};
 use ravpdf_forms::flatten_form;
 use ravpdf_render::{pixmap_to_png, render_page, Color, RenderOptions};
 use ravpdf_tools::{
-    apply_bates_numbering, apply_text_watermark, extract_all_text, get_document_info,
-    redact_pattern,
+    apply_bates_numbering, apply_text_watermark, audit_accessibility, export_comments_to_csv,
+    export_page_to_image, export_to_html, export_to_plain_text, extract_all_text,
+    get_document_comments, get_document_info, redact_pattern, remediate_all_automatic,
+    AccessibilityStatus, ExportImageFormat,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -189,6 +191,45 @@ enum Commands {
 
         #[arg(long, default_value_t = 1.0, help = "Zoom factor")]
         zoom: f32,
+    },
+
+    #[command(about = "Export document to HTML, plain text, or image (FR-03.2)")]
+    Export {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output file path")]
+        output: PathBuf,
+
+        #[arg(long, default_value = "html", help = "Export format: html, txt, png, jpg")]
+        format: String,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index for image export")]
+        page: usize,
+
+        #[arg(long, default_value_t = 300.0, help = "Resolution DPI for image export")]
+        dpi: f32,
+    },
+
+    #[command(about = "Audit and remediate PDF/UA and WCAG 2.1 accessibility (FR-21)")]
+    Audit {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(long, help = "Automatically remediate accessibility violations")]
+        auto_fix: bool,
+
+        #[arg(short, long, help = "Output path for remediated PDF")]
+        output: Option<PathBuf>,
+    },
+
+    #[command(about = "Summarize and export review comments as CSV (FR-31.5)")]
+    Comments {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, help = "Output CSV file path")]
+        output: Option<PathBuf>,
     },
 }
 
@@ -438,6 +479,111 @@ fn main() -> Result<()> {
             let png_bytes = pixmap_to_png(&pixmap)?;
             fs::write(&output, png_bytes)?;
             println!("Rendered page {} to {}", page, output.display());
+        }
+
+        Commands::Export {
+            input,
+            output,
+            format,
+            page,
+            dpi,
+        } => {
+            let doc = PdfDocument::load_from_file(&input)?;
+            let fmt_lower = format.to_lowercase();
+            match fmt_lower.as_str() {
+                "html" => {
+                    let html = export_to_html(&doc, None)?;
+                    fs::write(&output, html)?;
+                    println!("Exported HTML to {}", output.display());
+                }
+                "txt" | "text" => {
+                    let txt = export_to_plain_text(&doc, None)?;
+                    fs::write(&output, txt)?;
+                    println!("Exported text to {}", output.display());
+                }
+                "png" => {
+                    if page == 0 || page > doc.page_count() {
+                        eprintln!("Error: page number out of range (1-{})", doc.page_count());
+                        std::process::exit(1);
+                    }
+                    let bytes = export_page_to_image(&doc, page - 1, dpi, ExportImageFormat::Png)?;
+                    fs::write(&output, bytes)?;
+                    println!("Exported page {} as PNG ({:.0} DPI) to {}", page, dpi, output.display());
+                }
+                "jpg" | "jpeg" => {
+                    if page == 0 || page > doc.page_count() {
+                        eprintln!("Error: page number out of range (1-{})", doc.page_count());
+                        std::process::exit(1);
+                    }
+                    let bytes = export_page_to_image(&doc, page - 1, dpi, ExportImageFormat::Jpeg)?;
+                    fs::write(&output, bytes)?;
+                    println!("Exported page {} as JPEG ({:.0} DPI) to {}", page, dpi, output.display());
+                }
+                other => {
+                    eprintln!("Error: Unsupported export format '{}'. Choose from: html, txt, png, jpg", other);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Audit {
+            input,
+            auto_fix,
+            output,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let report = if auto_fix {
+                let default_title = input.file_stem().and_then(|s| s.to_str()).unwrap_or("Accessible Document");
+                let remediated = remediate_all_automatic(&mut doc, default_title, "en-US")?;
+                if let Some(ref out_path) = output {
+                    doc.save_to_file(out_path)?;
+                    println!("Saved remediated PDF to {}", out_path.display());
+                }
+                remediated
+            } else {
+                audit_accessibility(&doc)?
+            };
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            } else {
+                println!("=== PDF/UA & WCAG 2.1 Accessibility Audit ===");
+                println!("Document: {}", input.display());
+                println!("Status: {}", if report.is_compliant { "COMPLIANT" } else { "NON-COMPLIANT" });
+                println!("Results: {} Passed, {} Failed, {} Needs Manual Check\n",
+                    report.passed_count, report.failed_count, report.manual_check_count);
+
+                for rule in &report.rules {
+                    let tag = match rule.status {
+                        AccessibilityStatus::Passed => "[PASS]",
+                        AccessibilityStatus::Failed => "[FAIL]",
+                        AccessibilityStatus::NeedsManualCheck => "[WARN]",
+                    };
+                    println!("{} {}: {}", tag, rule.title, rule.description);
+                }
+            }
+        }
+
+        Commands::Comments {
+            input,
+            output,
+        } => {
+            let doc = PdfDocument::load_from_file(&input)?;
+            let comments = get_document_comments(&doc)?;
+
+            if let Some(ref out_path) = output {
+                let csv = export_comments_to_csv(&comments);
+                fs::write(out_path, csv)?;
+                println!("Exported {} comments to CSV: {}", comments.len(), out_path.display());
+            } else if cli.json {
+                println!("{}", serde_json::to_string_pretty(&comments).unwrap());
+            } else {
+                println!("=== Document Review Comments (Total: {}) ===", comments.len());
+                for (i, c) in comments.iter().enumerate() {
+                    println!("#{}. [Page {}] {}: {} - \"{}\"",
+                        i + 1, c.page_index + 1, c.comment_type, c.author, c.contents);
+                }
+            }
         }
     }
 

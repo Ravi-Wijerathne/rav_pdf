@@ -81,3 +81,56 @@ fn test_full_document_lifecycle() {
     let reloaded = PdfDocument::load_from_bytes(&bytes).expect("reload");
     assert_eq!(reloaded.page_count(), 2);
 }
+
+#[test]
+fn test_accessibility_export_and_comments_workflows() {
+    use ravpdf_annot::{add_annotation_to_page, Annotation, AnnotationType};
+    use ravpdf_tools::{
+        audit_accessibility, export_comments_to_csv, export_page_to_image, export_to_html,
+        export_to_plain_text, get_document_comments, remediate_all_automatic,
+        ExportImageFormat,
+    };
+
+    let mut doc = PdfDocument::new();
+    let content = b"BT\n/F1 14 Tf\n50 700 Td\n(Accessibility & Export Test Report) Tj\nET\n";
+    doc.add_page_with_content(paper_sizes::LETTER.0, paper_sizes::LETTER.1, content.to_vec());
+
+    // 1. Accessibility Audit (FR-21.1)
+    let audit_before = audit_accessibility(&doc).expect("audit before");
+    assert!(!audit_before.is_compliant);
+
+    // 2. Auto-Remediation (FR-21.3 - FR-21.10)
+    let audit_after = remediate_all_automatic(&mut doc, "Compliant Report", "en-US").expect("remediate");
+    assert_eq!(audit_after.failed_count, 0);
+    assert!(audit_after.is_compliant);
+
+    // 3. Export to Plain Text (FR-03.2.5)
+    let plain_text = export_to_plain_text(&doc, None).expect("export text");
+    assert!(plain_text.contains("Accessibility & Export Test Report"));
+    assert!(plain_text.contains("--- Page 1 of 1 ---"));
+
+    // 4. Export to HTML (FR-03.2.6)
+    let html = export_to_html(&doc, None).expect("export html");
+    assert!(html.contains("<!DOCTYPE html>"));
+    assert!(html.contains("Compliant Report"));
+    assert!(html.contains("Accessibility &amp; Export Test Report"));
+
+    // 5. Export to PNG image (FR-03.2.4)
+    let png = export_page_to_image(&doc, 0, 150.0, ExportImageFormat::Png).expect("export png");
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+    // 6. Review Comments & CSV (FR-31.5)
+    let mut note = Annotation::new(AnnotationType::Text, [100.0, 500.0, 130.0, 530.0]);
+    note.contents = Some("Approved with minor revisions.".into());
+    note.author = Some("Accessibility Reviewer".into());
+    add_annotation_to_page(&mut doc, 0, &note).expect("add note");
+
+    let comments = get_document_comments(&doc).expect("get comments");
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].author, "Accessibility Reviewer");
+
+    let csv = export_comments_to_csv(&comments);
+    assert!(csv.contains("Accessibility Reviewer"));
+    assert!(csv.contains("Approved with minor revisions."));
+}
+
