@@ -134,3 +134,81 @@ fn test_accessibility_export_and_comments_workflows() {
     assert!(csv.contains("Approved with minor revisions."));
 }
 
+#[test]
+fn test_measure_portfolio_and_linearization_workflows() {
+    use ravpdf_tools::{
+        add_measurement_line_annotation, calculate_distance, create_portfolio,
+        extract_portfolio_item, get_portfolio, is_linearized, is_portfolio,
+        linearize_document, optimize_document, search_portfolio, LinearUnit,
+        PortfolioItem, PortfolioLayout, ScaleRatio,
+    };
+
+    // 1. Measurement Engine (FR-26.1, FR-26.4, FR-26.5)
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0);
+
+    // Architectural scale: 1 in = 10 ft
+    let scale = ScaleRatio::architectural_inch_to_feet(10.0);
+    // Measure 2 inches (144 pt) = 20 feet
+    let dist = calculate_distance([50.0, 100.0], [194.0, 100.0], &scale, LinearUnit::Feet);
+    assert_eq!(dist.points_distance, 144.0);
+    assert!((dist.world_distance - 20.0).abs() < 1e-4);
+    assert_eq!(dist.formatted, "20.00 ft");
+
+    // Add measurement line annotation to page (FR-26.4)
+    let annot_id = add_measurement_line_annotation(&mut doc, 0, &dist, (0.0, 0.45, 0.85))
+        .expect("add measurement annot");
+    assert!(doc.objects.contains_key(&annot_id));
+
+    // 2. Linearization / Fast Web View (FR-02.8, FR-25.8)
+    assert!(!is_linearized(&doc.to_bytes().unwrap()));
+    let lin_bytes = linearize_document(&doc).expect("linearize");
+    assert!(is_linearized(&lin_bytes));
+
+    // 3. Optimization (FR-25.1)
+    let stats = optimize_document(&mut doc).expect("optimize doc");
+    assert!(stats.optimized_bytes > 0);
+
+    // 4. Portfolio Studio (FR-29.2.1 - FR-29.2.5)
+    let sample_csv = PortfolioItem {
+        filename: "dataset.csv".into(),
+        description: Some("Sensor Data".into()),
+        size: 26,
+        data: b"timestamp,temp\n1000,23.5\n".to_vec(),
+        mime_type: Some("text/csv".into()),
+    };
+    let sample_notes = PortfolioItem {
+        filename: "notes.txt".into(),
+        description: Some("Field Notes".into()),
+        size: 19,
+        data: b"Calibration passed.".to_vec(),
+        mime_type: Some("text/plain".into()),
+    };
+
+    let port_doc = create_portfolio(
+        &[sample_csv.clone(), sample_notes.clone()],
+        PortfolioLayout::Tile,
+        "Field Inspection Portfolio",
+        Some("Project Phase 1 Assets"),
+    )
+    .expect("create portfolio");
+
+    assert!(is_portfolio(&port_doc));
+
+    let portfolio = get_portfolio(&port_doc).expect("get portfolio");
+    assert_eq!(portfolio.title, "Field Inspection Portfolio");
+    assert_eq!(portfolio.items.len(), 2);
+
+    // Search inside portfolio (FR-29.2.3)
+    let matches = search_portfolio(&portfolio, "sensor");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].filename, "dataset.csv");
+
+    // Extract file from portfolio (FR-29.2.4)
+    let extracted = extract_portfolio_item(&port_doc, "notes.txt")
+        .expect("extract item")
+        .expect("found notes");
+    assert_eq!(extracted, b"Calibration passed.");
+}
+
+

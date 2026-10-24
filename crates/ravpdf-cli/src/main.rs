@@ -4,16 +4,19 @@
 
 use clap::{Parser as ClapParser, Subcommand};
 use ravpdf_core::document::PdfDocument;
-use ravpdf_core::error::Result;
+use anyhow::Result;
 use ravpdf_crypto::{decrypt_document, encrypt_document, Permissions};
 use ravpdf_edit::{merge_documents, rotate_page, split_document};
 use ravpdf_forms::flatten_form;
 use ravpdf_render::{pixmap_to_png, render_page, Color, RenderOptions};
 use ravpdf_tools::{
-    apply_bates_numbering, apply_text_watermark, audit_accessibility, export_comments_to_csv,
-    export_page_to_image, export_to_html, export_to_plain_text, extract_all_text,
-    get_document_comments, get_document_info, redact_pattern, remediate_all_automatic,
-    AccessibilityStatus, ExportImageFormat,
+    add_measurement_line_annotation, apply_bates_numbering, apply_text_watermark,
+    audit_accessibility, calculate_distance, create_portfolio,
+    export_comments_to_csv, export_page_to_image, export_to_html, export_to_plain_text,
+    extract_all_text, extract_portfolio_item, get_document_comments, get_document_info,
+    get_portfolio, linearize_document, optimize_document, redact_pattern, remediate_all_automatic,
+    AccessibilityStatus, ExportImageFormat, LinearUnit, PortfolioItem, PortfolioLayout,
+    ScaleRatio,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -231,6 +234,113 @@ enum Commands {
         #[arg(short, long, help = "Output CSV file path")]
         output: Option<PathBuf>,
     },
+
+    #[command(about = "Measure linear distance between two points on a PDF page (FR-26.1)")]
+    Measure {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, required = true, help = "Start X coordinate in PDF user points")]
+        x1: f64,
+
+        #[arg(long, required = true, help = "Start Y coordinate in PDF user points")]
+        y1: f64,
+
+        #[arg(long, required = true, help = "End X coordinate in PDF user points")]
+        x2: f64,
+
+        #[arg(long, required = true, help = "End Y coordinate in PDF user points")]
+        y2: f64,
+
+        #[arg(long, default_value = "in", help = "Measurement unit: pt, in, cm, mm, ft, m, yd")]
+        unit: String,
+
+        #[arg(long, help = "Configurable scale ratio e.g. '1:100' or '1in=10ft'")]
+        scale: Option<String>,
+
+        #[arg(short, long, help = "Output path to save PDF with dimension line annotation")]
+        output: Option<PathBuf>,
+    },
+
+    #[command(about = "Create, list, or extract files from a PDF Portfolio (FR-29.2)")]
+    Portfolio {
+        #[command(subcommand)]
+        action: PortfolioCommands,
+    },
+
+    #[command(about = "Optimize, compress, or linearize PDF for fast web view (FR-25, FR-02.8)")]
+    Optimize {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, help = "Linearize document for fast web view streaming (FR-02.8)")]
+        linearize: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PortfolioCommands {
+    #[command(about = "Create a new PDF Portfolio bundling multiple files (FR-29.2.1)")]
+    Create {
+        #[arg(short, long, required = true, help = "Output PDF portfolio file")]
+        output: PathBuf,
+
+        #[arg(long, default_value = "PDF Portfolio", help = "Portfolio title")]
+        title: String,
+
+        #[arg(long, default_value = "tile", help = "Portfolio layout: tile, details")]
+        layout: String,
+
+        #[arg(required = true, help = "Files to bundle into the portfolio")]
+        inputs: Vec<PathBuf>,
+    },
+
+    #[command(about = "List embedded files in a PDF Portfolio (FR-29.2.3)")]
+    List {
+        #[arg(help = "Input PDF Portfolio file")]
+        input: PathBuf,
+    },
+
+    #[command(about = "Extract files from a PDF Portfolio (FR-29.2.4)")]
+    Extract {
+        #[arg(help = "Input PDF Portfolio file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output directory")]
+        output: PathBuf,
+
+        #[arg(long, help = "Specific filename to extract (extracts all if omitted)")]
+        filename: Option<String>,
+    },
+}
+
+fn parse_scale_ratio(s: &str) -> ScaleRatio {
+    let s = s.trim();
+    if let Some((left, right)) = s.split_once(':') {
+        if let (Ok(l), Ok(r)) = (left.trim().parse::<f64>(), right.trim().parse::<f64>()) {
+            if l > 0.0 && r > 0.0 {
+                return ScaleRatio::dimensionless(r / l);
+            }
+        }
+    } else if let Some((left, right)) = s.split_once('=') {
+        let parse_val_unit = |text: &str| -> (f64, LinearUnit) {
+            let num_str: String = text.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            let unit_str: String = text.chars().skip_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            let val = num_str.parse::<f64>().unwrap_or(1.0);
+            let unit = LinearUnit::parse_str(&unit_str).unwrap_or(LinearUnit::Inches);
+            (val, unit)
+        };
+        let (d_val, d_unit) = parse_val_unit(left.trim());
+        let (w_val, w_unit) = parse_val_unit(right.trim());
+        return ScaleRatio::new(d_val, d_unit, w_val, w_unit);
+    }
+    ScaleRatio::default()
 }
 
 fn main() -> Result<()> {
@@ -583,6 +693,150 @@ fn main() -> Result<()> {
                     println!("#{}. [Page {}] {}: {} - \"{}\"",
                         i + 1, c.page_index + 1, c.comment_type, c.author, c.contents);
                 }
+            }
+        }
+
+        Commands::Measure {
+            input,
+            page,
+            x1,
+            y1,
+            x2,
+            y2,
+            unit,
+            scale,
+            output,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let page_idx = page.saturating_sub(1);
+            let linear_unit = LinearUnit::parse_str(&unit).unwrap_or(LinearUnit::Inches);
+            let scale_ratio = match scale {
+                Some(ref s) => parse_scale_ratio(s),
+                None => ScaleRatio::default(),
+            };
+
+            let dist_res = calculate_distance([x1, y1], [x2, y2], &scale_ratio, linear_unit);
+
+            if let Some(ref out_path) = output {
+                add_measurement_line_annotation(&mut doc, page_idx, &dist_res, (0.0, 0.45, 0.85))?;
+                doc.save_to_file(out_path)?;
+                println!("Saved measured and annotated PDF to {}", out_path.display());
+            }
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&dist_res).unwrap());
+            } else {
+                println!("=== RavPDF Dimension Measurement ===");
+                println!("Document: {}", input.display());
+                println!("Page: {}", page);
+                println!("From: ({:.1}, {:.1}) pt -> To: ({:.1}, {:.1}) pt", x1, y1, x2, y2);
+                println!("Scale: {}", scale_ratio.to_display_string());
+                println!("Raw Distance: {:.2} pt", dist_res.points_distance);
+                println!("Measured Result: {}", dist_res.formatted);
+                println!("Angle: {:.1}°", dist_res.angle_degrees);
+            }
+        }
+
+        Commands::Portfolio { action } => match action {
+            PortfolioCommands::Create {
+                output,
+                title,
+                layout,
+                inputs,
+            } => {
+                let mut items = Vec::new();
+                for in_path in inputs {
+                    let item = PortfolioItem::from_file_path(&in_path, None)?;
+                    items.push(item);
+                }
+
+                let port_layout = match layout.to_lowercase().as_str() {
+                    "details" | "table" => PortfolioLayout::Details,
+                    _ => PortfolioLayout::Tile,
+                };
+
+                let doc = create_portfolio(&items, port_layout, &title, None)?;
+                doc.save_to_file(&output)?;
+                println!("Created PDF Portfolio with {} files: {}", items.len(), output.display());
+            }
+
+            PortfolioCommands::List { input } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                let portfolio = get_portfolio(&doc)?;
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&portfolio).unwrap());
+                } else {
+                    println!("=== PDF Portfolio: \"{}\" ===", portfolio.title);
+                    if let Some(ref desc) = portfolio.description {
+                        println!("Description: {}", desc);
+                    }
+                    println!("Total Embedded Files: {}\n", portfolio.items.len());
+
+                    for (i, item) in portfolio.items.iter().enumerate() {
+                        let size_kb = (item.size as f64) / 1024.0;
+                        let desc_str = item.description.as_deref().unwrap_or("-");
+                        println!("#{}. {} | {:.1} KB | {}", i + 1, item.filename, size_kb, desc_str);
+                    }
+                }
+            }
+
+            PortfolioCommands::Extract {
+                input,
+                output,
+                filename,
+            } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                fs::create_dir_all(&output)?;
+
+                if let Some(ref target_name) = filename {
+                    if let Some(data) = extract_portfolio_item(&doc, target_name)? {
+                        let target_path = output.join(target_name);
+                        fs::write(&target_path, data)?;
+                        println!("Extracted {} to {}", target_name, target_path.display());
+                    } else {
+                        eprintln!("Error: File '{}' not found in portfolio", target_name);
+                        std::process::exit(1);
+                    }
+                } else {
+                    let portfolio = get_portfolio(&doc)?;
+                    let mut extracted_count = 0;
+                    for item in &portfolio.items {
+                        let target_path = output.join(&item.filename);
+                        fs::write(&target_path, &item.data)?;
+                        extracted_count += 1;
+                    }
+                    println!("Extracted all {} files to {}", extracted_count, output.display());
+                }
+            }
+        },
+
+        Commands::Optimize {
+            input,
+            output,
+            linearize,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let stats = optimize_document(&mut doc)?;
+
+            if linearize {
+                let lin_bytes = linearize_document(&doc)?;
+                fs::write(&output, lin_bytes)?;
+                println!("Optimized and linearized PDF written to {}", output.display());
+            } else {
+                doc.save_to_file(&output)?;
+                println!("Optimized PDF written to {}", output.display());
+            }
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&stats).unwrap());
+            } else {
+                println!("=== Optimization Summary ===");
+                println!("Original Size: {} bytes", stats.original_bytes);
+                println!("Optimized Size: {} bytes", stats.optimized_bytes);
+                println!("Saved: {} bytes ({:.1}% reduction)", stats.saved_bytes(), stats.reduction_percent());
+                println!("Streams Compressed: {}", stats.streams_compressed);
+                println!("Dead Objects Pruned: {}", stats.objects_removed);
             }
         }
     }

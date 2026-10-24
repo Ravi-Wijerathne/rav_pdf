@@ -44,17 +44,20 @@ use ravpdf_forms::{
 };
 use ravpdf_render::{pixmap_to_png, render_page, RenderOptions};
 use ravpdf_tools::{
-    add_attachment, apply_bates_numbering, apply_headers_and_footers, apply_text_watermark,
-    audit_accessibility, audit_space_usage, compare_documents,
+    add_attachment, add_measurement_line_annotation, apply_bates_numbering,
+    apply_headers_and_footers, apply_text_watermark, audit_accessibility, audit_space_usage,
+    calculate_area, calculate_distance, compare_documents, create_portfolio,
     execute_batch, export_comments_to_csv, export_page_to_image, export_to_html,
     export_to_plain_text, extract_all_text, find_and_replace, find_and_replace_page,
     fix_document_language, fix_document_title, fix_ensure_tagged_pdf, fix_tab_order_to_structure,
-    get_attachments, get_document_comments, merge_reviewer_annotations, optimize_document,
+    get_attachments, get_document_comments, get_page_geospatial_viewports, get_portfolio,
+    is_linearized, is_portfolio, linearize_document, merge_reviewer_annotations, optimize_document,
     redact_page_area, redact_pattern, remediate_all_automatic, remove_attachment, run_preflight,
     search_document, set_document_info, AccessibilityReport, AccessibilityStatus,
-    BatchAction, BatchJob, BatchResult, ComparisonReport, ExportImageFormat, FileAttachment,
-    HeaderFooterConfig, OptimizationStats, PreflightProfile, PreflightReport, PreflightSeverity,
-    ReviewComment, SearchMatch, SpaceAudit,
+    AreaUnit, BatchAction, BatchJob, BatchResult, ComparisonReport, ExportImageFormat, FileAttachment,
+    HeaderFooterConfig, LinearUnit, OptimizationStats, PortfolioItem, PortfolioLayout,
+    PreflightProfile, PreflightReport, PreflightSeverity, ReviewComment, ScaleRatio, SearchMatch,
+    SnapOptions, SpaceAudit,
 };
 use std::path::PathBuf;
 use tab::DocumentTab;
@@ -287,6 +290,28 @@ struct RavPdfApp {
     show_comments_summary_dialog: bool,
     comments_list: Vec<ReviewComment>,
     show_merge_comments_dialog: bool,
+
+    // Measurement & Geospatial state (FR-26)
+    show_measure_scale_dialog: bool,
+    measure_scale: ScaleRatio,
+    measure_unit: LinearUnit,
+    measure_area_unit: AreaUnit,
+    measure_snap: SnapOptions,
+    measure_scale_preset_idx: usize,
+    measure_scale_custom_drawing_val: f64,
+    measure_scale_custom_world_val: f64,
+    measure_calib_real_val: f64,
+    measure_bake_as_annot: bool,
+
+    // PDF Portfolio Studio state (FR-29.2)
+    show_portfolio_dialog: bool,
+    portfolio_title_input: String,
+    portfolio_desc_input: String,
+    portfolio_layout_idx: usize,
+    portfolio_input_paths: Vec<PathBuf>,
+
+    // Fast Web View / Linearization state (FR-02.8, FR-25.8)
+    show_linearize_dialog: bool,
 }
 
 impl Default for RavPdfApp {
@@ -432,6 +457,25 @@ impl Default for RavPdfApp {
             show_comments_summary_dialog: false,
             comments_list: Vec::new(),
             show_merge_comments_dialog: false,
+
+            show_measure_scale_dialog: false,
+            measure_scale: ScaleRatio::default(),
+            measure_unit: LinearUnit::Inches,
+            measure_area_unit: AreaUnit::SquareInches,
+            measure_snap: SnapOptions::default(),
+            measure_scale_preset_idx: 0,
+            measure_scale_custom_drawing_val: 1.0,
+            measure_scale_custom_world_val: 1.0,
+            measure_calib_real_val: 10.0,
+            measure_bake_as_annot: false,
+
+            show_portfolio_dialog: false,
+            portfolio_title_input: "PDF Portfolio".into(),
+            portfolio_desc_input: String::new(),
+            portfolio_layout_idx: 0,
+            portfolio_input_paths: Vec::new(),
+
+            show_linearize_dialog: false,
         }
     }
 }
@@ -1048,6 +1092,17 @@ impl RavPdfApp {
                         self.show_optimize_dialog = true;
                         ui.close_menu();
                     }
+                    if ui.button("Create PDF Portfolio... (FR-29.2)").clicked() {
+                        self.show_portfolio_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Linearize for Fast Web View... (FR-02.8)"))
+                        .clicked()
+                    {
+                        self.show_linearize_dialog = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui
                         .add_enabled(has_doc, Button::new("Close Tab (Ctrl+W)"))
@@ -1391,6 +1446,13 @@ impl RavPdfApp {
                         self.show_merge_comments_dialog = true;
                         ui.close_menu();
                     }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Measurement Scale & Calibration... (FR-26.5)"))
+                        .clicked()
+                    {
+                        self.show_measure_scale_dialog = true;
+                        ui.close_menu();
+                    }
                 });
 
                 ui.menu_button("Help", |ui| {
@@ -1577,6 +1639,15 @@ impl RavPdfApp {
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Redact, "Redact");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::MeasureDistance, "📏 Distance");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::MeasureArea, "📐 Area");
+
+                    if self.active_tool == ActiveTool::MeasureDistance || self.active_tool == ActiveTool::MeasureArea {
+                        ui.separator();
+                        if ui.small_button("⚙ Scale").on_hover_text("Configure scale ratio and measurement units (FR-26.5)").clicked() {
+                            self.show_measure_scale_dialog = true;
+                        }
+                        ui.checkbox(&mut self.measure_bake_as_annot, "Annotate")
+                            .on_hover_text("Bake measurements into document as annotations (FR-26.4)");
+                    }
                 });
             });
         });
@@ -2172,7 +2243,20 @@ impl RavPdfApp {
                     }
 
                     SidebarTab::Attachments => {
-                        ui.heading("Attachments (FR-29)");
+                        let is_port = self.active_tab().map(|t| is_portfolio(&t.doc)).unwrap_or(false);
+                        if is_port {
+                            ui.horizontal(|ui| {
+                                ui.heading("🗂 Portfolio");
+                                ui.label(RichText::new("ISO 32000-1").size(11.0).color(Color32::from_rgb(0, 180, 216)));
+                            });
+                            if let Some(tab) = self.active_tab() {
+                                if let Ok(port) = get_portfolio(&tab.doc) {
+                                    ui.weak(format!("Title: {}", port.title));
+                                }
+                            }
+                        } else {
+                            ui.heading("Attachments (FR-29)");
+                        }
                         ui.add_space(4.0);
 
                         ui.horizontal(|ui| {
@@ -2626,6 +2710,15 @@ impl RavPdfApp {
                             ui.label(format!("{:.1} x {:.1} pt", w, h));
                             ui.separator();
                         }
+                        let viewports = get_page_geospatial_viewports(&tab.doc, tab.current_page).unwrap_or_default();
+                        if !viewports.is_empty() {
+                            ui.label(RichText::new("🌐 Geospatial PDF (WGS84)").color(Color32::from_rgb(0, 180, 216)).size(11.0));
+                            ui.separator();
+                        }
+                        if self.active_tool == ActiveTool::MeasureDistance || self.active_tool == ActiveTool::MeasureArea {
+                            ui.label(RichText::new(format!("Scale: {}", self.measure_scale.to_display_string())).size(11.0).color(Color32::from_rgb(100, 220, 255)));
+                            ui.separator();
+                        }
                         ui.label(format!("Tool: {:?}", self.active_tool));
                     }
                 });
@@ -2921,40 +3014,51 @@ impl RavPdfApp {
                             }
                             ActiveTool::MeasureDistance => {
                                 let cyan = Color32::from_rgb(0, 180, 216);
-                                ui.painter().line_segment([start, curr], Stroke::new(2.0_f32, cyan));
+                                ui.painter().line_segment([start, curr], Stroke::new(2.5_f32, cyan));
+
+                                let local_x1 = ((start.x - rect.min.x) / zoom) as f64;
+                                let local_y1 = ((rect.max.y - start.y) / zoom) as f64;
+                                let local_x2 = ((curr.x - rect.min.x) / zoom) as f64;
+                                let local_y2 = ((rect.max.y - curr.y) / zoom) as f64;
+
+                                let dist_res = calculate_distance([local_x1, local_y1], [local_x2, local_y2], &self.measure_scale, self.measure_unit);
 
                                 let dx = curr.x - start.x;
                                 let dy = curr.y - start.y;
                                 let len = (dx * dx + dy * dy).sqrt();
                                 if len > 2.0 {
-                                    let nx = -dy / len * 6.0;
-                                    let ny = dx / len * 6.0;
+                                    let nx = -dy / len * 7.0;
+                                    let ny = dx / len * 7.0;
                                     ui.painter().line_segment([Pos2::new(start.x + nx, start.y + ny), Pos2::new(start.x - nx, start.y - ny)], Stroke::new(2.0_f32, cyan));
                                     ui.painter().line_segment([Pos2::new(curr.x + nx, curr.y + ny), Pos2::new(curr.x - nx, curr.y - ny)], Stroke::new(2.0_f32, cyan));
                                 }
 
-                                let pt_dist = len / zoom;
-                                let in_dist = pt_dist / 72.0;
-                                let cm_dist = in_dist * 2.54;
-                                let text = format!("{:.1} pt ({:.2}\" / {:.2} cm)", pt_dist, in_dist, cm_dist);
-                                let mid = Pos2::new((start.x + curr.x) * 0.5, (start.y + curr.y) * 0.5 - 12.0);
-                                ui.painter().rect_filled(Rect::from_center_size(mid, Vec2::new(140.0, 20.0)), 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
-                                ui.painter().text(mid, Align2::CENTER_CENTER, text, FontId::proportional(11.0), Color32::WHITE);
+                                let text = format!("📏 {} ({:.1} pt, {:.1}°)", dist_res.formatted, dist_res.points_distance, dist_res.angle_degrees);
+                                let mid = Pos2::new((start.x + curr.x) * 0.5, (start.y + curr.y) * 0.5 - 14.0);
+                                ui.painter().rect_filled(Rect::from_center_size(mid, Vec2::new(170.0, 22.0)), 4.0, Color32::from_rgba_unmultiplied(10, 25, 47, 230));
+                                ui.painter().text(mid, Align2::CENTER_CENTER, text, FontId::proportional(11.5), Color32::from_rgb(0, 220, 255));
                             }
                             ActiveTool::MeasureArea => {
                                 let cyan = Color32::from_rgb(0, 180, 216);
-                                ui.painter().rect_filled(drag_rect, 0.0, Color32::from_rgba_unmultiplied(0, 180, 216, 50));
+                                ui.painter().rect_filled(drag_rect, 0.0, Color32::from_rgba_unmultiplied(0, 180, 216, 40));
                                 ui.painter().rect_stroke(drag_rect, 0.0, Stroke::new(2.0_f32, cyan));
 
-                                let w_pt = drag_rect.width() / zoom;
-                                let h_pt = drag_rect.height() / zoom;
-                                let area_pt = (w_pt * h_pt) as f64;
-                                let area_in = area_pt / (72.0 * 72.0);
-                                let area_cm = area_in * 6.4516;
-                                let text = format!("{:.2} sq in ({:.1} sq cm)", area_in, area_cm);
+                                let local_x1 = ((drag_rect.min.x - rect.min.x) / zoom) as f64;
+                                let local_x2 = ((drag_rect.max.x - rect.min.x) / zoom) as f64;
+                                let local_y1 = ((rect.max.y - drag_rect.max.y) / zoom) as f64;
+                                let local_y2 = ((rect.max.y - drag_rect.min.y) / zoom) as f64;
+
+                                let area_res = calculate_area(&[
+                                    [local_x1, local_y1],
+                                    [local_x2, local_y1],
+                                    [local_x2, local_y2],
+                                    [local_x1, local_y2],
+                                ], &self.measure_scale, self.measure_area_unit, self.measure_unit);
+
+                                let text = format!("📐 {} (Perim: {})", area_res.formatted, area_res.perimeter_result.formatted);
                                 let center = drag_rect.center();
-                                ui.painter().rect_filled(Rect::from_center_size(center, Vec2::new(140.0, 20.0)), 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
-                                ui.painter().text(center, Align2::CENTER_CENTER, text, FontId::proportional(11.0), Color32::WHITE);
+                                ui.painter().rect_filled(Rect::from_center_size(center, Vec2::new(170.0, 22.0)), 4.0, Color32::from_rgba_unmultiplied(10, 25, 47, 230));
+                                ui.painter().text(center, Align2::CENTER_CENTER, text, FontId::proportional(11.5), Color32::from_rgb(0, 220, 255));
                             }
                             ActiveTool::Link => {
                                 let blue = Color32::from_rgb(0, 102, 204);
@@ -3018,28 +3122,47 @@ impl RavPdfApp {
                                                 curr_page,
                                                 pdf_rect,
                                                 Some("[REDACTED]"),
-                                            );
+                                             );
                                             tab.is_modified = true;
                                             tab.invalidate_render();
                                             self.status_message = format!("Permanently redacted area on page {}", curr_page + 1);
                                         }
                                     }
                                     ActiveTool::MeasureDistance => {
-                                        let dx = curr.x - start.x;
-                                        let dy = curr.y - start.y;
-                                        let len = (dx * dx + dy * dy).sqrt();
-                                        let pt_dist = len / zoom;
-                                        let in_dist = pt_dist / 72.0;
-                                        let cm_dist = in_dist * 2.54;
-                                        self.status_message = format!("Measured Distance: {:.1} pt ({:.2} in / {:.2} cm)", pt_dist, in_dist, cm_dist);
+                                        let local_x1 = ((start.x - rect.min.x) / zoom) as f64;
+                                        let local_y1 = ((rect.max.y - start.y) / zoom) as f64;
+                                        let local_x2 = ((curr.x - rect.min.x) / zoom) as f64;
+                                        let local_y2 = ((rect.max.y - curr.y) / zoom) as f64;
+
+                                        let dist_res = calculate_distance([local_x1, local_y1], [local_x2, local_y2], &self.measure_scale, self.measure_unit);
+                                        self.measure_calib_real_val = dist_res.world_distance;
+
+                                        if self.measure_bake_as_annot {
+                                            if let Some(tab) = self.active_tab_mut() {
+                                                let curr_page = tab.current_page;
+                                                let _ = add_measurement_line_annotation(&mut tab.doc, curr_page, &dist_res, (0.0, 0.7, 0.9));
+                                                tab.is_modified = true;
+                                                tab.invalidate_render();
+                                                self.status_message = format!("Added measurement annotation: {}", dist_res.formatted);
+                                            }
+                                        } else {
+                                            self.status_message = format!("Measured Distance: {} ({:.1} pt, Angle: {:.1}°)", dist_res.formatted, dist_res.points_distance, dist_res.angle_degrees);
+                                        }
                                     }
                                     ActiveTool::MeasureArea => {
-                                        let w_pt = drag_rect.width() / zoom;
-                                        let h_pt = drag_rect.height() / zoom;
-                                        let area_pt = (w_pt * h_pt) as f64;
-                                        let area_in = area_pt / (72.0 * 72.0);
-                                        let area_cm = area_in * 6.4516;
-                                        self.status_message = format!("Measured Area: {:.1} sq pt ({:.2} sq in / {:.2} sq cm)", area_pt, area_in, area_cm);
+                                        let local_x1 = ((drag_rect.min.x - rect.min.x) / zoom) as f64;
+                                        let local_x2 = ((drag_rect.max.x - rect.min.x) / zoom) as f64;
+                                        let local_y1 = ((rect.max.y - drag_rect.max.y) / zoom) as f64;
+                                        let local_y2 = ((rect.max.y - drag_rect.min.y) / zoom) as f64;
+
+                                        let area_res = calculate_area(&[
+                                            [local_x1, local_y1],
+                                            [local_x2, local_y1],
+                                            [local_x2, local_y2],
+                                            [local_x1, local_y2],
+                                        ], &self.measure_scale, self.measure_area_unit, self.measure_unit);
+
+                                        self.status_message = format!("Measured Area: {} (Perimeter: {})", area_res.formatted, area_res.perimeter_result.formatted);
                                     }
                                     _ => {}
                                 }
@@ -5234,6 +5357,331 @@ impl RavPdfApp {
 
             if close {
                 self.show_merge_comments_dialog = false;
+            }
+        }
+
+        // 21. Measurement Scale & Calibration Dialog (FR-26.5)
+        if self.show_measure_scale_dialog {
+            let mut close = false;
+
+            egui::Window::new("Measurement Scale & Calibration (FR-26.5)")
+                .collapsible(false)
+                .resizable(false)
+                .default_size([460.0, 400.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Configure scale ratio, drawing units, and geometric snapping for dimension tools:");
+                    ui.add_space(8.0);
+
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Scale Ratio Presets").strong());
+                        let presets = [
+                            ("1:1 (Full Size)", ScaleRatio::default()),
+                            ("1:20", ScaleRatio::dimensionless(20.0)),
+                            ("1:50", ScaleRatio::dimensionless(50.0)),
+                            ("1:100 (Metric Architectural)", ScaleRatio::dimensionless(100.0)),
+                            ("1:200", ScaleRatio::dimensionless(200.0)),
+                            ("1:500 (Civil / Site Plan)", ScaleRatio::dimensionless(500.0)),
+                            ("1/4\" = 1' (1:48 US Architectural)", ScaleRatio::new(0.25, LinearUnit::Inches, 1.0, LinearUnit::Feet)),
+                            ("1/8\" = 1' (1:96)", ScaleRatio::new(0.125, LinearUnit::Inches, 1.0, LinearUnit::Feet)),
+                            ("1\" = 10' (1:120 Engineering)", ScaleRatio::architectural_inch_to_feet(10.0)),
+                            ("1\" = 20' (1:240)", ScaleRatio::architectural_inch_to_feet(20.0)),
+                            ("1 cm = 1 m (1:100)", ScaleRatio::new(1.0, LinearUnit::Centimeters, 1.0, LinearUnit::Meters)),
+                            ("1 mm = 1 m (1:1000)", ScaleRatio::new(1.0, LinearUnit::Millimeters, 1.0, LinearUnit::Meters)),
+                            ("Custom", ScaleRatio::new(self.measure_scale_custom_drawing_val, self.measure_unit, self.measure_scale_custom_world_val, self.measure_unit)),
+                        ];
+
+                        egui::ComboBox::from_label("Preset")
+                            .selected_text(presets.get(self.measure_scale_preset_idx).map(|(name, _)| *name).unwrap_or("Custom"))
+                            .show_ui(ui, |ui| {
+                                for (idx, (name, ratio)) in presets.iter().enumerate() {
+                                    if ui.selectable_value(&mut self.measure_scale_preset_idx, idx, *name).clicked() {
+                                        self.measure_scale = ratio.clone();
+                                    }
+                                }
+                            });
+
+                        if self.measure_scale_preset_idx == 12 {
+                            ui.horizontal(|ui| {
+                                ui.label("Drawing:");
+                                if ui.add(egui::DragValue::new(&mut self.measure_scale_custom_drawing_val).speed(0.1).range(0.01..=1000.0)).changed() {
+                                    self.measure_scale.drawing_value = self.measure_scale_custom_drawing_val;
+                                }
+                                ui.label(self.measure_unit.abbreviation());
+
+                                ui.label("=");
+
+                                ui.label("World:");
+                                if ui.add(egui::DragValue::new(&mut self.measure_scale_custom_world_val).speed(0.1).range(0.01..=100000.0)).changed() {
+                                    self.measure_scale.world_value = self.measure_scale_custom_world_val;
+                                }
+                                ui.label(self.measure_unit.abbreviation());
+                            });
+                        }
+
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(format!("Current Ratio: {}", self.measure_scale.to_display_string())).color(Color32::from_rgb(0, 180, 216)));
+                    });
+
+                    ui.add_space(6.0);
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Display Units").strong());
+                        ui.horizontal(|ui| {
+                            ui.label("Distance Unit:");
+                            egui::ComboBox::from_id_salt("linear_unit_combo")
+                                .selected_text(self.measure_unit.abbreviation())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.measure_unit, LinearUnit::Inches, "Inches (in)");
+                                    ui.selectable_value(&mut self.measure_unit, LinearUnit::Feet, "Feet (ft)");
+                                    ui.selectable_value(&mut self.measure_unit, LinearUnit::Millimeters, "Millimeters (mm)");
+                                    ui.selectable_value(&mut self.measure_unit, LinearUnit::Centimeters, "Centimeters (cm)");
+                                    ui.selectable_value(&mut self.measure_unit, LinearUnit::Meters, "Meters (m)");
+                                    ui.selectable_value(&mut self.measure_unit, LinearUnit::Yards, "Yards (yd)");
+                                    ui.selectable_value(&mut self.measure_unit, LinearUnit::Points, "Points (pt)");
+                                });
+
+                            ui.add_space(10.0);
+                            ui.label("Area Unit:");
+                            egui::ComboBox::from_id_salt("area_unit_combo")
+                                .selected_text(self.measure_area_unit.abbreviation())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.measure_area_unit, AreaUnit::SquareFeet, "Square Feet (sq ft)");
+                                    ui.selectable_value(&mut self.measure_area_unit, AreaUnit::SquareMeters, "Square Meters (sq m)");
+                                    ui.selectable_value(&mut self.measure_area_unit, AreaUnit::SquareInches, "Square Inches (sq in)");
+                                    ui.selectable_value(&mut self.measure_area_unit, AreaUnit::SquareCentimeters, "Square Centimeters (sq cm)");
+                                    ui.selectable_value(&mut self.measure_area_unit, AreaUnit::Acres, "Acres (ac)");
+                                });
+                        });
+                    });
+
+                    ui.add_space(6.0);
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Reference Calibration (FR-26.5)").strong());
+                        ui.label("Calibrate scale from a known distance on paper (e.g. 10 ft doorway):");
+                        ui.horizontal(|ui| {
+                            ui.label("Known Distance:");
+                            ui.add(egui::DragValue::new(&mut self.measure_calib_real_val).speed(0.1).range(0.01..=100000.0));
+                            ui.label(self.measure_unit.abbreviation());
+
+                            if ui.button("🎯 Calibrate Scale").clicked() {
+                                self.measure_scale = ScaleRatio::new(1.0, LinearUnit::Inches, self.measure_calib_real_val, self.measure_unit);
+                                self.status_message = format!("Calibrated scale: {}", self.measure_scale.to_display_string());
+                            }
+                        });
+                    });
+
+                    ui.add_space(6.0);
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Snapping & Annotations (FR-26.4, FR-26.6)").strong());
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.measure_snap.snap_endpoints, "Endpoints");
+                            ui.checkbox(&mut self.measure_snap.snap_midpoints, "Midpoints");
+                            ui.checkbox(&mut self.measure_snap.snap_intersections, "Intersections");
+                        });
+                        ui.add_space(2.0);
+                        ui.checkbox(&mut self.measure_bake_as_annot, "Bake dimension lines into PDF as annotations (FR-26.4)");
+                    });
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Done").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if close {
+                self.show_measure_scale_dialog = false;
+            }
+        }
+
+        // 22. PDF Portfolio Studio Dialog (FR-29.2.1)
+        if self.show_portfolio_dialog {
+            let mut close = false;
+            let mut create_portfolio_action = false;
+
+            egui::Window::new("Create PDF Portfolio (FR-29.2.1)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([540.0, 420.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Bundle multiple heterogeneous files (PDFs, spreadsheets, images, source files) into a unified PDF Portfolio container:");
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Portfolio Title:");
+                        ui.text_edit_singleline(&mut self.portfolio_title_input);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Description:");
+                        ui.text_edit_singleline(&mut self.portfolio_desc_input);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Default View Layout:");
+                        ui.radio_value(&mut self.portfolio_layout_idx, 0, "Tile View (Cards)");
+                        ui.radio_value(&mut self.portfolio_layout_idx, 1, "Details View (Table)");
+                    });
+
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("Embedded Files ({})", self.portfolio_input_paths.len())).strong());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("➕ Add Files...").clicked() {
+                                if let Some(files) = rfd::FileDialog::new().pick_files() {
+                                    self.portfolio_input_paths.extend(files);
+                                }
+                            }
+                        });
+                    });
+
+                    let mut remove_idx = None;
+                    ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                        if self.portfolio_input_paths.is_empty() {
+                            ui.weak("No files added yet. Click 'Add Files...' to choose documents to bundle.");
+                        } else {
+                            for (idx, path) in self.portfolio_input_paths.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+                                    ui.label(format!("{}. {}", idx + 1, filename));
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if ui.small_button("🗑").clicked() {
+                                            remove_idx = Some(idx);
+                                        }
+                                    });
+                                });
+                            }
+                        }
+                    });
+
+                    if let Some(idx) = remove_idx {
+                        self.portfolio_input_paths.remove(idx);
+                    }
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let can_create = !self.portfolio_input_paths.is_empty();
+                        ui.add_enabled_ui(can_create, |ui| {
+                            if ui.button("🗂 Create PDF Portfolio").clicked() {
+                                create_portfolio_action = true;
+                            }
+                        });
+
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if create_portfolio_action {
+                if let Some(out_path) = rfd::FileDialog::new()
+                    .add_filter("PDF Portfolio", &["pdf"])
+                    .set_file_name("portfolio.pdf")
+                    .save_file()
+                {
+                    let mut items = Vec::new();
+                    for path in &self.portfolio_input_paths {
+                        if let Ok(item) = PortfolioItem::from_file_path(path, None) {
+                            items.push(item);
+                        }
+                    }
+
+                    let layout = match self.portfolio_layout_idx {
+                        1 => PortfolioLayout::Details,
+                        _ => PortfolioLayout::Tile,
+                    };
+
+                    let desc_opt = if self.portfolio_desc_input.trim().is_empty() {
+                        None
+                    } else {
+                        Some(self.portfolio_desc_input.trim())
+                    };
+
+                    match create_portfolio(&items, layout, &self.portfolio_title_input, desc_opt) {
+                        Ok(port_doc) => {
+                            if let Ok(()) = port_doc.save_to_file(&out_path) {
+                                self.status_message = format!("Created PDF Portfolio '{}' with {} files", out_path.display(), items.len());
+                                close = true;
+                            }
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Portfolio creation failed: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_portfolio_dialog = false;
+            }
+        }
+
+        // 23. Fast Web View / Linearization Dialog (FR-02.8, FR-25.8)
+        if self.show_linearize_dialog {
+            let mut close = false;
+            let mut do_linearize = false;
+
+            egui::Window::new("Linearize for Fast Web View (FR-02.8, FR-25.8)")
+                .collapsible(false)
+                .resizable(false)
+                .default_size([460.0, 240.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Linearizing reorganizes document objects and hint tables to allow web browsers and PDF readers to display the first page immediately before the entire file finishes downloading.");
+                    ui.add_space(8.0);
+
+                    if let Some(tab) = self.active_tab() {
+                        let bytes = tab.doc.to_bytes().unwrap_or_default();
+                        let linearized = is_linearized(&bytes);
+                        ui.horizontal(|ui| {
+                            ui.label("Current Document Status:");
+                            if linearized {
+                                ui.label(RichText::new("✔ Web-Optimized (Linearized)").color(Color32::from_rgb(0, 200, 100)).strong());
+                            } else {
+                                ui.label(RichText::new("✖ Standard PDF (Not Linearized)").color(Color32::from_rgb(220, 140, 0)).strong());
+                            }
+                        });
+                    }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("⚡ Linearize & Save...").clicked() {
+                            do_linearize = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if do_linearize {
+                if let Some(tab) = self.active_tab() {
+                    match linearize_document(&tab.doc) {
+                        Ok(lin_bytes) => {
+                            if let Some(dest) = rfd::FileDialog::new()
+                                .add_filter("Linearized PDF Document", &["pdf"])
+                                .set_file_name("web_optimized.pdf")
+                                .save_file()
+                            {
+                                if std::fs::write(&dest, lin_bytes).is_ok() {
+                                    self.status_message = format!("Linearized PDF saved to '{}'", dest.display());
+                                    close = true;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Linearization failed: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_linearize_dialog = false;
             }
         }
     }
