@@ -39,25 +39,31 @@ use ravpdf_crypto::{
     SignatureStatus,
 };
 use ravpdf_forms::{
-    add_form_field, flatten_form, get_form_fields, get_page_form_fields, set_form_field_value,
-    FormField, FormFieldType,
+    add_form_field, apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
+    export_form_data, flatten_form, get_form_fields, get_page_form_fields, import_form_data,
+    set_form_field_value, BarcodeSymbology, FormDataFormat, FormField, FormFieldType, TabOrder,
 };
 use ravpdf_render::{pixmap_to_png, render_page, RenderOptions};
 use ravpdf_tools::{
-    add_attachment, add_measurement_line_annotation, apply_bates_numbering,
-    apply_headers_and_footers, apply_text_watermark, audit_accessibility, audit_space_usage,
-    calculate_area, calculate_distance, compare_documents, create_portfolio,
-    execute_batch, export_comments_to_csv, export_page_to_image, export_to_html,
-    export_to_plain_text, extract_all_text, find_and_replace, find_and_replace_page,
-    fix_document_language, fix_document_title, fix_ensure_tagged_pdf, fix_tab_order_to_structure,
-    get_attachments, get_document_comments, get_page_geospatial_viewports, get_portfolio,
-    is_linearized, is_portfolio, linearize_document, merge_reviewer_annotations, optimize_document,
-    redact_page_area, redact_pattern, remediate_all_automatic, remove_attachment, run_preflight,
-    search_document, set_document_info, AccessibilityReport, AccessibilityStatus,
-    AreaUnit, BatchAction, BatchJob, BatchResult, ComparisonReport, ExportImageFormat, FileAttachment,
-    HeaderFooterConfig, LinearUnit, OptimizationStats, PortfolioItem, PortfolioLayout,
-    PreflightProfile, PreflightReport, PreflightSeverity, ReviewComment, ScaleRatio, SearchMatch,
-    SnapOptions, SpaceAudit,
+    add_3d_annotation, add_attachment, add_measurement_line_annotation, add_rich_media_annotation,
+    apply_bates_numbering, apply_headers_and_footers, apply_text_watermark, audit_accessibility,
+    audit_space_usage, batch_scan_to_pdf, calculate_area, calculate_distance, compare_documents,
+    create_portfolio, execute_all_field_calculations, execute_batch, execute_script,
+    export_comments_to_csv, export_page_to_image, export_to_html, export_to_plain_text,
+    extract_all_text, find_and_replace, find_and_replace_page, fix_document_language,
+    fix_document_title, fix_ensure_tagged_pdf, fix_tab_order_to_structure, generate_postscript,
+    generate_print_preview_layout, get_attachments, get_document_comments,
+    get_page_geospatial_viewports, get_portfolio, is_linearized, is_portfolio, linearize_document,
+    merge_reviewer_annotations, optimize_document, redact_page_area, redact_pattern,
+    remediate_all_automatic, remove_attachment, run_preflight, search_document, set_document_info,
+    AccessibilityReport, AccessibilityStatus, AreaUnit, BatchAction, BatchJob,
+    BatchResult, BookletBinding, ComparisonReport, ExportImageFormat, FileAttachment,
+    HeaderFooterConfig, JsExecutionContext, LinearUnit, MediaContent, NUpCount, NUpOrder,
+    OptimizationStats, PluginPermission, PluginRegistry, PortfolioItem, PortfolioLayout,
+    PreflightProfile, PreflightReport, PreflightSeverity, PrintJobConfig, PrintLayoutMode,
+    ReviewComment, RichMediaActivation, RichMediaConfig, RichMediaDeactivation,
+    SampleWatermarkPlugin, ScaleRatio, ScannerJobConfig, SearchMatch, SnapOptions, SpaceAudit,
+    ThreeDConfig, ThreeDFormat, ThreeDLighting, ThreeDRenderMode, ThreeDView,
 };
 use std::path::PathBuf;
 use tab::DocumentTab;
@@ -210,6 +216,8 @@ struct RavPdfApp {
     batch_bates_prefix: String,
     batch_action_flatten: bool,
     batch_action_optimize: bool,
+    batch_action_linearize: bool,
+    batch_action_sanitize: bool,
     batch_result: Option<BatchResult>,
 
     // Bookmark creation modal state (FR-19.2)
@@ -272,6 +280,31 @@ struct RavPdfApp {
     form_field_value: String,
     form_field_options_csv: String,
     form_field_rect: [f64; 4],
+    form_field_radio_export: String,
+    form_field_multiselect: bool,
+    form_field_barcode_symbology_idx: usize,
+
+    // Form Data Export / Import & Tab Order dialog state (FR-11.2, FR-11.3)
+    show_export_form_dialog: bool,
+    form_export_format_idx: usize,
+    show_tab_order_dialog: bool,
+    tab_order_idx: usize,
+
+    // Rich Media state (FR-27)
+    show_rich_media_dialog: bool,
+    rich_media_url_or_path: String,
+    rich_media_title: String,
+    rich_media_is_url: bool,
+    rich_media_autoplay: bool,
+    rich_media_loop: bool,
+    rich_media_rect: [f64; 4],
+
+    // 3D Content state (FR-28)
+    show_threed_dialog: bool,
+    threed_model_path: Option<PathBuf>,
+    threed_render_mode_idx: usize,
+    threed_lighting_idx: usize,
+    threed_rect: [f64; 4],
 
     // Accessibility state (FR-21)
     show_accessibility_dialog: bool,
@@ -312,6 +345,31 @@ struct RavPdfApp {
 
     // Fast Web View / Linearization state (FR-02.8, FR-25.8)
     show_linearize_dialog: bool,
+
+    // JavaScript Console state (FR-12.9)
+    show_js_console_dialog: bool,
+    js_console_input: String,
+    js_console_output: Vec<String>,
+
+    // Scan & Cleanup state (FR-32)
+    show_scan_dialog: bool,
+    scan_auto_deskew: bool,
+    scan_auto_crop: bool,
+    scan_despeckle: bool,
+    scan_whiten: bool,
+    scan_binarize: bool,
+    scan_input_paths: Vec<PathBuf>,
+
+    // Print & Imposition state (FR-35)
+    show_print_dialog: bool,
+    print_copies: u32,
+    print_collate: bool,
+    print_pages_range: String,
+    print_layout_idx: usize,
+
+    // Plugins state (FR-36)
+    show_plugins_dialog: bool,
+    plugin_registry: PluginRegistry,
 }
 
 impl Default for RavPdfApp {
@@ -372,6 +430,28 @@ impl Default for RavPdfApp {
             form_field_value: String::new(),
             form_field_options_csv: "Option 1, Option 2, Option 3".into(),
             form_field_rect: [72.0, 650.0, 220.0, 672.0],
+            form_field_radio_export: "Choice1".into(),
+            form_field_multiselect: false,
+            form_field_barcode_symbology_idx: 0,
+
+            show_export_form_dialog: false,
+            form_export_format_idx: 0,
+            show_tab_order_dialog: false,
+            tab_order_idx: 0,
+
+            show_rich_media_dialog: false,
+            rich_media_url_or_path: String::new(),
+            rich_media_title: "Embedded Media".into(),
+            rich_media_is_url: false,
+            rich_media_autoplay: false,
+            rich_media_loop: false,
+            rich_media_rect: [72.0, 400.0, 360.0, 600.0],
+
+            show_threed_dialog: false,
+            threed_model_path: None,
+            threed_render_mode_idx: 0,
+            threed_lighting_idx: 0,
+            threed_rect: [72.0, 300.0, 400.0, 600.0],
 
             show_watermark_dialog: false,
             watermark_text: "CONFIDENTIAL".into(),
@@ -431,6 +511,8 @@ impl Default for RavPdfApp {
             batch_bates_prefix: "BATCH".into(),
             batch_action_flatten: false,
             batch_action_optimize: true,
+            batch_action_linearize: false,
+            batch_action_sanitize: false,
             batch_result: None,
 
             new_bookmark_title: String::new(),
@@ -476,6 +558,36 @@ impl Default for RavPdfApp {
             portfolio_input_paths: Vec::new(),
 
             show_linearize_dialog: false,
+
+            show_js_console_dialog: false,
+            js_console_input: "app.alert('Hello from RavPDF JavaScript!');".to_string(),
+            js_console_output: Vec::new(),
+
+            show_scan_dialog: false,
+            scan_auto_deskew: true,
+            scan_auto_crop: true,
+            scan_despeckle: true,
+            scan_whiten: true,
+            scan_binarize: false,
+            scan_input_paths: Vec::new(),
+
+            show_print_dialog: false,
+            print_copies: 1,
+            print_collate: true,
+            print_pages_range: "all".to_string(),
+            print_layout_idx: 0,
+
+            show_plugins_dialog: false,
+            plugin_registry: {
+                let mut reg = PluginRegistry::new();
+                let sample = Box::new(SampleWatermarkPlugin::new());
+                let perms = [
+                    PluginPermission::UiExtension,
+                    PluginPermission::DocumentTransform,
+                ];
+                let _ = reg.register_plugin(sample, &perms);
+                reg
+            },
         }
     }
 }
@@ -885,6 +997,16 @@ impl RavPdfApp {
                 self.open_properties_dialog();
             }
 
+            // Print (Ctrl+P) (FR-35)
+            if i.modifiers.ctrl && i.key_pressed(Key::P) && has_doc {
+                self.show_print_dialog = true;
+            }
+
+            // JavaScript Console (Ctrl+J) (FR-12.9)
+            if i.modifiers.ctrl && i.key_pressed(Key::J) && has_doc {
+                self.show_js_console_dialog = true;
+            }
+
             // Zoom shortcuts
             if i.modifiers.ctrl && (i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals)) && has_doc {
                 if let Some(tab) = self.active_tab_mut() {
@@ -1101,6 +1223,17 @@ impl RavPdfApp {
                         .clicked()
                     {
                         self.show_linearize_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Scan Documents to PDF... (FR-32)").clicked() {
+                        self.show_scan_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Print... (Ctrl+P) (FR-35)"))
+                        .clicked()
+                    {
+                        self.show_print_dialog = true;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -1360,6 +1493,20 @@ impl RavPdfApp {
                         }
                         ui.close_menu();
                     }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Export Form Data... (FR-11.3.2)"))
+                        .clicked()
+                    {
+                        self.show_export_form_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Set Page Tab Order... (FR-11.2.7)"))
+                        .clicked()
+                    {
+                        self.show_tab_order_dialog = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui
                         .add_enabled(has_doc, Button::new("Sanitize / Redact Patterns... (FR-15.4)"))
@@ -1413,6 +1560,20 @@ impl RavPdfApp {
                         self.show_batch_dialog = true;
                         ui.close_menu();
                     }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Embed Rich Media / Video... (FR-27)"))
+                        .clicked()
+                    {
+                        self.show_rich_media_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Embed 3D Model... (FR-28)"))
+                        .clicked()
+                    {
+                        self.show_threed_dialog = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui
                         .add_enabled(has_doc, Button::new("Accessibility Checker... (FR-21.1)"))
@@ -1451,6 +1612,18 @@ impl RavPdfApp {
                         .clicked()
                     {
                         self.show_measure_scale_dialog = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_doc, Button::new("JavaScript Console & Debugger... (Ctrl+J) (FR-12.9)"))
+                        .clicked()
+                    {
+                        self.show_js_console_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Plugins & Extensions Manager... (FR-36)").clicked() {
+                        self.show_plugins_dialog = true;
                         ui.close_menu();
                     }
                 });
@@ -2436,6 +2609,26 @@ impl RavPdfApp {
                         ui.add_space(4.0);
 
                         let mut flatten = false;
+                        let mut auto_detect = false;
+                        let mut import_data = false;
+
+                        ui.horizontal(|ui| {
+                            if ui.button("🔍 Auto-Detect").on_hover_text("Heuristically scan page for fields (FR-11.3.1)").clicked() {
+                                auto_detect = true;
+                            }
+                            if ui.button("🔢 Tab Order").on_hover_text("Configure tab navigation sequence (FR-11.2.7)").clicked() {
+                                self.show_tab_order_dialog = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("📥 Import").on_hover_text("Import values from FDF/JSON/CSV/XML (FR-11.3.2)").clicked() {
+                                import_data = true;
+                            }
+                            if ui.button("📤 Export").on_hover_text("Export values to FDF/JSON/CSV/XML (FR-11.3.2)").clicked() {
+                                self.show_export_form_dialog = true;
+                            }
+                        });
+                        ui.separator();
 
                         if let Some(tab) = self.active_tab() {
                             let fields = get_form_fields(&tab.doc).unwrap_or_default();
@@ -2470,8 +2663,11 @@ impl RavPdfApp {
                                                 let type_str = match f.field_type {
                                                     FormFieldType::Text => "📝 Text",
                                                     FormFieldType::Checkbox => "☑ Checkbox",
-                                                    FormFieldType::Choice => "▾ Choice",
+                                                    FormFieldType::Radio => "🔘 Radio",
+                                                    FormFieldType::Choice => "▾ Dropdown",
+                                                    FormFieldType::ListBox => "📋 List Box",
                                                     FormFieldType::PushButton => "🔘 Button",
+                                                    FormFieldType::Barcode => "📊 Barcode",
                                                     FormFieldType::Signature => "🔏 Signature",
                                                 };
                                                 ui.horizontal(|ui| {
@@ -2496,6 +2692,50 @@ impl RavPdfApp {
                                         ui.add_space(4.0);
                                     }
                                 });
+                            }
+                        }
+
+                        if auto_detect {
+                            if let Some(tab) = self.active_tab_mut() {
+                                let curr = tab.current_page;
+                                if let Ok(fields) = auto_detect_form_fields(&tab.doc, curr) {
+                                    let count = fields.len();
+                                    if apply_auto_detected_fields(&mut tab.doc, curr, &fields).is_ok() {
+                                        tab.is_modified = true;
+                                        tab.invalidate_render();
+                                        self.status_message = format!("Auto-detected and applied {} form field(s) on page {}", count, curr + 1);
+                                    }
+                                }
+                            }
+                        }
+
+                        if import_data {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Form Data Files (*.json, *.fdf, *.xfdf, *.csv, *.xml)", &["json", "fdf", "xfdf", "csv", "xml"])
+                                .pick_file()
+                            {
+                                if let Ok(content) = std::fs::read_to_string(&path) {
+                                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                                    let fmt = match ext.to_lowercase().as_str() {
+                                        "fdf" => FormDataFormat::Fdf,
+                                        "xfdf" => FormDataFormat::Xfdf,
+                                        "csv" => FormDataFormat::Csv,
+                                        "xml" => FormDataFormat::Xml,
+                                        _ => FormDataFormat::Json,
+                                    };
+                                    if let Some(tab) = self.active_tab_mut() {
+                                        match import_form_data(&mut tab.doc, &content, fmt) {
+                                            Ok(count) => {
+                                                tab.is_modified = true;
+                                                tab.invalidate_render();
+                                                self.status_message = format!("Imported {} form field value(s) from {}", count, path.display());
+                                            }
+                                            Err(e) => {
+                                                self.status_message = format!("Form import failed: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -2878,7 +3118,79 @@ impl RavPdfApp {
                                                 },
                                             );
                                         }
-                                        _ => {}
+                                        FormFieldType::Radio => {
+                                            let export_val = field.radio_export_value.clone().unwrap_or_else(|| "Yes".into());
+                                            let is_selected = field.value.as_deref() == Some(&export_val);
+                                            let val = is_selected;
+                                            ui.allocate_new_ui(
+                                                egui::UiBuilder::new().max_rect(field_rect),
+                                                |ui| {
+                                                    egui::Frame::none()
+                                                        .fill(Color32::from_rgba_unmultiplied(240, 245, 255, 200))
+                                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 153, 225)))
+                                                        .show(ui, |ui| {
+                                                            if ui.radio(val, "").clicked() {
+                                                                let new_val = if !val { export_val } else { "Off".into() };
+                                                                field_updates.push((field_id, new_val));
+                                                            }
+                                                        });
+                                                },
+                                            );
+                                        }
+                                        FormFieldType::ListBox => {
+                                            let mut selected = field.value.clone().unwrap_or_default();
+                                            ui.allocate_new_ui(
+                                                egui::UiBuilder::new().max_rect(field_rect),
+                                                |ui| {
+                                                    egui::Frame::none()
+                                                        .fill(Color32::from_rgba_unmultiplied(240, 245, 255, 220))
+                                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(66, 153, 225)))
+                                                        .show(ui, |ui| {
+                                                            ScrollArea::vertical().show(ui, |ui| {
+                                                                for opt in &field.options {
+                                                                    if ui.selectable_label(selected == *opt, opt).clicked() {
+                                                                        selected = opt.clone();
+                                                                        field_updates.push((field_id, opt.clone()));
+                                                                    }
+                                                                }
+                                                            });
+                                                        });
+                                                },
+                                            );
+                                        }
+                                        FormFieldType::Barcode => {
+                                            let barcode_str = field.value.as_deref().unwrap_or("[Barcode]");
+                                            ui.allocate_new_ui(
+                                                egui::UiBuilder::new().max_rect(field_rect),
+                                                |ui| {
+                                                    egui::Frame::none()
+                                                        .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 230))
+                                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(40, 40, 40)))
+                                                        .show(ui, |ui| {
+                                                            ui.vertical_centered(|ui| {
+                                                                ui.label(RichText::new("📊 [QR-Code]").size(11.0).strong());
+                                                                ui.label(RichText::new(barcode_str).size(9.0).weak());
+                                                            });
+                                                        });
+                                                },
+                                            );
+                                        }
+                                        FormFieldType::Signature => {
+                                            ui.allocate_new_ui(
+                                                egui::UiBuilder::new().max_rect(field_rect),
+                                                |ui| {
+                                                    egui::Frame::none()
+                                                        .fill(Color32::from_rgba_unmultiplied(255, 248, 220, 200))
+                                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(218, 165, 32)))
+                                                        .show(ui, |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label(RichText::new("🔏").size(12.0));
+                                                                ui.label(RichText::new("Digital Signature").size(10.0).italics());
+                                                            });
+                                                        });
+                                                },
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -4276,8 +4588,38 @@ impl RavPdfApp {
                     });
 
                     ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Templates (FR-30.3):").strong());
+                        if ui.button("Distribution").on_hover_text("Sanitize metadata, flatten forms, optimize").clicked() {
+                            self.batch_action_watermark = false;
+                            self.batch_action_bates = false;
+                            self.batch_action_flatten = true;
+                            self.batch_action_optimize = true;
+                            self.batch_action_sanitize = true;
+                            self.batch_action_linearize = false;
+                        }
+                        if ui.button("Archiving").on_hover_text("Flatten forms, optimize").clicked() {
+                            self.batch_action_watermark = false;
+                            self.batch_action_bates = false;
+                            self.batch_action_flatten = true;
+                            self.batch_action_optimize = true;
+                            self.batch_action_sanitize = false;
+                            self.batch_action_linearize = false;
+                        }
+                        if ui.button("Web Optimize").on_hover_text("Optimize and linearize for fast web streaming").clicked() {
+                            self.batch_action_watermark = false;
+                            self.batch_action_bates = false;
+                            self.batch_action_flatten = false;
+                            self.batch_action_optimize = true;
+                            self.batch_action_sanitize = false;
+                            self.batch_action_linearize = true;
+                        }
+                    });
+
                     ui.heading("Action Sequence to Apply (FR-30.4):");
                     ui.checkbox(&mut self.batch_action_optimize, "Optimize & Flate Compress (FR-25)");
+                    ui.checkbox(&mut self.batch_action_linearize, "Linearize for Fast Web Streaming (FR-02.8, FR-25.8)");
+                    ui.checkbox(&mut self.batch_action_sanitize, "Sanitize Document Metadata (FR-30.4)");
                     ui.checkbox(&mut self.batch_action_flatten, "Flatten All Interactive Forms (FR-11)");
 
                     ui.horizontal(|ui| {
@@ -4334,6 +4676,9 @@ impl RavPdfApp {
             if run_batch {
                 if let Some(ref out_dir) = self.batch_output_dir {
                     let mut actions = Vec::new();
+                    if self.batch_action_sanitize {
+                        actions.push(BatchAction::SanitizeMetadata);
+                    }
                     if self.batch_action_watermark {
                         actions.push(BatchAction::Watermark {
                             text: self.batch_watermark_text.clone(),
@@ -4352,6 +4697,9 @@ impl RavPdfApp {
                     }
                     if self.batch_action_optimize {
                         actions.push(BatchAction::Optimize);
+                    }
+                    if self.batch_action_linearize {
+                        actions.push(BatchAction::Linearize);
                     }
 
                     let job = BatchJob {
@@ -4767,14 +5115,20 @@ impl RavPdfApp {
                             .selected_text(match self.form_field_type_idx {
                                 0 => "📝 Text Field (Tx)",
                                 1 => "☑ Checkbox (Btn)",
-                                2 => "▾ Dropdown Choice (Ch)",
-                                _ => "🔘 Push Button (Btn)",
+                                2 => "🔘 Radio Button (Btn)",
+                                3 => "▾ Dropdown Choice (Ch)",
+                                4 => "📋 List Box (Ch)",
+                                5 => "🔘 Push Button (Btn)",
+                                _ => "📊 Barcode (Tx/Barcode)",
                             })
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut self.form_field_type_idx, 0, "📝 Text Field (Tx)");
                                 ui.selectable_value(&mut self.form_field_type_idx, 1, "☑ Checkbox (Btn)");
-                                ui.selectable_value(&mut self.form_field_type_idx, 2, "▾ Dropdown Choice (Ch)");
-                                ui.selectable_value(&mut self.form_field_type_idx, 3, "🔘 Push Button (Btn)");
+                                ui.selectable_value(&mut self.form_field_type_idx, 2, "🔘 Radio Button (Btn)");
+                                ui.selectable_value(&mut self.form_field_type_idx, 3, "▾ Dropdown Choice (Ch)");
+                                ui.selectable_value(&mut self.form_field_type_idx, 4, "📋 List Box (Ch)");
+                                ui.selectable_value(&mut self.form_field_type_idx, 5, "🔘 Push Button (Btn)");
+                                ui.selectable_value(&mut self.form_field_type_idx, 6, "📊 Barcode (Tx/Barcode)");
                             });
                     });
 
@@ -4798,6 +5152,16 @@ impl RavPdfApp {
                         }
                         2 => {
                             ui.horizontal(|ui| {
+                                ui.label("Export Value:");
+                                ui.text_edit_singleline(&mut self.form_field_radio_export);
+                            });
+                            let mut selected = self.form_field_value == "Yes";
+                            if ui.checkbox(&mut selected, "Selected by default").changed() {
+                                self.form_field_value = if selected { "Yes".into() } else { "Off".into() };
+                            }
+                        }
+                        3 => {
+                            ui.horizontal(|ui| {
                                 ui.label("Options (comma-separated):");
                                 ui.text_edit_singleline(&mut self.form_field_options_csv);
                             });
@@ -4806,9 +5170,40 @@ impl RavPdfApp {
                                 ui.text_edit_singleline(&mut self.form_field_value);
                             });
                         }
-                        _ => {
+                        4 => {
+                            ui.horizontal(|ui| {
+                                ui.label("Options (comma-separated):");
+                                ui.text_edit_singleline(&mut self.form_field_options_csv);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Default Selected:");
+                                ui.text_edit_singleline(&mut self.form_field_value);
+                            });
+                            ui.checkbox(&mut self.form_field_multiselect, "Allow Multiple Selection (FR-11.1.5)");
+                        }
+                        5 => {
                             ui.horizontal(|ui| {
                                 ui.label("Button Label:");
+                                ui.text_edit_singleline(&mut self.form_field_value);
+                            });
+                        }
+                        _ => {
+                            ui.horizontal(|ui| {
+                                ui.label("Barcode Symbology:");
+                                egui::ComboBox::from_id_salt("barcode_symbology_combo")
+                                    .selected_text(match self.form_field_barcode_symbology_idx {
+                                        0 => "QR Code (ISO/IEC 18004)",
+                                        1 => "Code 128",
+                                        _ => "PDF417",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.form_field_barcode_symbology_idx, 0, "QR Code (ISO/IEC 18004)");
+                                        ui.selectable_value(&mut self.form_field_barcode_symbology_idx, 1, "Code 128");
+                                        ui.selectable_value(&mut self.form_field_barcode_symbology_idx, 2, "PDF417");
+                                    });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Initial Barcode Data:");
                                 ui.text_edit_singleline(&mut self.form_field_value);
                             });
                         }
@@ -4835,6 +5230,13 @@ impl RavPdfApp {
                 let type_idx = self.form_field_type_idx;
                 let val_str = self.form_field_value.clone();
                 let opts_csv = self.form_field_options_csv.clone();
+                let radio_export = self.form_field_radio_export.clone();
+                let multiselect = self.form_field_multiselect;
+                let barcode_sym = match self.form_field_barcode_symbology_idx {
+                    0 => BarcodeSymbology::QrCode,
+                    1 => BarcodeSymbology::Code128,
+                    _ => BarcodeSymbology::Pdf417,
+                };
 
                 let field = match type_idx {
                     0 => {
@@ -4849,6 +5251,10 @@ impl RavPdfApp {
                         FormField::new_checkbox(name, rect, checked)
                     }
                     2 => {
+                        let selected = val_str == "Yes";
+                        FormField::new_radio_button(name, radio_export, rect, selected)
+                    }
+                    3 => {
                         let opts: Vec<String> = opts_csv
                             .split(',')
                             .map(|s| s.trim().to_string())
@@ -4861,9 +5267,26 @@ impl RavPdfApp {
                         };
                         FormField::new_choice(name, rect, opts, sel)
                     }
-                    _ => {
+                    4 => {
+                        let opts: Vec<String> = opts_csv
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        let sel = if val_str.is_empty() {
+                            opts.first().cloned()
+                        } else {
+                            Some(val_str)
+                        };
+                        FormField::new_listbox(name, rect, opts, sel, multiselect)
+                    }
+                    5 => {
                         let label = if val_str.is_empty() { "Button" } else { &val_str };
                         FormField::new_pushbutton(name, rect, label)
+                    }
+                    _ => {
+                        let initial = if val_str.is_empty() { None } else { Some(val_str) };
+                        FormField::new_barcode(name, rect, barcode_sym, initial)
                     }
                 };
 
@@ -5682,6 +6105,926 @@ impl RavPdfApp {
 
             if close {
                 self.show_linearize_dialog = false;
+            }
+        }
+
+        // 24. JavaScript Console & Debugger Dialog (FR-12.9)
+        if self.show_js_console_dialog {
+            let mut close = false;
+            let mut run_script = false;
+            let mut run_calcs = false;
+            let mut clear_log = false;
+
+            egui::Window::new("JavaScript Console & Debugger (FR-12.9)")
+                .open(&mut self.show_js_console_dialog)
+                .default_size([650.0, 480.0])
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("Acrobat JavaScript Sandbox Environment").strong());
+                    ui.label("Execute document/field scripts, test calculations, and inspect form objects (ISO 32000-1 Clause 12.6.4.16).");
+                    ui.separator();
+
+                    ui.label(RichText::new("Console Output:").strong());
+                    ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            if self.js_console_output.is_empty() {
+                                ui.label(RichText::new("// Console ready. Type a script below and click Execute.").italics().color(Color32::GRAY));
+                            } else {
+                                for line in &self.js_console_output {
+                                    ui.monospace(line);
+                                }
+                            }
+                        });
+                    });
+
+                    ui.separator();
+                    ui.label(RichText::new("Script Input:").strong());
+                    ui.add(egui::TextEdit::multiline(&mut self.js_console_input).font(egui::TextStyle::Monospace).desired_rows(5).desired_width(f32::INFINITY));
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("▶ Execute Script").clicked() {
+                            run_script = true;
+                        }
+                        if ui.button("⚡ Calculate All Form Fields").clicked() {
+                            run_calcs = true;
+                        }
+                        if ui.button("🗑 Clear Console").clicked() {
+                            clear_log = true;
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Close").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                });
+
+            if clear_log {
+                self.js_console_output.clear();
+            }
+
+            if run_script {
+                let script = self.js_console_input.clone();
+                let mut log_entries = Vec::new();
+                if let Some(idx) = self.active_tab_idx {
+                    if let Some(tab) = self.tabs.get_mut(idx) {
+                        let mut js_ctx = JsExecutionContext::new();
+                        let _ = js_ctx.sync_from_document(&tab.doc);
+                        match execute_script(&mut js_ctx, &script) {
+                            Ok(res) => {
+                                log_entries.push(format!("> {}", script.trim()));
+                                for msg in &js_ctx.console_log {
+                                    log_entries.push(format!("[Console] {}", msg));
+                                }
+                                for alert in &js_ctx.alerts {
+                                    log_entries.push(format!("[Alert: {}] {}", alert.title, alert.message));
+                                }
+                                log_entries.push(format!("=> {:?}", res));
+                                let _ = js_ctx.sync_to_document(&mut tab.doc);
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                            }
+                            Err(e) => {
+                                log_entries.push(format!("❌ Error: {}", e));
+                            }
+                        }
+                    }
+                } else {
+                    log_entries.push("❌ Error: No document open".to_string());
+                }
+                self.js_console_output.extend(log_entries);
+            }
+
+            if run_calcs {
+                let mut log_entries = Vec::new();
+                if let Some(idx) = self.active_tab_idx {
+                    if let Some(tab) = self.tabs.get_mut(idx) {
+                        let mut js_ctx = JsExecutionContext::new();
+                        let _ = js_ctx.sync_from_document(&tab.doc);
+                        match execute_all_field_calculations(&mut js_ctx) {
+                            Ok(count) => {
+                                let _ = js_ctx.sync_to_document(&mut tab.doc);
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                log_entries.push(format!("⚡ Evaluated calculations for {} form fields", count));
+                            }
+                            Err(e) => {
+                                log_entries.push(format!("❌ Calculation Error: {}", e));
+                            }
+                        }
+                    }
+                }
+                self.js_console_output.extend(log_entries);
+            }
+
+            if close {
+                self.show_js_console_dialog = false;
+            }
+        }
+
+        // 25. Scanning & Document Enhancement Dialog (FR-32)
+        if self.show_scan_dialog {
+            let mut close = false;
+            let mut pick_scans = false;
+            let mut process_scans = false;
+
+            egui::Window::new("Scan & Enhance Pages (FR-32)")
+                .open(&mut self.show_scan_dialog)
+                .default_size([540.0, 420.0])
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("Scan Enhancement Pipeline (TWAIN / Flatbed / Feeder)").strong());
+                    ui.label("Auto-detect skew, remove scanner bed dark borders, despeckle, and whiten background.");
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        if ui.button("📁 Add Scanned Images...").clicked() {
+                            pick_scans = true;
+                        }
+                        if !self.scan_input_paths.is_empty() && ui.button("Clear List").clicked() {
+                            self.scan_input_paths.clear();
+                        }
+                    });
+
+                    ui.label(format!("Queued Pages: {} image file(s)", self.scan_input_paths.len()));
+                    ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
+                        for (i, p) in self.scan_input_paths.iter().enumerate() {
+                            ui.label(format!("{}. {}", i + 1, p.display()));
+                        }
+                    });
+
+                    ui.separator();
+                    ui.label(RichText::new("Enhancement & Correction Filters:").strong());
+                    ui.checkbox(&mut self.scan_auto_deskew, "Auto-Deskew Rotation (Projection profile analysis) (FR-32.4)");
+                    ui.checkbox(&mut self.scan_auto_crop, "Auto-Crop Page Boundaries (Remove bed margins) (FR-32.3)");
+                    ui.checkbox(&mut self.scan_despeckle, "Despeckle (Remove salt-and-pepper scan noise) (FR-32.5)");
+                    ui.checkbox(&mut self.scan_whiten, "Whiten Paper Background (Clean illumination) (FR-32.5)");
+                    ui.checkbox(&mut self.scan_binarize, "Otsu Binarization (Pure 1-bit Black & White) (FR-32.5)");
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let can_process = !self.scan_input_paths.is_empty();
+                        if ui.add_enabled(can_process, Button::new("🚀 Process & Create PDF")).clicked() {
+                            process_scans = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if pick_scans {
+                if let Some(files) = rfd::FileDialog::new()
+                    .add_filter("Scanned Image Files", &["png", "jpg", "jpeg", "bmp", "tiff", "webp"])
+                    .pick_files()
+                {
+                    self.scan_input_paths.extend(files);
+                }
+            }
+
+            if process_scans {
+                let mut images = Vec::new();
+                for p in &self.scan_input_paths {
+                    if let Ok(img) = image::open(p) {
+                        images.push(img.to_rgba8());
+                    }
+                }
+
+                if !images.is_empty() {
+                    let config = ScannerJobConfig {
+                        auto_deskew: self.scan_auto_deskew,
+                        auto_crop: self.scan_auto_crop,
+                        despeckle: self.scan_despeckle,
+                        whiten_background: self.scan_whiten,
+                        binarize: self.scan_binarize,
+                        ..Default::default()
+                    };
+
+                    match batch_scan_to_pdf(&images, &config) {
+                        Ok(doc) => {
+                            let id = self.next_tab_id;
+                            self.next_tab_id += 1;
+                            let title = format!("Scanned Document ({} pages).pdf", images.len());
+                            let mut tab = DocumentTab::new(id, title, doc, None);
+                            tab.is_modified = true;
+                            self.tabs.push(tab);
+                            self.active_tab_idx = Some(self.tabs.len() - 1);
+                            self.status_message = format!("Created enhanced PDF from {} scanned pages", images.len());
+                            self.scan_input_paths.clear();
+                            close = true;
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Scan processing failed: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_scan_dialog = false;
+            }
+        }
+
+        // 26. Print Imposition & PostScript Dialog (FR-35)
+        if self.show_print_dialog {
+            let mut close = false;
+            let mut do_print_ps = false;
+
+            egui::Window::new("Print & Imposition Setup (FR-35)")
+                .default_size([520.0, 440.0])
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("Professional Print Setup (ISO 32000-1 / PostScript Level 3)").strong());
+                    ui.label("Configure page range, saddle-stitch booklet imposition, N-up tiling, and PostScript output.");
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        ui.label("Page Range:");
+                        ui.text_edit_singleline(&mut self.print_pages_range);
+                        ui.label("(e.g. 'all', '1-3, 5')");
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Copies:");
+                        ui.add(egui::DragValue::new(&mut self.print_copies).range(1..=99));
+                        ui.checkbox(&mut self.print_collate, "Collate");
+                    });
+
+                    ui.separator();
+                    ui.label(RichText::new("Page Layout & Imposition (FR-35.6 - FR-35.8):").strong());
+                    egui::ComboBox::from_label("Imposition Mode")
+                        .selected_text(match self.print_layout_idx {
+                            0 => "Standard (1-Up Full Page)",
+                            1 => "Saddle-Stitch Booklet (Automatic imposition)",
+                            2 => "2 Pages Per Sheet (2-Up)",
+                            3 => "4 Pages Per Sheet (4-Up)",
+                            4 => "Poster Tiling (Cut Marks & Overlap)",
+                            _ => "Standard",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.print_layout_idx, 0, "Standard (1-Up Full Page)");
+                            ui.selectable_value(&mut self.print_layout_idx, 1, "Saddle-Stitch Booklet (Automatic imposition)");
+                            ui.selectable_value(&mut self.print_layout_idx, 2, "2 Pages Per Sheet (2-Up)");
+                            ui.selectable_value(&mut self.print_layout_idx, 3, "4 Pages Per Sheet (4-Up)");
+                            ui.selectable_value(&mut self.print_layout_idx, 4, "Poster Tiling (Cut Marks & Overlap)");
+                        });
+
+                    if let Some(idx) = self.active_tab_idx {
+                        if let Some(tab) = self.tabs.get(idx) {
+                            let print_cfg = PrintJobConfig {
+                                page_range_str: self.print_pages_range.clone(),
+                                layout_mode: match self.print_layout_idx {
+                                    1 => PrintLayoutMode::Booklet {
+                                        binding: BookletBinding::LeftToRight,
+                                        subset: ravpdf_tools::BookletSubset::BothSides,
+                                    },
+                                    2 => PrintLayoutMode::NUp {
+                                        count: NUpCount::TwoUp,
+                                        order: NUpOrder::Horizontal,
+                                        draw_border: true,
+                                    },
+                                    3 => PrintLayoutMode::NUp {
+                                        count: NUpCount::FourUp,
+                                        order: NUpOrder::Horizontal,
+                                        draw_border: true,
+                                    },
+                                    4 => PrintLayoutMode::Poster {
+                                        tile_scale: 1.0,
+                                        overlap_points: 36.0,
+                                        cut_marks: true,
+                                    },
+                                    _ => PrintLayoutMode::Standard,
+                                },
+                                ..Default::default()
+                            };
+
+                            if let Ok(rep) = generate_print_preview_layout(&tab.doc, &print_cfg) {
+                                ui.add_space(8.0);
+                                ui.group(|ui| {
+                                    ui.label(RichText::new("Imposition Preview Summary:").strong().color(Color32::from_rgb(80, 180, 240)));
+                                    ui.label(format!("• Logical Pages: {}", rep.total_logical_pages));
+                                    ui.label(format!("• Physical Printed Sheets: {}", rep.total_physical_sheets));
+                                    ui.label(format!("• {}", rep.summary_description));
+                                });
+                            }
+                        }
+                    }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("🖨 Export PostScript Print Job (.ps)...").clicked() {
+                            do_print_ps = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if do_print_ps {
+                if let Some(tab) = self.active_tab() {
+                    let print_cfg = PrintJobConfig {
+                        page_range_str: self.print_pages_range.clone(),
+                        copies: self.print_copies,
+                        collate: self.print_collate,
+                        layout_mode: match self.print_layout_idx {
+                            1 => PrintLayoutMode::Booklet {
+                                binding: BookletBinding::LeftToRight,
+                                subset: ravpdf_tools::BookletSubset::BothSides,
+                            },
+                            2 => PrintLayoutMode::NUp {
+                                count: NUpCount::TwoUp,
+                                order: NUpOrder::Horizontal,
+                                draw_border: true,
+                            },
+                            3 => PrintLayoutMode::NUp {
+                                count: NUpCount::FourUp,
+                                order: NUpOrder::Horizontal,
+                                draw_border: true,
+                            },
+                            4 => PrintLayoutMode::Poster {
+                                tile_scale: 1.0,
+                                overlap_points: 36.0,
+                                cut_marks: true,
+                            },
+                            _ => PrintLayoutMode::Standard,
+                        },
+                        ..Default::default()
+                    };
+
+                    match generate_postscript(&tab.doc, &print_cfg) {
+                        Ok(ps_code) => {
+                            if let Some(dest) = rfd::FileDialog::new()
+                                .add_filter("PostScript Print Job", &["ps"])
+                                .set_file_name("print_job.ps")
+                                .save_file()
+                            {
+                                if std::fs::write(&dest, ps_code).is_ok() {
+                                    self.status_message = format!("PostScript print job saved to '{}'", dest.display());
+                                    close = true;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Print generation error: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_print_dialog = false;
+            }
+        }
+
+        // 27. Plugins & Extensions Manager Dialog (FR-36)
+        if self.show_plugins_dialog {
+            let mut close = false;
+            let mut trigger_action: Option<(String, String)> = None;
+
+            egui::Window::new("Plugins & Extensions Manager (FR-36)")
+                .open(&mut self.show_plugins_dialog)
+                .default_size([580.0, 420.0])
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("RavPDF Extension Architecture & Sandboxed Plugins").strong());
+                    ui.label("Manage loaded plugins, capability permissions, and trigger custom extension actions.");
+                    ui.separator();
+
+                    let plugins = self.plugin_registry.list_plugins();
+                    if plugins.is_empty() {
+                        ui.label(RichText::new("No extensions installed.").italics().color(Color32::GRAY));
+                    } else {
+                        ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                            for p in plugins {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(&p.manifest.name).strong());
+                                        ui.label(format!("v{}", p.manifest.version));
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            ui.label(if p.enabled {
+                                                RichText::new("● Enabled").color(Color32::from_rgb(60, 200, 100))
+                                            } else {
+                                                RichText::new("○ Disabled").color(Color32::GRAY)
+                                            });
+                                        });
+                                    });
+                                    ui.label(RichText::new(&p.manifest.description).small());
+                                    ui.label(format!("ID: {} • Author: {}", p.manifest.id, p.manifest.author));
+                                    ui.label(format!("Permissions: {:?}", p.granted_permissions));
+
+                                    ui.horizontal(|ui| {
+                                        if p.manifest.id == "org.ravpdf.sample-watermark" && ui.button("⚡ Apply Sample Watermark Action").clicked() {
+                                            trigger_action = Some((p.manifest.id.clone(), "apply_draft_watermark".to_string()));
+                                        }
+                                    });
+                                });
+                            }
+                        });
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if let Some((plugin_id, act_id)) = trigger_action {
+                if let Some(idx) = self.active_tab_idx {
+                    if let Some(tab) = self.tabs.get_mut(idx) {
+                        match self.plugin_registry.dispatch_action(&plugin_id, &act_id, Some(&mut tab.doc)) {
+                            Ok(Some(msg)) => {
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                self.status_message = format!("Plugin: {}", msg);
+                            }
+                            Ok(None) => {
+                                self.status_message = "Plugin action executed".to_string();
+                            }
+                            Err(e) => {
+                                self.status_message = format!("Plugin error: {}", e);
+                            }
+                        }
+                    }
+                } else {
+                    self.status_message = "No document open for plugin action".to_string();
+                }
+            }
+
+            if close {
+                self.show_plugins_dialog = false;
+            }
+        }
+
+        // 28. Export Form Data Dialog (FR-11.3.2)
+        if self.show_export_form_dialog {
+            let mut close = false;
+            let mut do_export = false;
+
+            egui::Window::new("Export Form Data (FR-11.3.2)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Export interactive form field values to standard interchange formats:");
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Export Format:");
+                        egui::ComboBox::from_id_salt("form_export_fmt_combo")
+                            .selected_text(match self.form_export_format_idx {
+                                0 => "JSON (.json)",
+                                1 => "FDF - Forms Data Format (.fdf)",
+                                2 => "XFDF - XML Forms Data (.xfdf)",
+                                3 => "CSV - Comma-Separated Values (.csv)",
+                                _ => "XML - Generic Form Schema (.xml)",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.form_export_format_idx, 0, "JSON (.json)");
+                                ui.selectable_value(&mut self.form_export_format_idx, 1, "FDF - Forms Data Format (.fdf)");
+                                ui.selectable_value(&mut self.form_export_format_idx, 2, "XFDF - XML Forms Data (.xfdf)");
+                                ui.selectable_value(&mut self.form_export_format_idx, 3, "CSV - Comma-Separated Values (.csv)");
+                                ui.selectable_value(&mut self.form_export_format_idx, 4, "XML - Generic Form Schema (.xml)");
+                            });
+                    });
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("📤 Export As...").clicked() {
+                            do_export = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if do_export {
+                if let Some(tab) = self.active_tab() {
+                    let (fmt, ext) = match self.form_export_format_idx {
+                        1 => (FormDataFormat::Fdf, "fdf"),
+                        2 => (FormDataFormat::Xfdf, "xfdf"),
+                        3 => (FormDataFormat::Csv, "csv"),
+                        4 => (FormDataFormat::Xml, "xml"),
+                        _ => (FormDataFormat::Json, "json"),
+                    };
+
+                    match export_form_data(&tab.doc, fmt) {
+                        Ok(data) => {
+                            if let Some(dest) = rfd::FileDialog::new()
+                                .add_filter(format!("Form Data (*.{})", ext), &[ext])
+                                .set_file_name(format!("form_data.{}", ext))
+                                .save_file()
+                            {
+                                match std::fs::write(&dest, data) {
+                                    Ok(_) => {
+                                        self.status_message = format!("Exported form data to '{}'", dest.display());
+                                    }
+                                    Err(e) => {
+                                        self.status_message = format!("Failed to save form data: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Export error: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_export_form_dialog = false;
+            }
+        }
+
+        // 29. Tab Order Configuration Dialog (FR-11.2.7)
+        if self.show_tab_order_dialog {
+            let mut close = false;
+            let mut apply_tab_order = false;
+
+            egui::Window::new("Set Page Tab Order (FR-11.2.7)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Configure keyboard tab traversal order conforming to ISO 32000-1 Clause 12.4.2:");
+                    ui.add_space(6.0);
+
+                    ui.radio_value(&mut self.tab_order_idx, 0, "Row Order (/R) — Left-to-right, top-to-bottom");
+                    ui.radio_value(&mut self.tab_order_idx, 1, "Column Order (/C) — Top-to-bottom, left-to-right");
+                    ui.radio_value(&mut self.tab_order_idx, 2, "Structure Tree (/S) — Logical Tagged PDF order");
+                    ui.radio_value(&mut self.tab_order_idx, 3, "Manual Order (/A) — Array sequence in page dictionary");
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply Tab Order").clicked() {
+                            apply_tab_order = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if apply_tab_order {
+                let order = match self.tab_order_idx {
+                    0 => TabOrder::Row,
+                    1 => TabOrder::Column,
+                    2 => TabOrder::Structure,
+                    _ => TabOrder::Manual,
+                };
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    match apply_page_tab_order(&mut tab.doc, curr, order) {
+                        Ok(()) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Applied {:?} tab order to page {}", order, curr + 1);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed to apply tab order: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_tab_order_dialog = false;
+            }
+        }
+
+        // 30. Embed Rich Media Dialog (FR-27)
+        if self.show_rich_media_dialog {
+            let mut close = false;
+            let mut do_embed = false;
+
+            egui::Window::new("Embed Rich Media / Video (FR-27)")
+                .collapsible(false)
+                .resizable(false)
+                .default_size([460.0, 320.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Embed video/audio or streaming content conforming to ISO 32000-1 Clause 12.5.6.21:");
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Title / Name:");
+                        ui.text_edit_singleline(&mut self.rich_media_title);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.rich_media_is_url, false, "Local File");
+                        ui.radio_value(&mut self.rich_media_is_url, true, "Streaming URL");
+                    });
+
+                    if self.rich_media_is_url {
+                        ui.horizontal(|ui| {
+                            ui.label("URL:");
+                            ui.text_edit_singleline(&mut self.rich_media_url_or_path);
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("File:");
+                            ui.text_edit_singleline(&mut self.rich_media_url_or_path);
+                            if ui.button("Browse...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("Media Files (*.mp4, *.mov, *.mp3, *.aac)", &["mp4", "mov", "mp3", "aac"])
+                                    .pick_file()
+                                {
+                                    self.rich_media_url_or_path = path.to_string_lossy().to_string();
+                                }
+                            }
+                        });
+                    }
+
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut self.rich_media_autoplay, "Auto-play on page open (FR-27.4)");
+                    ui.checkbox(&mut self.rich_media_loop, "Loop playback (FR-27.4)");
+
+                    ui.weak(format!("Bounding Box: [{:.1}, {:.1}, {:.1}, {:.1}] pt",
+                        self.rich_media_rect[0], self.rich_media_rect[1],
+                        self.rich_media_rect[2], self.rich_media_rect[3]));
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Embed Media").clicked() {
+                            do_embed = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if do_embed {
+                let target = self.rich_media_url_or_path.trim().to_string();
+                if target.is_empty() {
+                    self.status_message = "Please provide a media file or URL".into();
+                } else {
+                    let content_res = if self.rich_media_is_url {
+                        let mime = if target.ends_with(".mp3") {
+                            "audio/mp3".to_string()
+                        } else if target.ends_with(".aac") {
+                            "audio/aac".to_string()
+                        } else if target.ends_with(".mov") {
+                            "video/quicktime".to_string()
+                        } else {
+                            "video/mp4".to_string()
+                        };
+                        Ok(MediaContent::ExternalUrl { url: target, mime_type: mime })
+                    } else {
+                        let p = std::path::Path::new(&target);
+                        match std::fs::read(p) {
+                            Ok(bytes) => {
+                                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                                let mime = match ext.as_str() {
+                                    "mp3" => "audio/mp3".to_string(),
+                                    "aac" => "audio/aac".to_string(),
+                                    "mov" => "video/quicktime".to_string(),
+                                    _ => "video/mp4".to_string(),
+                                };
+                                let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("media.mp4").to_string();
+                                Ok(MediaContent::Embedded {
+                                    data: bytes,
+                                    mime_type: mime,
+                                    filename: fname,
+                                })
+                            }
+                            Err(e) => Err(format!("Failed to read media file: {}", e)),
+                        }
+                    };
+
+                    match content_res {
+                        Ok(content) => {
+                            let cfg = RichMediaConfig {
+                                title: self.rich_media_title.clone(),
+                                content,
+                                rect: self.rich_media_rect,
+                                poster_image: None,
+                                auto_play: self.rich_media_autoplay,
+                                loop_playback: self.rich_media_loop,
+                                show_controls: true,
+                                volume: 1.0,
+                                activation: if self.rich_media_autoplay {
+                                    RichMediaActivation::PageOpen
+                                } else {
+                                    RichMediaActivation::UserClick
+                                },
+                                deactivation: RichMediaDeactivation::PageClose,
+                            };
+                            if let Some(tab) = self.active_tab_mut() {
+                                let curr = tab.current_page;
+                                match add_rich_media_annotation(&mut tab.doc, curr, &cfg) {
+                                    Ok(_) => {
+                                        tab.is_modified = true;
+                                        tab.invalidate_render();
+                                        self.status_message = format!("Embedded rich media '{}' on page {}", cfg.title, curr + 1);
+                                    }
+                                    Err(e) => {
+                                        self.status_message = format!("Failed to embed rich media: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(err_msg) => {
+                            self.status_message = err_msg;
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_rich_media_dialog = false;
+            }
+        }
+
+        // 31. Embed 3D Model Dialog (FR-28)
+        if self.show_threed_dialog {
+            let mut close = false;
+            let mut do_embed = false;
+
+            egui::Window::new("Embed 3D Model (FR-28)")
+                .collapsible(false)
+                .resizable(false)
+                .default_size([460.0, 320.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Embed interactive U3D (ECMA-363) or PRC (ISO 14739-1) model conforming to ISO 32000-1 Clause 13.6:");
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        let path_str = self.threed_model_path.as_ref()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("(No 3D model selected)");
+                        ui.label(format!("File: {}", path_str));
+                        if ui.button("Browse (.u3d, .prc)...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("3D Models (*.u3d, *.prc)", &["u3d", "prc"])
+                                .pick_file()
+                            {
+                                self.threed_model_path = Some(path);
+                            }
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Render Mode:");
+                        egui::ComboBox::from_id_salt("threed_render_combo")
+                            .selected_text(match self.threed_render_mode_idx {
+                                0 => "Solid",
+                                1 => "Solid Wireframe",
+                                2 => "Wireframe",
+                                3 => "Shaded Illustration",
+                                4 => "Transparent",
+                                5 => "Transparent Wireframe",
+                                6 => "Hidden Line",
+                                _ => "Bounding Box",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.threed_render_mode_idx, 0, "Solid");
+                                ui.selectable_value(&mut self.threed_render_mode_idx, 1, "Solid Wireframe");
+                                ui.selectable_value(&mut self.threed_render_mode_idx, 2, "Wireframe");
+                                ui.selectable_value(&mut self.threed_render_mode_idx, 3, "Shaded Illustration");
+                                ui.selectable_value(&mut self.threed_render_mode_idx, 4, "Transparent");
+                                ui.selectable_value(&mut self.threed_render_mode_idx, 5, "Transparent Wireframe");
+                                ui.selectable_value(&mut self.threed_render_mode_idx, 6, "Hidden Line");
+                                ui.selectable_value(&mut self.threed_render_mode_idx, 7, "Bounding Box");
+                            });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Lighting Preset:");
+                        egui::ComboBox::from_id_salt("threed_light_combo")
+                            .selected_text(match self.threed_lighting_idx {
+                                0 => "Day",
+                                1 => "Night",
+                                2 => "White",
+                                3 => "Hard",
+                                4 => "Primary",
+                                5 => "Blue",
+                                6 => "Red",
+                                7 => "Cube",
+                                8 => "CAD",
+                                9 => "Headlamp",
+                                _ => "None",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.threed_lighting_idx, 0, "Day");
+                                ui.selectable_value(&mut self.threed_lighting_idx, 1, "Night");
+                                ui.selectable_value(&mut self.threed_lighting_idx, 2, "White");
+                                ui.selectable_value(&mut self.threed_lighting_idx, 3, "Hard");
+                                ui.selectable_value(&mut self.threed_lighting_idx, 4, "Primary");
+                                ui.selectable_value(&mut self.threed_lighting_idx, 5, "Blue");
+                                ui.selectable_value(&mut self.threed_lighting_idx, 6, "Red");
+                                ui.selectable_value(&mut self.threed_lighting_idx, 7, "Cube");
+                                ui.selectable_value(&mut self.threed_lighting_idx, 8, "CAD");
+                                ui.selectable_value(&mut self.threed_lighting_idx, 9, "Headlamp");
+                                ui.selectable_value(&mut self.threed_lighting_idx, 10, "None");
+                            });
+                    });
+
+                    ui.weak(format!("Bounding Box: [{:.1}, {:.1}, {:.1}, {:.1}] pt",
+                        self.threed_rect[0], self.threed_rect[1],
+                        self.threed_rect[2], self.threed_rect[3]));
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Embed 3D Model").clicked() {
+                            do_embed = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if do_embed {
+                if let Some(ref path) = self.threed_model_path {
+                    match std::fs::read(path) {
+                        Ok(data) => {
+                            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                            let format = if ext == "prc" {
+                                ThreeDFormat::Prc
+                            } else {
+                                ThreeDFormat::U3d
+                            };
+                            let render_mode = match self.threed_render_mode_idx {
+                                0 => ThreeDRenderMode::Solid,
+                                1 => ThreeDRenderMode::SolidWireframe,
+                                2 => ThreeDRenderMode::Wireframe,
+                                3 => ThreeDRenderMode::ShadedIllustration,
+                                4 => ThreeDRenderMode::Transparent,
+                                5 => ThreeDRenderMode::TransparentWireframe,
+                                6 => ThreeDRenderMode::HiddenLine,
+                                _ => ThreeDRenderMode::BoundingBox,
+                            };
+                            let lighting = match self.threed_lighting_idx {
+                                0 => ThreeDLighting::Day,
+                                1 => ThreeDLighting::Night,
+                                2 => ThreeDLighting::White,
+                                3 => ThreeDLighting::Hard,
+                                4 => ThreeDLighting::Primary,
+                                5 => ThreeDLighting::Blue,
+                                6 => ThreeDLighting::Red,
+                                7 => ThreeDLighting::Cube,
+                                8 => ThreeDLighting::Cad,
+                                9 => ThreeDLighting::Headlamp,
+                                _ => ThreeDLighting::None,
+                            };
+
+                            let view = ThreeDView {
+                                name: "Default View".to_string(),
+                                render_mode,
+                                lighting,
+                                ..Default::default()
+                            };
+
+                            let cfg = ThreeDConfig {
+                                format,
+                                model_data: data,
+                                rect: self.threed_rect,
+                                views: vec![view],
+                                default_view_index: 0,
+                                model_tree: None,
+                            };
+
+                            if let Some(tab) = self.active_tab_mut() {
+                                let curr = tab.current_page;
+                                match add_3d_annotation(&mut tab.doc, curr, &cfg) {
+                                    Ok(_) => {
+                                        tab.is_modified = true;
+                                        tab.invalidate_render();
+                                        self.status_message = format!("Embedded 3D model on page {}", curr + 1);
+                                    }
+                                    Err(e) => {
+                                        self.status_message = format!("Failed to embed 3D model: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed to read 3D file: {}", e);
+                        }
+                    }
+                } else {
+                    self.status_message = "Please select a 3D model file first".into();
+                }
+            }
+
+            if close {
+                self.show_threed_dialog = false;
             }
         }
     }

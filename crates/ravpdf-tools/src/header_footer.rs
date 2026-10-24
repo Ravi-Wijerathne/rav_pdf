@@ -6,9 +6,10 @@ use chrono::Utc;
 use ravpdf_core::document::PdfDocument;
 use ravpdf_core::error::{PdfError, Result};
 use ravpdf_core::object::{Object, PdfDictionary, PdfName, PdfStream};
+use serde::{Deserialize, Serialize};
 
 /// Configuration for adding headers and footers to document pages.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeaderFooterConfig {
     pub left_header: Option<String>,
     pub center_header: Option<String>,
