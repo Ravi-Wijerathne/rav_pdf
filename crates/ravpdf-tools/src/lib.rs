@@ -19,8 +19,11 @@ pub mod comments;
 pub mod compare;
 pub mod export;
 pub mod header_footer;
+pub mod linearize;
+pub mod measure;
 pub mod metadata;
 pub mod optimize;
+pub mod portfolio;
 pub mod preflight;
 pub mod redact;
 pub mod search;
@@ -43,8 +46,21 @@ pub use export::{
     export_page_to_image, export_to_html, export_to_plain_text, ExportImageFormat,
 };
 pub use header_footer::{apply_headers_and_footers, HeaderFooterConfig};
+pub use linearize::{is_linearized, linearize_document, LinearizationParams};
+pub use measure::{
+    add_measurement_line_annotation, calculate_area, calculate_distance,
+    calculate_geographic_area_sq_meters, calculate_geographic_distance_meters,
+    calculate_perimeter, embed_geospatial_viewport, get_page_geospatial_viewports, snap_point,
+    AreaResult, AreaUnit, DistanceResult, GeoCoordinate, GeospatialViewport, LinearUnit,
+    PerimeterResult, ScaleRatio, SnapOptions,
+};
 pub use metadata::{get_document_info, set_document_info, DocumentInfo};
 pub use optimize::{audit_space_usage, optimize_document, OptimizationStats, SpaceAudit};
+pub use portfolio::{
+    add_to_portfolio, create_portfolio, extract_portfolio_item, get_portfolio, is_portfolio,
+    remove_from_portfolio, search_portfolio, Portfolio, PortfolioItem, PortfolioLayout,
+    PortfolioSort,
+};
 pub use preflight::{run_preflight, PreflightCheck, PreflightProfile, PreflightReport, PreflightSeverity};
 pub use redact::{redact_page_area, redact_pattern};
 pub use search::{
