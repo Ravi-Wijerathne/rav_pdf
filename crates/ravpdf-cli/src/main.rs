@@ -2,21 +2,31 @@
 //!
 //! Traceability: FR-37.1 - FR-37.6 (Complete CLI command suite).
 
+use anyhow::{anyhow, Result};
 use clap::{Parser as ClapParser, Subcommand};
 use ravpdf_core::document::PdfDocument;
-use anyhow::Result;
 use ravpdf_crypto::{decrypt_document, encrypt_document, Permissions};
 use ravpdf_edit::{merge_documents, rotate_page, split_document};
-use ravpdf_forms::flatten_form;
+use ravpdf_forms::{
+    apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
+    export_form_data, flatten_form, import_form_data, FormDataFormat, TabOrder,
+};
 use ravpdf_render::{pixmap_to_png, render_page, Color, RenderOptions};
 use ravpdf_tools::{
-    add_measurement_line_annotation, apply_bates_numbering, apply_text_watermark,
-    audit_accessibility, calculate_distance, create_portfolio,
-    export_comments_to_csv, export_page_to_image, export_to_html, export_to_plain_text,
-    extract_all_text, extract_portfolio_item, get_document_comments, get_document_info,
-    get_portfolio, linearize_document, optimize_document, redact_pattern, remediate_all_automatic,
-    AccessibilityStatus, ExportImageFormat, LinearUnit, PortfolioItem, PortfolioLayout,
-    ScaleRatio,
+    add_3d_annotation, add_measurement_line_annotation, add_rich_media_annotation,
+    apply_bates_numbering, apply_text_watermark, audit_accessibility, batch_scan_to_pdf,
+    calculate_distance, create_portfolio, execute_all_field_calculations, execute_batch_cancellable,
+    execute_script, export_comments_to_csv, export_page_to_image, export_to_html,
+    export_to_plain_text, extract_3d_stream, extract_all_text, extract_portfolio_item,
+    extract_rich_media_content, generate_postscript, get_3d_annotations, get_document_comments,
+    get_document_info, get_document_javascript, get_portfolio, get_rich_media_annotations,
+    linearize_document, optimize_document, redact_pattern, remediate_all_automatic,
+    AccessibilityStatus, ActionSequence, BatchJob, BookletBinding,
+    ExportImageFormat, JsExecutionContext, LinearUnit, MediaContent, NUpCount, NUpOrder,
+    PluginPermission, PluginRegistry, PortfolioItem, PortfolioLayout, PrintJobConfig,
+    PrintLayoutMode, RichMediaActivation, RichMediaConfig, RichMediaDeactivation,
+    SampleWatermarkPlugin, ScaleRatio, ScannerJobConfig, ThreeDConfig, ThreeDFormat,
+    ThreeDLighting, ThreeDRenderMode, ThreeDView,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -281,6 +291,273 @@ enum Commands {
 
         #[arg(long, help = "Linearize document for fast web view streaming (FR-02.8)")]
         linearize: bool,
+    },
+
+    #[command(about = "Execute sandboxed Acrobat JavaScript or form calculations (FR-12)")]
+    Js {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(long, help = "JavaScript expression or statement to evaluate")]
+        eval: Option<String>,
+
+        #[arg(long, help = "Run all AcroForm field calculation scripts")]
+        calculate_all: bool,
+
+        #[arg(short, long, help = "Output path to save updated PDF")]
+        output: Option<PathBuf>,
+    },
+
+    #[command(about = "Enhance, deskew, despeckle, and convert scanned images to PDF (FR-32)")]
+    ScanCleanup {
+        #[arg(required = true, help = "Input scanned image files (PNG, JPG, TIFF)")]
+        inputs: Vec<PathBuf>,
+
+        #[arg(short, long, required = true, help = "Output PDF file path")]
+        output: PathBuf,
+
+        #[arg(long, help = "Disable automatic deskew rotation")]
+        no_deskew: bool,
+
+        #[arg(long, help = "Disable automatic page boundary cropping")]
+        no_crop: bool,
+
+        #[arg(long, help = "Convert to pure black and white via Otsu binarization")]
+        binarize: bool,
+    },
+
+    #[command(about = "Generate PostScript or calculate print imposition (Booklet, N-Up, Poster) (FR-35)")]
+    Print {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PostScript (.ps) file path")]
+        output: PathBuf,
+
+        #[arg(long, default_value = "all", help = "Page range (e.g. 'all', '1-3, 5')")]
+        pages: String,
+
+        #[arg(long, help = "Saddle-stitch booklet imposition")]
+        booklet: bool,
+
+        #[arg(long, help = "N-up pages per sheet (2, 4, 6, 9, 16)")]
+        nup: Option<usize>,
+    },
+
+    #[command(about = "List registered plugins, capabilities, and extension manifests (FR-36)")]
+    Plugins {},
+
+    #[command(about = "Manage AcroForm fields, import/export data, autodetect, and tab order (FR-11)")]
+    Form {
+        #[command(subcommand)]
+        action: FormCommands,
+    },
+
+    #[command(about = "Embed, inspect, or extract multimedia and rich media annotations (FR-27)")]
+    Media {
+        #[command(subcommand)]
+        action: MediaCommands,
+    },
+
+    #[command(about = "Embed, inspect, or extract 3D U3D and PRC models (FR-28)")]
+    ThreeD {
+        #[command(subcommand)]
+        action: ThreeDCommands,
+    },
+
+    #[command(about = "Action Wizard batch processing and template recipes (FR-30)")]
+    Batch {
+        #[command(subcommand)]
+        action: BatchCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum FormCommands {
+    #[command(about = "Export form data to FDF, XFDF, CSV, XML, or JSON (FR-11.3.2)")]
+    Export {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output data file path")]
+        output: PathBuf,
+
+        #[arg(long, default_value = "json", help = "Data format: fdf, xfdf, csv, xml, json")]
+        format: String,
+    },
+
+    #[command(about = "Import form data into PDF fields (FR-11.3.2)")]
+    Import {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Data file to import")]
+        data: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file path")]
+        output: PathBuf,
+
+        #[arg(long, help = "Data format: fdf, xfdf, csv, xml, json (inferred from extension if omitted)")]
+        format: Option<String>,
+    },
+
+    #[command(about = "Automatically detect form fields from static content layout (FR-11.3.1)")]
+    AutoDetect {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file with fields applied")]
+        output: PathBuf,
+
+        #[arg(long, help = "1-based page number to detect on (or all pages if omitted)")]
+        page: Option<usize>,
+    },
+
+    #[command(about = "Set or recalculate tab order for page form fields (FR-11.2.7)")]
+    TabOrder {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value = "row", help = "Tab order strategy: row, column, structure, manual")]
+        order: String,
+
+        #[arg(long, help = "1-based page number (or all pages if omitted)")]
+        page: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MediaCommands {
+    #[command(about = "Embed audio or video into a PDF page (FR-27.1 - FR-27.6)")]
+    Embed {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, required = true, help = "Media file path (MP4, MP3, MOV, AAC) or streaming URL")]
+        media: String,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, default_value = "72,400,360,600", help = "Annotation bounding box: x1,y1,x2,y2")]
+        rect: String,
+
+        #[arg(long, help = "Auto-play on activation")]
+        autoplay: bool,
+
+        #[arg(long, help = "Loop playback continuously")]
+        loop_playback: bool,
+
+        #[arg(long, help = "Optional poster image file")]
+        poster: Option<PathBuf>,
+
+        #[arg(long, default_value = "Embedded Media", help = "Media title")]
+        title: String,
+    },
+
+    #[command(about = "List rich media annotations in a PDF (FR-27.1)")]
+    List {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(long, help = "1-based page index (lists all pages if omitted)")]
+        page: Option<usize>,
+    },
+
+    #[command(about = "Extract embedded media stream from a rich media annotation (FR-27.1)")]
+    Extract {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, default_value_t = 0, help = "0-based annotation index on the page")]
+        index: usize,
+
+        #[arg(short, long, required = true, help = "Output media file path")]
+        output: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum ThreeDCommands {
+    #[command(about = "Embed 3D U3D/PRC model into a PDF page (FR-28.1 - FR-28.7)")]
+    Embed {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, required = true, help = "Path to 3D model file (.u3d or .prc)")]
+        model: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, default_value = "72,300,400,600", help = "Annotation bounding box: x1,y1,x2,y2")]
+        rect: String,
+
+        #[arg(long, default_value = "solid", help = "Render mode: solid, wireframe, transparent, shaded, etc.")]
+        render_mode: String,
+
+        #[arg(long, default_value = "day", help = "Lighting preset: day, night, white, cad, headlamp, etc.")]
+        lighting: String,
+    },
+
+    #[command(about = "List 3D annotations in a PDF (FR-28.1)")]
+    List {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(long, help = "1-based page index (lists all pages if omitted)")]
+        page: Option<usize>,
+    },
+
+    #[command(about = "Extract 3D model stream from annotation (FR-28.1)")]
+    Extract {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, default_value_t = 0, help = "0-based annotation index on the page")]
+        index: usize,
+
+        #[arg(short, long, required = true, help = "Output model file path (.u3d or .prc)")]
+        output: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum BatchCommands {
+    #[command(about = "Execute a multi-step Action Wizard sequence across PDF files (FR-30.1, FR-30.2)")]
+    Run {
+        #[arg(required = true, help = "Input PDF files to process")]
+        inputs: Vec<PathBuf>,
+
+        #[arg(short, long, required = true, help = "Path to ActionSequence JSON recipe file")]
+        sequence: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output directory for processed files")]
+        output: PathBuf,
+    },
+
+    #[command(about = "Generate a predefined Action Wizard sequence template JSON (FR-30.3, FR-30.7)")]
+    Template {
+        #[arg(long, default_value = "distribute", help = "Template name: distribute, archive, web")]
+        name: String,
+
+        #[arg(short, long, required = true, help = "Output JSON file path")]
+        output: PathBuf,
     },
 }
 
@@ -839,7 +1116,730 @@ fn main() -> Result<()> {
                 println!("Dead Objects Pruned: {}", stats.objects_removed);
             }
         }
+
+        Commands::Js {
+            input,
+            eval,
+            calculate_all,
+            output,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let mut ctx = JsExecutionContext::new();
+            ctx.sync_from_document(&doc)?;
+
+            // Run document-level scripts if any
+            let doc_scripts = get_document_javascript(&doc)?;
+            for (name, s) in doc_scripts {
+                execute_script(&mut ctx, &s)?;
+                if !cli.json {
+                    println!("Executed document script '{}'", name);
+                }
+            }
+
+            if let Some(code) = eval {
+                let res = execute_script(&mut ctx, &code)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&res)?);
+                } else {
+                    println!("Result: {:?}", res);
+                }
+            }
+
+            if calculate_all {
+                let count = execute_all_field_calculations(&mut ctx)?;
+                println!("Calculated {} form field(s)", count);
+            }
+
+            for msg in &ctx.console_log {
+                println!("[JS Console] {}", msg);
+            }
+
+            if let Some(out_path) = output {
+                ctx.sync_to_document(&mut doc)?;
+                doc.save_to_file(&out_path)?;
+                println!("Updated PDF saved to {}", out_path.display());
+            }
+        }
+
+        Commands::ScanCleanup {
+            inputs,
+            output,
+            no_deskew,
+            no_crop,
+            binarize,
+        } => {
+            let mut images = Vec::new();
+            for p in &inputs {
+                let img = image::open(p)?.to_rgba8();
+                images.push(img);
+            }
+
+            let config = ScannerJobConfig {
+                auto_deskew: !no_deskew,
+                auto_crop: !no_crop,
+                binarize,
+                ..Default::default()
+            };
+
+            let doc = batch_scan_to_pdf(&images, &config)?;
+            doc.save_to_file(&output)?;
+            println!("Processed {} scanned page(s) -> {}", inputs.len(), output.display());
+        }
+
+        Commands::Print {
+            input,
+            output,
+            pages,
+            booklet,
+            nup,
+        } => {
+            let doc = PdfDocument::load_from_file(&input)?;
+            let layout_mode = if booklet {
+                PrintLayoutMode::Booklet {
+                    binding: BookletBinding::LeftToRight,
+                    subset: ravpdf_tools::BookletSubset::BothSides,
+                }
+            } else if let Some(n) = nup {
+                let nup_count = match n {
+                    2 => NUpCount::TwoUp,
+                    4 => NUpCount::FourUp,
+                    6 => NUpCount::SixUp,
+                    9 => NUpCount::NineUp,
+                    16 => NUpCount::SixteenUp,
+                    _ => NUpCount::TwoUp,
+                };
+                PrintLayoutMode::NUp {
+                    count: nup_count,
+                    order: NUpOrder::Horizontal,
+                    draw_border: true,
+                }
+            } else {
+                PrintLayoutMode::Standard
+            };
+            let config = PrintJobConfig {
+                page_range_str: pages,
+                layout_mode,
+                ..Default::default()
+            };
+
+            let ps = generate_postscript(&doc, &config)?;
+            fs::write(&output, ps)?;
+            println!("PostScript print job written to {}", output.display());
+        }
+
+        Commands::Plugins {} => {
+            let mut registry = PluginRegistry::new();
+            let sample = Box::new(SampleWatermarkPlugin::new());
+            let permissions = [
+                PluginPermission::UiExtension,
+                PluginPermission::DocumentTransform,
+            ];
+            registry.register_plugin(sample, &permissions)?;
+
+            let plugins = registry.list_plugins();
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&plugins)?);
+            } else {
+                println!("=== Registered RavPDF Extensions ===");
+                for p in plugins {
+                    println!("ID: {}", p.manifest.id);
+                    println!("Name: {}", p.manifest.name);
+                    println!("Version: {} (Min RavPDF: {})", p.manifest.version, p.manifest.min_ravpdf_version);
+                    println!("Author: {}", p.manifest.author);
+                    println!("Description: {}", p.manifest.description);
+                    println!("Enabled: {}", p.enabled);
+                    println!("Permissions: {:?}", p.granted_permissions);
+                    println!("------------------------------------");
+                }
+            }
+        }
+
+        Commands::Form { action } => match action {
+            FormCommands::Export {
+                input,
+                output,
+                format,
+            } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                let fmt = parse_form_format(&format).unwrap_or(FormDataFormat::Json);
+                let exported = export_form_data(&doc, fmt)?;
+                fs::write(&output, exported)?;
+                if cli.json {
+                    println!("{}", serde_json::json!({
+                        "status": "success",
+                        "format": format!("{:?}", fmt),
+                        "output": output.to_string_lossy(),
+                    }));
+                } else {
+                    println!("Exported form data ({:?}) to {}", fmt, output.display());
+                }
+            }
+
+            FormCommands::Import {
+                input,
+                data,
+                output,
+                format,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let raw_data = fs::read_to_string(&data)?;
+                let fmt = format
+                    .as_deref()
+                    .and_then(parse_form_format)
+                    .or_else(|| {
+                        let ext = data.extension().and_then(|e| e.to_str()).unwrap_or("");
+                        parse_form_format(ext)
+                    })
+                    .unwrap_or(FormDataFormat::Json);
+                let updated = import_form_data(&mut doc, &raw_data, fmt)?;
+                doc.save_to_file(&output)?;
+                if cli.json {
+                    println!("{}", serde_json::json!({
+                        "status": "success",
+                        "fields_updated": updated,
+                        "format": format!("{:?}", fmt),
+                        "output": output.to_string_lossy(),
+                    }));
+                } else {
+                    println!("Imported {} form field(s) ({:?}) -> {}", updated, fmt, output.display());
+                }
+            }
+
+            FormCommands::AutoDetect {
+                input,
+                output,
+                page,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let total_pages = doc.page_count();
+                let pages_to_check: Vec<usize> = if let Some(p) = page {
+                    if p >= 1 && p <= total_pages {
+                        vec![p - 1]
+                    } else {
+                        eprintln!("Error: page number out of range (1-{})", total_pages);
+                        std::process::exit(1);
+                    }
+                } else {
+                    (0..total_pages).collect()
+                };
+
+                let mut detected_count = 0;
+                for p_idx in pages_to_check {
+                    let detected = auto_detect_form_fields(&doc, p_idx)?;
+                    let count = detected.len();
+                    apply_auto_detected_fields(&mut doc, p_idx, &detected)?;
+                    detected_count += count;
+                }
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    println!("{}", serde_json::json!({
+                        "status": "success",
+                        "fields_detected": detected_count,
+                        "output": output.to_string_lossy(),
+                    }));
+                } else {
+                    println!("Auto-detected and applied {} form field(s) -> {}", detected_count, output.display());
+                }
+            }
+
+            FormCommands::TabOrder {
+                input,
+                output,
+                order,
+                page,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let total_pages = doc.page_count();
+                let tab_order = parse_tab_order(&order);
+                let pages_to_check: Vec<usize> = if let Some(p) = page {
+                    if p >= 1 && p <= total_pages {
+                        vec![p - 1]
+                    } else {
+                        eprintln!("Error: page number out of range (1-{})", total_pages);
+                        std::process::exit(1);
+                    }
+                } else {
+                    (0..total_pages).collect()
+                };
+
+                for p_idx in pages_to_check {
+                    apply_page_tab_order(&mut doc, p_idx, tab_order)?;
+                }
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    println!("{}", serde_json::json!({
+                        "status": "success",
+                        "tab_order": format!("{:?}", tab_order),
+                        "output": output.to_string_lossy(),
+                    }));
+                } else {
+                    println!("Applied {:?} tab order and saved to {}", tab_order, output.display());
+                }
+            }
+        },
+
+        Commands::Media { action } => match action {
+            MediaCommands::Embed {
+                input,
+                output,
+                media,
+                page,
+                rect,
+                autoplay,
+                loop_playback,
+                poster,
+                title,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let p_idx = page.saturating_sub(1);
+                let parsed_rect = parse_rect(&rect).unwrap_or([72.0, 400.0, 360.0, 600.0]);
+                let poster_bytes = if let Some(p) = poster {
+                    Some(fs::read(p)?)
+                } else {
+                    None
+                };
+
+                let content = if media.starts_with("http://") || media.starts_with("https://") {
+                    let mime = if media.ends_with(".mp3") || media.ends_with(".aac") {
+                        "audio/mpeg".to_string()
+                    } else {
+                        "video/mp4".to_string()
+                    };
+                    MediaContent::ExternalUrl {
+                        url: media.clone(),
+                        mime_type: mime,
+                    }
+                } else {
+                    let media_path = PathBuf::from(&media);
+                    let file_bytes = fs::read(&media_path)?;
+                    let fname = media_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("media.mp4")
+                        .to_string();
+                    let mime = if fname.ends_with(".mp3") || fname.ends_with(".aac") {
+                        "audio/mpeg".to_string()
+                    } else {
+                        "video/mp4".to_string()
+                    };
+                    MediaContent::Embedded {
+                        data: file_bytes,
+                        mime_type: mime,
+                        filename: fname,
+                    }
+                };
+
+                let config = RichMediaConfig {
+                    title,
+                    content,
+                    rect: parsed_rect,
+                    poster_image: poster_bytes,
+                    auto_play: autoplay,
+                    loop_playback,
+                    show_controls: true,
+                    volume: 1.0,
+                    activation: if autoplay {
+                        RichMediaActivation::PageVisible
+                    } else {
+                        RichMediaActivation::UserClick
+                    },
+                    deactivation: RichMediaDeactivation::PageClose,
+                };
+
+                let annot_id = add_rich_media_annotation(&mut doc, p_idx, &config)?;
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    println!("{}", serde_json::json!({
+                        "status": "success",
+                        "annotation_id": format!("{} {}", annot_id.number, annot_id.generation),
+                        "page": page,
+                        "output": output.to_string_lossy(),
+                    }));
+                } else {
+                    println!(
+                        "Embedded rich media annotation ({:?}) on page {} -> {}",
+                        annot_id,
+                        page,
+                        output.display()
+                    );
+                }
+            }
+
+            MediaCommands::List { input, page } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                let total_pages = doc.page_count();
+                let pages_to_check: Vec<usize> = if let Some(p) = page {
+                    if p >= 1 && p <= total_pages {
+                        vec![p - 1]
+                    } else {
+                        eprintln!("Error: page number out of range (1-{})", total_pages);
+                        std::process::exit(1);
+                    }
+                } else {
+                    (0..total_pages).collect()
+                };
+
+                let mut all_media = Vec::new();
+                for p in pages_to_check {
+                    let annots = get_rich_media_annotations(&doc, p)?;
+                    for a in annots {
+                        all_media.push((p + 1, a));
+                    }
+                }
+
+                if cli.json {
+                    let json: Vec<_> = all_media
+                        .iter()
+                        .map(|(p, a)| {
+                            serde_json::json!({
+                                "page": p,
+                                "id": format!("{} {}", a.id.number, a.id.generation),
+                                "title": a.title,
+                                "rect": a.rect,
+                                "is_embedded": a.is_embedded,
+                                "external_url": a.external_url,
+                                "mime_type": a.mime_type,
+                                "auto_play": a.auto_play,
+                                "loop": a.loop_playback,
+                                "volume": a.volume,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                } else {
+                    println!("=== Rich Media Annotations (Total: {}) ===", all_media.len());
+                    for (p, a) in all_media {
+                        let src = if a.is_embedded {
+                            "Embedded Stream"
+                        } else {
+                            a.external_url.as_deref().unwrap_or("URL")
+                        };
+                        println!(
+                            "Page {}: \"{}\" [{}] (ID {:?}) - {}",
+                            p, a.title, a.mime_type, a.id, src
+                        );
+                    }
+                }
+            }
+
+            MediaCommands::Extract {
+                input,
+                page,
+                index,
+                output,
+            } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                let p_idx = page.saturating_sub(1);
+                let annots = get_rich_media_annotations(&doc, p_idx)?;
+                if let Some(target) = annots.get(index) {
+                    if let Some(bytes) = extract_rich_media_content(&doc, target.id)? {
+                        fs::write(&output, bytes)?;
+                        println!("Extracted media stream to {}", output.display());
+                    } else {
+                        eprintln!("Error: Annotation does not contain an embedded stream (may be external URL)");
+                        std::process::exit(1);
+                    }
+                } else {
+                    eprintln!(
+                        "Error: Annotation index {} out of range (found {} on page {})",
+                        index,
+                        annots.len(),
+                        page
+                    );
+                    std::process::exit(1);
+                }
+            }
+        },
+
+        Commands::ThreeD { action } => match action {
+            ThreeDCommands::Embed {
+                input,
+                output,
+                model,
+                page,
+                rect,
+                render_mode,
+                lighting,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let p_idx = page.saturating_sub(1);
+                let parsed_rect = parse_rect(&rect).unwrap_or([72.0, 300.0, 400.0, 600.0]);
+                let model_bytes = fs::read(&model)?;
+                let ext = model.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let fmt = if ext.eq_ignore_ascii_case("prc") {
+                    ThreeDFormat::Prc
+                } else {
+                    ThreeDFormat::U3d
+                };
+
+                let render_m = parse_render_mode(&render_mode);
+                let light_p = parse_lighting(&lighting);
+
+                let view = ThreeDView {
+                    render_mode: render_m,
+                    lighting: light_p,
+                    ..Default::default()
+                };
+
+                let config = ThreeDConfig {
+                    format: fmt,
+                    model_data: model_bytes,
+                    rect: parsed_rect,
+                    views: vec![view],
+                    default_view_index: 0,
+                    model_tree: None,
+                };
+
+                let annot_id = add_3d_annotation(&mut doc, p_idx, &config)?;
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    println!("{}", serde_json::json!({
+                        "status": "success",
+                        "annotation_id": format!("{} {}", annot_id.number, annot_id.generation),
+                        "format": format!("{:?}", fmt),
+                        "page": page,
+                        "output": output.to_string_lossy(),
+                    }));
+                } else {
+                    println!(
+                        "Embedded 3D model ({:?}) annotation ({:?}) on page {} -> {}",
+                        fmt,
+                        annot_id,
+                        page,
+                        output.display()
+                    );
+                }
+            }
+
+            ThreeDCommands::List { input, page } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                let total_pages = doc.page_count();
+                let pages_to_check: Vec<usize> = if let Some(p) = page {
+                    if p >= 1 && p <= total_pages {
+                        vec![p - 1]
+                    } else {
+                        eprintln!("Error: page number out of range (1-{})", total_pages);
+                        std::process::exit(1);
+                    }
+                } else {
+                    (0..total_pages).collect()
+                };
+
+                let mut all_3d = Vec::new();
+                for p in pages_to_check {
+                    let annots = get_3d_annotations(&doc, p)?;
+                    for a in annots {
+                        all_3d.push((p + 1, a));
+                    }
+                }
+
+                if cli.json {
+                    let json: Vec<_> = all_3d
+                        .iter()
+                        .map(|(p, a)| {
+                            serde_json::json!({
+                                "page": p,
+                                "id": format!("{} {}", a.id.number, a.id.generation),
+                                "format": format!("{:?}", a.format),
+                                "rect": a.rect,
+                                "views_count": a.views_count,
+                                "stream_size_bytes": a.stream_size_bytes,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                } else {
+                    println!("=== 3D Annotations (Total: {}) ===", all_3d.len());
+                    for (p, a) in all_3d {
+                        println!(
+                            "Page {}: {:?} model [{} bytes] (ID {:?})",
+                            p, a.format, a.stream_size_bytes, a.id
+                        );
+                    }
+                }
+            }
+
+            ThreeDCommands::Extract {
+                input,
+                page,
+                index,
+                output,
+            } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                let p_idx = page.saturating_sub(1);
+                let annots = get_3d_annotations(&doc, p_idx)?;
+                if let Some(target) = annots.get(index) {
+                    if let Some(bytes) = extract_3d_stream(&doc, target.id)? {
+                        fs::write(&output, &bytes)?;
+                        println!(
+                            "Extracted 3D stream ({} bytes) to {}",
+                            bytes.len(),
+                            output.display()
+                        );
+                    } else {
+                        eprintln!("Error: 3D stream not found on annotation");
+                        std::process::exit(1);
+                    }
+                } else {
+                    eprintln!(
+                        "Error: Annotation index {} out of range (found {} on page {})",
+                        index,
+                        annots.len(),
+                        page
+                    );
+                    std::process::exit(1);
+                }
+            }
+        },
+
+        Commands::Batch { action } => match action {
+            BatchCommands::Run {
+                inputs,
+                sequence,
+                output,
+            } => {
+                let recipe_str = fs::read_to_string(&sequence)?;
+                let seq: ActionSequence = serde_json::from_str(&recipe_str)
+                    .map_err(|e| anyhow!("Failed to parse ActionSequence JSON: {}", e))?;
+                fs::create_dir_all(&output)?;
+
+                let job = BatchJob {
+                    input_files: inputs.clone(),
+                    output_directory: output.clone(),
+                    actions: seq.actions,
+                };
+
+                if !cli.json {
+                    println!("=== Action Wizard Batch Runner ===");
+                    println!("Sequence: \"{}\"", seq.name);
+                    println!("Description: {}", seq.description);
+                    println!("Files: {} -> Destination: {}", inputs.len(), output.display());
+                }
+
+                let result = execute_batch_cancellable(
+                    &job,
+                    None,
+                    Some(&|current, total, file| {
+                        if !cli.json {
+                            let fname = file.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                            println!("[{}/{}] Processing: {}", current, total, fname);
+                        }
+                    }),
+                );
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("\n=== Execution Summary ===");
+                    println!("Total Files: {}", result.total_files);
+                    println!("Succeeded: {}", result.successful_files);
+                    println!("Failed: {}", result.failed_files);
+                    if result.cancelled {
+                        println!("Status: CANCELLED");
+                    }
+                    for item in &result.details {
+                        let fname = item.path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                        if item.success {
+                            println!("  [OK] {}", fname);
+                        } else {
+                            println!(
+                                "  [FAIL] {} - {}",
+                                fname,
+                                item.error_message.as_deref().unwrap_or("Error")
+                            );
+                        }
+                    }
+                }
+            }
+
+            BatchCommands::Template { name, output } => {
+                let template = match name.to_lowercase().as_str() {
+                    "archive" | "archiving" => ActionSequence::template_prepare_for_archiving(),
+                    "web" | "web-optimize" => ActionSequence::template_optimize_for_web(),
+                    _ => ActionSequence::template_prepare_for_distribution(),
+                };
+                let json = serde_json::to_string_pretty(&template)?;
+                fs::write(&output, json)?;
+                if cli.json {
+                    println!("{}", serde_json::json!({
+                        "status": "success",
+                        "template": template.name,
+                        "output": output.to_string_lossy(),
+                    }));
+                } else {
+                    println!("Saved \"{}\" template recipe to {}", template.name, output.display());
+                }
+            }
+        },
     }
 
     Ok(())
+}
+
+fn parse_rect(s: &str) -> Option<[f64; 4]> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() == 4 {
+        if let (Ok(x1), Ok(y1), Ok(x2), Ok(y2)) = (
+            parts[0].trim().parse::<f64>(),
+            parts[1].trim().parse::<f64>(),
+            parts[2].trim().parse::<f64>(),
+            parts[3].trim().parse::<f64>(),
+        ) {
+            return Some([x1, y1, x2, y2]);
+        }
+    }
+    None
+}
+
+fn parse_form_format(s: &str) -> Option<FormDataFormat> {
+    match s.to_lowercase().as_str() {
+        "fdf" => Some(FormDataFormat::Fdf),
+        "xfdf" => Some(FormDataFormat::Xfdf),
+        "csv" => Some(FormDataFormat::Csv),
+        "xml" => Some(FormDataFormat::Xml),
+        "json" => Some(FormDataFormat::Json),
+        _ => None,
+    }
+}
+
+fn parse_tab_order(s: &str) -> TabOrder {
+    match s.to_lowercase().as_str() {
+        "col" | "column" => TabOrder::Column,
+        "struct" | "structure" => TabOrder::Structure,
+        "manual" => TabOrder::Manual,
+        _ => TabOrder::Row,
+    }
+}
+
+fn parse_render_mode(s: &str) -> ThreeDRenderMode {
+    match s.to_lowercase().as_str() {
+        "wireframe" => ThreeDRenderMode::Wireframe,
+        "solidwireframe" => ThreeDRenderMode::SolidWireframe,
+        "transparent" => ThreeDRenderMode::Transparent,
+        "transparentwireframe" => ThreeDRenderMode::TransparentWireframe,
+        "shaded" | "shadedillustration" => ThreeDRenderMode::ShadedIllustration,
+        "hiddenline" => ThreeDRenderMode::HiddenLine,
+        "boundingbox" => ThreeDRenderMode::BoundingBox,
+        _ => ThreeDRenderMode::Solid,
+    }
+}
+
+fn parse_lighting(s: &str) -> ThreeDLighting {
+    match s.to_lowercase().as_str() {
+        "white" => ThreeDLighting::White,
+        "night" => ThreeDLighting::Night,
+        "hard" => ThreeDLighting::Hard,
+        "primary" => ThreeDLighting::Primary,
+        "blue" => ThreeDLighting::Blue,
+        "red" => ThreeDLighting::Red,
+        "cube" => ThreeDLighting::Cube,
+        "cad" => ThreeDLighting::Cad,
+        "headlamp" => ThreeDLighting::Headlamp,
+        "none" => ThreeDLighting::None,
+        _ => ThreeDLighting::Day,
+    }
 }

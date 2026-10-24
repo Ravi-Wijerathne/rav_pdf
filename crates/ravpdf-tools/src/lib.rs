@@ -19,14 +19,20 @@ pub mod comments;
 pub mod compare;
 pub mod export;
 pub mod header_footer;
+pub mod js;
 pub mod linearize;
 pub mod measure;
 pub mod metadata;
 pub mod optimize;
+pub mod plugin;
 pub mod portfolio;
 pub mod preflight;
+pub mod print;
 pub mod redact;
+pub mod rich_media;
+pub mod scan_cleanup;
 pub mod search;
+pub mod threed;
 pub mod watermark;
 
 pub use accessibility::{
@@ -35,7 +41,10 @@ pub use accessibility::{
     AccessibilityReport, AccessibilityRule, AccessibilityStatus,
 };
 pub use attachments::{add_attachment, get_attachments, remove_attachment, FileAttachment};
-pub use batch::{execute_batch, BatchAction, BatchFileResult, BatchJob, BatchResult};
+pub use batch::{
+    execute_batch, execute_batch_cancellable, ActionSequence, BatchAction, BatchFileResult,
+    BatchJob, BatchResult,
+};
 pub use bates::apply_bates_numbering;
 pub use comments::{
     compare_reviewer_comments, export_comments_to_csv, get_document_comments,
@@ -46,6 +55,11 @@ pub use export::{
     export_page_to_image, export_to_html, export_to_plain_text, ExportImageFormat,
 };
 pub use header_footer::{apply_headers_and_footers, HeaderFooterConfig};
+pub use js::{
+    add_document_javascript, eval_expression, execute_all_field_calculations,
+    execute_field_formatting, execute_field_validation, execute_script, get_document_javascript,
+    JsAlert, JsEvent, JsExecutionContext, JsFormField, JsMailDocAction, JsSubmitFormAction, JsValue,
+};
 pub use linearize::{is_linearized, linearize_document, LinearizationParams};
 pub use measure::{
     add_measurement_line_annotation, calculate_area, calculate_distance,
@@ -56,16 +70,43 @@ pub use measure::{
 };
 pub use metadata::{get_document_info, set_document_info, DocumentInfo};
 pub use optimize::{audit_space_usage, optimize_document, OptimizationStats, SpaceAudit};
+pub use plugin::{
+    ContextMenuTarget, MenuCategory, PluginContextMenuEntry, PluginHost, PluginInfo,
+    PluginManifest, PluginMenuItem, PluginPermission, PluginRegistry, PluginToolbarButton,
+    RavPdfPlugin, SampleWatermarkPlugin,
+};
 pub use portfolio::{
     add_to_portfolio, create_portfolio, extract_portfolio_item, get_portfolio, is_portfolio,
     remove_from_portfolio, search_portfolio, Portfolio, PortfolioItem, PortfolioLayout,
     PortfolioSort,
 };
 pub use preflight::{run_preflight, PreflightCheck, PreflightProfile, PreflightReport, PreflightSeverity};
+pub use print::{
+    calculate_booklet_imposition, calculate_nup_imposition, calculate_poster_tiles,
+    generate_postscript, generate_print_preview_layout, parse_page_range, BookletBinding,
+    BookletSheet, BookletSubset, NUpCellPlacement, NUpCount, NUpOrder, NUpSheet, PosterTile,
+    PrintAnnotationMode, PrintDuplex, PrintJobConfig, PrintLayoutMode, PrintOrientation,
+    PrintPreviewReport, PrintScaling,
+};
 pub use redact::{redact_page_area, redact_pattern};
+pub use rich_media::{
+    add_rich_media_annotation, extract_rich_media_content, get_rich_media_annotations,
+    MediaContent, RichMediaActivation, RichMediaAnnotation, RichMediaConfig, RichMediaDeactivation,
+};
+pub use scan_cleanup::{
+    auto_crop_page, batch_scan_to_pdf, binarize_otsu, clean_scanned_image, compute_otsu_threshold,
+    despeckle, detect_page_orientation, detect_skew_angle, list_scanner_devices, rotate_180,
+    rotate_270_cw, rotate_90_cw, rotate_image_bilinear, whiten_background, ScanCleanupStats,
+    ScanColorMode, ScanDpi, ScanDuplex, ScanPageSize, ScannerDevice, ScannerDriver,
+    ScannerJobConfig,
+};
 pub use search::{
     build_search_regex, extract_all_text, extract_page_text, find_and_replace,
     find_and_replace_page, search_document, SearchMatch,
+};
+pub use threed::{
+    add_3d_annotation, extract_3d_stream, get_3d_annotations, CrossSectionPlane, ThreeDAnnotation,
+    ThreeDConfig, ThreeDFormat, ThreeDLighting, ThreeDNode, ThreeDRenderMode, ThreeDView,
 };
 pub use watermark::apply_text_watermark;
 
