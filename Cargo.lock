@@ -2550,6 +2550,7 @@ dependencies = [
  "aes",
  "anyhow",
  "cbc",
+ "chrono",
  "cipher",
  "md-5",
  "ravpdf-core",

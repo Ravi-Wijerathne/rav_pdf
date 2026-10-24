@@ -6,13 +6,18 @@
 //! - NFR-04.4 (Memory safety and secure cleanup)
 //! - NFR-04.7 (NIST-approved algorithms via audited crates)
 
+pub mod asn1;
+pub mod cms;
+pub mod digital_id;
 pub mod permissions;
 pub mod signatures;
 pub mod standard;
 
+pub use digital_id::DigitalId;
 pub use permissions::Permissions;
 pub use signatures::{
-    create_signature_field, get_document_signatures, SignatureInfo, SignatureStatus,
+    create_signature_field, get_document_signatures, sign_pdf_document, SignatureInfo,
+    SignatureStatus,
 };
 pub use standard::{
     compute_encryption_key, decrypt_aes128, derive_object_key, encrypt_aes128, pad_password,

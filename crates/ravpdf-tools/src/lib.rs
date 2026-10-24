@@ -15,6 +15,7 @@ pub mod accessibility;
 pub mod attachments;
 pub mod batch;
 pub mod bates;
+pub mod color_management;
 pub mod comments;
 pub mod compare;
 pub mod export;
@@ -23,15 +24,18 @@ pub mod js;
 pub mod linearize;
 pub mod measure;
 pub mod metadata;
+pub mod ocr;
 pub mod optimize;
 pub mod plugin;
 pub mod portfolio;
 pub mod preflight;
 pub mod print;
+pub mod print_production;
 pub mod redact;
 pub mod rich_media;
 pub mod scan_cleanup;
 pub mod search;
+pub mod standards;
 pub mod threed;
 pub mod watermark;
 
@@ -46,6 +50,11 @@ pub use batch::{
     BatchJob, BatchResult,
 };
 pub use bates::apply_bates_numbering;
+pub use color_management::{
+    apply_soft_proof, convert_cmyk_to_gray, convert_cmyk_to_rgb_profile, convert_document_colors,
+    convert_rgb_to_cmyk_profile, convert_rgb_to_gray, embed_output_intent, get_output_intents,
+    OutputIntentInfo, RenderingIntent, SoftProofConfig, StandardIccProfile,
+};
 pub use comments::{
     compare_reviewer_comments, export_comments_to_csv, get_document_comments,
     merge_reviewer_annotations, AnnotationDiff, ReviewComment,
@@ -69,6 +78,10 @@ pub use measure::{
     PerimeterResult, ScaleRatio, SnapOptions,
 };
 pub use metadata::{get_document_info, set_document_info, DocumentInfo};
+pub use ocr::{
+    create_pdf_from_image_with_ocr, perform_ocr_document, perform_ocr_on_page, OcrConfig,
+    OcrDocumentResult, OcrLine, OcrOutputMode, OcrPageResult, OcrWord,
+};
 pub use optimize::{audit_space_usage, optimize_document, OptimizationStats, SpaceAudit};
 pub use plugin::{
     ContextMenuTarget, MenuCategory, PluginContextMenuEntry, PluginHost, PluginInfo,
@@ -80,7 +93,22 @@ pub use portfolio::{
     remove_from_portfolio, search_portfolio, Portfolio, PortfolioItem, PortfolioLayout,
     PortfolioSort,
 };
-pub use preflight::{run_preflight, PreflightCheck, PreflightProfile, PreflightReport, PreflightSeverity};
+pub use preflight::{
+    execute_preflight_fixup, run_preflight, PreflightCheck, PreflightFixup, PreflightProfile,
+    PreflightReport, PreflightSeverity,
+};
+pub use print_production::{
+    add_printer_marks, apply_ink_manager, apply_plate_separations, flatten_document_transparency,
+    get_document_inks, get_trap_presets, inspect_page_objects, set_trap_presets,
+    DocumentInkInfo, InkManagerConfig, InkMapping, ObjectInspectionReport, PlateSeparationConfig,
+    PrinterMarksConfig, SeparationAnalysis, TransparencyFlattenConfig, TransparencyFlattenReport,
+    TrapPreset,
+};
+pub use standards::{
+    convert_to_standard, embed_standard_xmp_metadata, generate_standard_xmp,
+    validate_standard_compliance, StandardCheckResult, StandardConversionConfig,
+    StandardConversionReport, StandardFormat, StandardValidationReport,
+};
 pub use print::{
     calculate_booklet_imposition, calculate_nup_imposition, calculate_poster_tiles,
     generate_postscript, generate_print_preview_layout, parse_page_range, BookletBinding,

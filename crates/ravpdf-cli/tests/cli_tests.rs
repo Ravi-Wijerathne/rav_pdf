@@ -545,5 +545,228 @@ fn test_action_wizard_batch_workflows() {
     assert!(out_dir.join("report_b.pdf").exists());
 }
 
+#[test]
+fn test_ocr_workflows() {
+    use image::{Rgba, RgbaImage};
+    use ravpdf_tools::{
+        create_pdf_from_image_with_ocr, perform_ocr_document, ActionSequence, OcrConfig,
+        OcrOutputMode,
+    };
+
+    // 1. Test OCR on scanned raster image creating a Searchable Image PDF (FR-16.1, FR-16.2, FR-16.4, FR-16.5)
+    let mut img = RgbaImage::from_pixel(300, 150, Rgba([255, 255, 255, 255]));
+    for y in 60..90 {
+        for x in 40..260 {
+            img.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+        }
+    }
+
+    let config = OcrConfig {
+        language: "eng".to_string(),
+        output_mode: OcrOutputMode::SearchableImage,
+        dpi: 300,
+        auto_rotate: true,
+        min_confidence: 0.60,
+        preserve_appearance: true,
+    };
+
+    let (mut doc, ocr_res) = create_pdf_from_image_with_ocr(&img, &config).expect("create pdf from image with OCR");
+    assert_eq!(doc.page_count(), 1);
+    assert!(!ocr_res.lines.is_empty());
+    assert!(ocr_res.average_confidence > 0.0);
+
+    // 2. Test multi-page OCR document execution (FR-16.7)
+    doc.add_blank_page(612.0, 792.0);
+    let doc_res = perform_ocr_document(&mut doc, &config, None).expect("perform OCR on document");
+    assert_eq!(doc_res.pages.len(), 2);
+
+    // 3. Verify content stream contains invisible text rendering mode 3 Tr (FR-16.4, FR-16.5)
+    let page0_content = doc.get_page_content(0).expect("get page 0 content");
+    let page0_str = String::from_utf8_lossy(&page0_content);
+    assert!(page0_str.contains("3 Tr"));
+
+    // 4. Verify ActionSequence template: "Scan and Make Searchable" (FR-30.3, FR-16.7)
+    let scan_template = ActionSequence::template_scan_and_make_searchable();
+    assert_eq!(scan_template.name, "Scan and Make Searchable");
+    assert_eq!(scan_template.actions.len(), 2);
+    let json_seq = scan_template.to_json().expect("serialize template");
+    let restored_seq = ActionSequence::from_json(&json_seq).expect("deserialize template");
+    assert_eq!(restored_seq.name, "Scan and Make Searchable");
+}
+
+#[test]
+fn test_sign_preflight_and_color_workflows() {
+    use ravpdf_crypto::{get_document_signatures, DigitalId, SignatureStatus, sign_pdf_document};
+    use ravpdf_tools::{
+        convert_document_colors, embed_output_intent, execute_preflight_fixup, get_output_intents,
+        run_preflight, PreflightFixup, PreflightProfile, StandardIccProfile,
+    };
+
+    // 1. Digital Signing Workflow (FR-13.1, FR-13.6, FR-13.13)
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0);
+
+    let digital_id = DigitalId::generate("Authorized Certifier", "Legal Dept", "certifier@org.com", 365)
+        .expect("generate digital ID");
+    let signed_bytes = sign_pdf_document(
+        doc,
+        0,
+        "SignField1",
+        &digital_id,
+        "Approved for Publication",
+        "Headquarters",
+        Some([72.0, 72.0, 260.0, 130.0]),
+    )
+    .expect("sign document");
+
+    let signed_doc = PdfDocument::load_from_bytes(&signed_bytes).expect("load signed doc");
+    let sigs = get_document_signatures(&signed_doc, Some(&signed_bytes)).expect("get sigs");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0].field_name, "SignField1");
+    assert_eq!(sigs[0].signer_name.as_deref(), Some("Authorized Certifier"));
+    assert!(matches!(sigs[0].status, SignatureStatus::Valid(_)));
+
+    // 2. Preflight Audit & Automated Fixup Workflow (FR-22, FR-23.1.4)
+    let mut audit_doc = PdfDocument::new();
+    let sample_content = b"BT\n/F1 12 Tf\n100 700 Td\n(Uncompressed text stream) Tj\nET\n";
+    audit_doc.add_page_with_content(612.0, 792.0, sample_content.to_vec());
+
+    let initial_report = run_preflight(&audit_doc, PreflightProfile::PdfA1b);
+    assert!(!initial_report.is_compliant);
+
+    let fixup_msg = execute_preflight_fixup(&mut audit_doc, PreflightFixup::FixAll)
+        .expect("execute preflight fixups");
+    assert!(fixup_msg.contains("Populated") || fixup_msg.contains("OutputIntent"));
+
+    let fixed_report = run_preflight(&audit_doc, PreflightProfile::PdfA1b);
+    assert!(fixed_report.total_passed >= initial_report.total_passed);
+
+    // 3. Color Management & Output Intent Workflow (FR-24.1, FR-24.4, FR-24.6)
+    let oi_id = embed_output_intent(
+        &mut audit_doc,
+        StandardIccProfile::USWebCoatedSWOP,
+        "U.S. Web Coated (SWOP) v2",
+        "http://www.color.org",
+    )
+    .expect("embed output intent");
+    assert!(oi_id.number > 0);
+
+    let oi_list = get_output_intents(&audit_doc).expect("get output intents");
+    assert_eq!(oi_list.len(), 2); // 1 from preflight fixup, 1 from embed_output_intent
+    assert!(oi_list.iter().any(|oi| oi.output_condition_identifier == "U.S. Web Coated (SWOP) v2"));
+
+    let converted_count = convert_document_colors(&mut audit_doc, "DeviceCMYK")
+        .expect("convert document colors");
+    assert_eq!(converted_count, 0); // content had no color operators, handled safely without error
+}
+
+#[test]
+fn test_prepress_marks_flattening_and_standards_compliance() {
+    use ravpdf_tools::{
+        add_printer_marks, apply_ink_manager, convert_to_standard, flatten_document_transparency,
+        get_document_inks, get_trap_presets, set_trap_presets, validate_standard_compliance,
+        InkManagerConfig, InkMapping, PrinterMarksConfig, StandardConversionConfig, StandardFormat,
+        StandardIccProfile, TransparencyFlattenConfig, TrapPreset,
+    };
+
+    // 1. Prepress Printer Marks Injection (FR-23.3.4)
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0);
+
+    let marks_cfg = PrinterMarksConfig {
+        trim_marks: true,
+        bleed_marks: true,
+        registration_marks: true,
+        color_bars: true,
+        page_information: true,
+        slug_margin: 36.0,
+        bleed_offset: 9.0,
+        ..Default::default()
+    };
+    let marked_pages = add_printer_marks(&mut doc, &marks_cfg).expect("add printer marks");
+    assert_eq!(marked_pages, 1);
+
+    let page = doc.get_page(0).expect("page 0");
+    assert_eq!(page.media_box, [-36.0, -36.0, 648.0, 828.0]);
+
+    // 2. Prepress Transparency Flattening (FR-23.3.3)
+    let flat_cfg = TransparencyFlattenConfig {
+        raster_vector_balance: 80,
+        flatten_opacity: true,
+        normalize_blend_modes: true,
+        remove_page_transparency_groups: true,
+    };
+    let flat_rep = flatten_document_transparency(&mut doc, &flat_cfg).expect("flatten");
+    assert_eq!(flat_rep.total_pages_processed, 1);
+
+    // 3. Prepress Trap Presets (FR-23.3.5)
+    let trap_preset = TrapPreset {
+        name: "Commercial Web Press".into(),
+        trap_width: 0.25,
+        black_width: 0.50,
+        black_color_limit: 1.0,
+        trap_color_reduction: 0.5,
+    };
+    set_trap_presets(&mut doc, &[trap_preset.clone()]).expect("set trap presets");
+    let retrieved_presets = get_trap_presets(&doc);
+    assert_eq!(retrieved_presets.len(), 1);
+    assert_eq!(retrieved_presets[0].name, "Commercial Web Press");
+
+    // 4. Prepress Ink Manager (FR-23.3.2)
+    let inks = get_document_inks(&doc);
+    assert_eq!(inks.len(), 4); // Standard CMYK process plates
+    let ink_cfg = InkManagerConfig {
+        mappings: vec![InkMapping {
+            spot_name: "PANTONE 286 C".into(),
+            cmyk: (1.0, 0.75, 0.0, 0.0),
+        }],
+        convert_all_spots_to_process: true,
+    };
+    let mapped = apply_ink_manager(&mut doc, &ink_cfg).expect("apply ink manager");
+    assert_eq!(mapped, 0);
+
+    // 5. Standards Compliance: PDF/A-1b Archival Conversion & Validation (FR-22.1, FR-22.4, FR-22.6)
+    let mut std_doc = PdfDocument::new();
+    std_doc.add_blank_page(612.0, 792.0);
+
+    let conv_cfg = StandardConversionConfig {
+        target: StandardFormat::PdfA1b,
+        icc_profile: StandardIccProfile::SRgb,
+        remove_javascript: true,
+        remove_encryption: true,
+        convert_colors_to_cmyk: false,
+        embed_output_intent: true,
+        embed_xmp_metadata: true,
+    };
+    let conv_rep = convert_to_standard(&mut std_doc, &conv_cfg).expect("convert to PDF/A-1b");
+    assert!(conv_rep.is_success);
+    assert_eq!(conv_rep.target_version, (1, 4));
+
+    let val_rep = validate_standard_compliance(&std_doc, StandardFormat::PdfA1b);
+    assert!(val_rep.is_compliant);
+    assert!(val_rep.checks.iter().all(|c| c.passed));
+
+    // 6. Standards Compliance: PDF/X-1a Commercial Prepress Conversion & Validation (FR-22.2, FR-22.4)
+    let mut x_doc = PdfDocument::new();
+    x_doc.add_blank_page(612.0, 792.0);
+
+    let x_cfg = StandardConversionConfig {
+        target: StandardFormat::PdfX1a,
+        icc_profile: StandardIccProfile::USWebCoatedSWOP,
+        remove_javascript: false,
+        remove_encryption: true,
+        convert_colors_to_cmyk: true,
+        embed_output_intent: true,
+        embed_xmp_metadata: true,
+    };
+    let x_rep = convert_to_standard(&mut x_doc, &x_cfg).expect("convert to PDF/X-1a");
+    assert!(x_rep.is_success);
+    assert_eq!(x_rep.target_version, (1, 4));
+
+    let x_val = validate_standard_compliance(&x_doc, StandardFormat::PdfX1a);
+    assert!(x_val.is_compliant);
+}
+
+
 
 
