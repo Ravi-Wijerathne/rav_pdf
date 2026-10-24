@@ -35,8 +35,8 @@ use ravpdf_edit::{
     ImagePdfOptions, PageLabelRange, PageLabelStyle, TextPdfOptions,
 };
 use ravpdf_crypto::{
-    create_signature_field, encrypt_document, get_document_signatures, Permissions,
-    SignatureStatus,
+    create_signature_field, encrypt_document, get_document_signatures, DigitalId, Permissions,
+    SignatureStatus, sign_pdf_document,
 };
 use ravpdf_forms::{
     add_form_field, apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
@@ -45,26 +45,34 @@ use ravpdf_forms::{
 };
 use ravpdf_render::{pixmap_to_png, render_page, RenderOptions};
 use ravpdf_tools::{
+    add_printer_marks, apply_ink_manager, convert_to_standard, flatten_document_transparency,
+    get_document_inks, get_trap_presets, set_trap_presets, validate_standard_compliance,
+    InkManagerConfig, PrinterMarksConfig, StandardConversionConfig, StandardFormat,
+    StandardValidationReport, TransparencyFlattenConfig, TrapPreset,
     add_3d_annotation, add_attachment, add_measurement_line_annotation, add_rich_media_annotation,
-    apply_bates_numbering, apply_headers_and_footers, apply_text_watermark, audit_accessibility,
-    audit_space_usage, batch_scan_to_pdf, calculate_area, calculate_distance, compare_documents,
-    create_portfolio, execute_all_field_calculations, execute_batch, execute_script,
+    apply_bates_numbering, apply_headers_and_footers, apply_text_watermark,
+    audit_accessibility, audit_space_usage, batch_scan_to_pdf, calculate_area, calculate_distance,
+    compare_documents, convert_document_colors, create_portfolio, embed_output_intent,
+    execute_all_field_calculations, execute_batch, execute_preflight_fixup, execute_script,
     export_comments_to_csv, export_page_to_image, export_to_html, export_to_plain_text,
     extract_all_text, find_and_replace, find_and_replace_page, fix_document_language,
     fix_document_title, fix_ensure_tagged_pdf, fix_tab_order_to_structure, generate_postscript,
     generate_print_preview_layout, get_attachments, get_document_comments,
-    get_page_geospatial_viewports, get_portfolio, is_linearized, is_portfolio, linearize_document,
-    merge_reviewer_annotations, optimize_document, redact_page_area, redact_pattern,
-    remediate_all_automatic, remove_attachment, run_preflight, search_document, set_document_info,
-    AccessibilityReport, AccessibilityStatus, AreaUnit, BatchAction, BatchJob,
-    BatchResult, BookletBinding, ComparisonReport, ExportImageFormat, FileAttachment,
-    HeaderFooterConfig, JsExecutionContext, LinearUnit, MediaContent, NUpCount, NUpOrder,
-    OptimizationStats, PluginPermission, PluginRegistry, PortfolioItem, PortfolioLayout,
-    PreflightProfile, PreflightReport, PreflightSeverity, PrintJobConfig, PrintLayoutMode,
-    ReviewComment, RichMediaActivation, RichMediaConfig, RichMediaDeactivation,
-    SampleWatermarkPlugin, ScaleRatio, ScannerJobConfig, SearchMatch, SnapOptions, SpaceAudit,
+    get_page_geospatial_viewports, get_portfolio, inspect_page_objects, is_linearized,
+    is_portfolio, linearize_document, merge_reviewer_annotations, optimize_document,
+    redact_page_area, redact_pattern, remediate_all_automatic, remove_attachment, run_preflight,
+    search_document, set_document_info, AccessibilityReport, AccessibilityStatus, AreaUnit,
+    BatchAction, BatchJob, BatchResult, BookletBinding, ComparisonReport, ExportImageFormat,
+    FileAttachment, HeaderFooterConfig, JsExecutionContext, LinearUnit, MediaContent,
+    NUpCount, NUpOrder, ObjectInspectionReport, OcrConfig, OcrDocumentResult, OcrOutputMode,
+    OptimizationStats, PlateSeparationConfig, PluginPermission, PluginRegistry, PortfolioItem,
+    PortfolioLayout, PreflightFixup, PreflightProfile, PreflightReport, PreflightSeverity,
+    PrintJobConfig, PrintLayoutMode, RenderingIntent, ReviewComment, RichMediaActivation,
+    RichMediaConfig, RichMediaDeactivation, SampleWatermarkPlugin, ScaleRatio, ScannerJobConfig,
+    SearchMatch, SeparationAnalysis, SnapOptions, SoftProofConfig, SpaceAudit, StandardIccProfile,
     ThreeDConfig, ThreeDFormat, ThreeDLighting, ThreeDRenderMode, ThreeDView,
 };
+use ravpdf_tools::perform_ocr_document;
 use std::path::PathBuf;
 use tab::DocumentTab;
 
@@ -251,9 +259,12 @@ struct RavPdfApp {
 
     // Digital Signatures state (FR-13)
     show_add_signature_dialog: bool,
+    sig_mode_idx: usize,
     sig_target_page: usize,
     sig_field_name: String,
     sig_signer_name: String,
+    sig_org: String,
+    sig_email: String,
     sig_reason: String,
     sig_location: String,
     sig_is_visible: bool,
@@ -370,6 +381,48 @@ struct RavPdfApp {
     // Plugins state (FR-36)
     show_plugins_dialog: bool,
     plugin_registry: PluginRegistry,
+
+    // Optical Character Recognition (OCR) state (FR-16)
+    show_ocr_dialog: bool,
+    ocr_lang_idx: usize,
+    ocr_mode_idx: usize,
+    ocr_dpi: u32,
+    ocr_auto_rotate: bool,
+    ocr_all_pages: bool,
+    ocr_result: Option<OcrDocumentResult>,
+
+    // Output Preview & Plate Separations state (FR-23.2)
+    show_output_preview_dialog: bool,
+    plate_config: PlateSeparationConfig,
+    separation_analysis: Option<SeparationAnalysis>,
+    object_inspection_report: Option<ObjectInspectionReport>,
+
+    // Color Management & Soft-Proofing state (FR-24)
+    show_color_management_dialog: bool,
+    soft_proof_active: bool,
+    soft_proof_config: SoftProofConfig,
+    color_convert_target_idx: usize,
+    output_intent_profile_idx: usize,
+    output_intent_condition: String,
+    output_intent_registry: String,
+
+    // Prepress Tools state (FR-23.3)
+    show_prepress_dialog: bool,
+    prepress_tab_idx: usize,
+    printer_marks_config: PrinterMarksConfig,
+    transparency_flatten_config: TransparencyFlattenConfig,
+    new_trap_preset_name: String,
+    new_trap_width: f64,
+    new_black_width: f64,
+
+    // Standards Compliance Wizard state (FR-22)
+    show_standards_dialog: bool,
+    standards_format_idx: usize,
+    standards_icc_idx: usize,
+    standards_remove_js: bool,
+    standards_remove_enc: bool,
+    standards_convert_cmyk: bool,
+    standards_validation_report: Option<StandardValidationReport>,
 }
 
 impl Default for RavPdfApp {
@@ -404,9 +457,12 @@ impl Default for RavPdfApp {
             crop_all_pages: false,
 
             show_add_signature_dialog: false,
+            sig_mode_idx: 0,
             sig_target_page: 0,
             sig_field_name: "Signature1".into(),
             sig_signer_name: "Authorized Signer".into(),
+            sig_org: "Certified Authority".into(),
+            sig_email: "signer@organization.org".into(),
             sig_reason: "Document Approved".into(),
             sig_location: "Headquarters".into(),
             sig_is_visible: true,
@@ -578,6 +634,42 @@ impl Default for RavPdfApp {
             print_layout_idx: 0,
 
             show_plugins_dialog: false,
+            show_ocr_dialog: false,
+            ocr_lang_idx: 0,
+            ocr_mode_idx: 0,
+            ocr_dpi: 300,
+            ocr_auto_rotate: true,
+            ocr_all_pages: true,
+            ocr_result: None,
+
+            show_output_preview_dialog: false,
+            plate_config: PlateSeparationConfig::default(),
+            separation_analysis: None,
+            object_inspection_report: None,
+
+            show_color_management_dialog: false,
+            soft_proof_active: false,
+            soft_proof_config: SoftProofConfig::default(),
+            color_convert_target_idx: 0,
+            output_intent_profile_idx: 3,
+            output_intent_condition: "U.S. Web Coated (SWOP) v2".into(),
+            output_intent_registry: "http://www.color.org".into(),
+
+            show_prepress_dialog: false,
+            prepress_tab_idx: 0,
+            printer_marks_config: PrinterMarksConfig::default(),
+            transparency_flatten_config: TransparencyFlattenConfig::default(),
+            new_trap_preset_name: "Custom Trapping".into(),
+            new_trap_width: 0.25,
+            new_black_width: 0.50,
+
+            show_standards_dialog: false,
+            standards_format_idx: 0,
+            standards_icc_idx: 0,
+            standards_remove_js: true,
+            standards_remove_enc: true,
+            standards_convert_cmyk: false,
+            standards_validation_report: None,
             plugin_registry: {
                 let mut reg = PluginRegistry::new();
                 let sample = Box::new(SampleWatermarkPlugin::new());
@@ -605,6 +697,7 @@ impl RavPdfApp {
 
     /// Opens a PDF document from a file path into a new tab (FR-01.4.1).
     pub fn open_file(&mut self, path: PathBuf) {
+        let raw_bytes = std::fs::read(&path).ok();
         match PdfDocument::load_from_file(&path) {
             Ok(doc) => {
                 let file_name = path
@@ -616,7 +709,8 @@ impl RavPdfApp {
                 let id = self.next_tab_id;
                 self.next_tab_id += 1;
 
-                let tab = DocumentTab::new(id, file_name.clone(), doc, Some(path.clone()));
+                let mut tab = DocumentTab::new(id, file_name, doc, Some(path.clone()));
+                tab.raw_file_bytes = raw_bytes;
                 self.tabs.push(tab);
                 self.active_tab_idx = Some(self.tabs.len() - 1);
 
@@ -1549,6 +1643,37 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
+                        .add_enabled(has_doc, Button::new("Output Preview & Separations... (FR-23.2)"))
+                        .clicked()
+                    {
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.invalidate_render();
+                        }
+                        self.show_output_preview_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Color Management & Soft Proofing... (FR-24)"))
+                        .clicked()
+                    {
+                        self.show_color_management_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Prepress Tools & Printer Marks... (FR-23.3)"))
+                        .clicked()
+                    {
+                        self.show_prepress_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Standards Compliance Wizard (PDF/A, PDF/X, PDF/E)... (FR-22)"))
+                        .clicked()
+                    {
+                        self.show_standards_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
                         .add_enabled(has_doc, Button::new("Digital Signatures & Certificates... (FR-13)"))
                         .clicked()
                     {
@@ -1572,6 +1697,13 @@ impl RavPdfApp {
                         .clicked()
                     {
                         self.show_threed_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Recognize Text (OCR)... (FR-16)"))
+                        .clicked()
+                    {
+                        self.show_ocr_dialog = true;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -2528,7 +2660,12 @@ impl RavPdfApp {
 
                         ui.separator();
 
-                        let signatures = self.active_tab().and_then(|tab| get_document_signatures(&tab.doc, None).ok()).unwrap_or_default();
+                        let signatures = self
+                            .active_tab()
+                            .and_then(|tab| {
+                                get_document_signatures(&tab.doc, tab.raw_file_bytes.as_deref()).ok()
+                            })
+                            .unwrap_or_default();
                         if signatures.is_empty() {
                             ui.weak("(No digital signatures detected in this document)");
                         } else {
@@ -2975,8 +3112,24 @@ impl RavPdfApp {
             }
 
             // Ensure current active tab page texture is rendered
-            if let Some(tab) = self.active_tab_mut() {
-                tab.ensure_page_rendered(ctx);
+            let soft_proof = if self.soft_proof_active {
+                Some(self.soft_proof_config.clone())
+            } else {
+                None
+            };
+
+            if self.show_output_preview_dialog {
+                let plate_cfg = self.plate_config.clone();
+                let analysis = if let Some(tab) = self.active_tab_mut() {
+                    tab.ensure_page_rendered_with_plate(ctx, Some(&plate_cfg), soft_proof.as_ref())
+                } else {
+                    None
+                };
+                if analysis.is_some() {
+                    self.separation_analysis = analysis;
+                }
+            } else if let Some(tab) = self.active_tab_mut() {
+                let _ = tab.ensure_page_rendered_with_plate(ctx, None, soft_proof.as_ref());
             }
 
             // Read properties of current active page
@@ -4473,6 +4626,7 @@ impl RavPdfApp {
         if self.show_preflight_dialog {
             let mut close = false;
             let mut run_check = false;
+            let mut execute_fixup = false;
             egui::Window::new("Preflight & Standards Validation (FR-22, FR-23)")
                 .collapsible(false)
                 .resizable(true)
@@ -4528,6 +4682,12 @@ impl RavPdfApp {
                                 ui.add_space(4.0);
                             }
                         });
+                        if !rep.is_compliant {
+                            ui.add_space(6.0);
+                            if ui.button("🛠 Execute Automated Preflight Fixups (FR-23.1.4)").on_hover_text("Embeds standard fonts, normalizes color spaces, sets OutputIntent, and compresses uncompressed streams").clicked() {
+                                execute_fixup = true;
+                            }
+                        }
                     }
 
                     ui.add_space(10.0);
@@ -4540,6 +4700,30 @@ impl RavPdfApp {
                 if let Some(tab) = self.active_tab() {
                     self.preflight_report = Some(run_preflight(&tab.doc, self.preflight_profile));
                     self.status_message = format!("Preflight audit completed for {}", self.preflight_profile.display_name());
+                }
+            }
+            if execute_fixup {
+                let profile = self.preflight_profile;
+                let mut status = None;
+                let mut rep = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    match execute_preflight_fixup(&mut tab.doc, PreflightFixup::FixAll) {
+                        Ok(summary) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            rep = Some(run_preflight(&tab.doc, profile));
+                            status = Some(format!("Preflight Fixup completed: {}", summary));
+                        }
+                        Err(e) => {
+                            status = Some(format!("Preflight Fixup error: {}", e));
+                        }
+                    }
+                }
+                if let Some(r) = rep {
+                    self.preflight_report = Some(r);
+                }
+                if let Some(s) = status {
+                    self.status_message = s;
                 }
             }
             if close {
@@ -4795,34 +4979,71 @@ impl RavPdfApp {
         // Digital Signature Placement Dialog (FR-13.1, FR-13.10)
         if self.show_add_signature_dialog {
             let mut close = false;
-            let mut create_sig = false;
-            egui::Window::new("Add Digital Signature Field (FR-13.1)")
+            let mut execute_sig = false;
+            egui::Window::new("Digital Signatures & Certificates (FR-13)")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Field Name:");
-                        ui.text_edit_singleline(&mut self.sig_field_name);
+                        ui.selectable_value(&mut self.sig_mode_idx, 0, "🔏 Cryptographic Digital ID (ISO 32000-1 Clause 12.8)");
+                        ui.selectable_value(&mut self.sig_mode_idx, 1, "📋 Prepare Signature Field (FR-13.10)");
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Signer Name:");
-                        ui.text_edit_singleline(&mut self.sig_signer_name);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Reason:");
-                        ui.text_edit_singleline(&mut self.sig_reason);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Location:");
-                        ui.text_edit_singleline(&mut self.sig_location);
-                    });
-                    ui.checkbox(&mut self.sig_is_visible, "Visible Signature Appearance Box (FR-13.10)");
+                    ui.separator();
+
+                    if self.sig_mode_idx == 0 {
+                        ui.label(RichText::new("Sign document with PKCS#7 / CMS detached cryptographic digital signature:").italics());
+                        ui.horizontal(|ui| {
+                            ui.label("Signer Full Name:");
+                            ui.text_edit_singleline(&mut self.sig_signer_name);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Organization:");
+                            ui.text_edit_singleline(&mut self.sig_org);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Signer Email:");
+                            ui.text_edit_singleline(&mut self.sig_email);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Reason:");
+                            ui.text_edit_singleline(&mut self.sig_reason);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Location:");
+                            ui.text_edit_singleline(&mut self.sig_location);
+                        });
+                        ui.checkbox(&mut self.sig_is_visible, "Render Visible Signature Appearance (FR-13.10)");
+                    } else {
+                        ui.label(RichText::new("Place an interactive form signature field to be signed later:").italics());
+                        ui.horizontal(|ui| {
+                            ui.label("Field Name:");
+                            ui.text_edit_singleline(&mut self.sig_field_name);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Signer Name:");
+                            ui.text_edit_singleline(&mut self.sig_signer_name);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Reason:");
+                            ui.text_edit_singleline(&mut self.sig_reason);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Location:");
+                            ui.text_edit_singleline(&mut self.sig_location);
+                        });
+                        ui.checkbox(&mut self.sig_is_visible, "Visible Signature Appearance Box (FR-13.10)");
+                    }
 
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        if ui.button("🔏 Sign & Place Field").clicked() {
-                            create_sig = true;
+                        let btn_label = if self.sig_mode_idx == 0 {
+                            "🔏 Sign Document with Digital ID"
+                        } else {
+                            "➕ Place Signature Field"
+                        };
+                        if ui.button(btn_label).clicked() {
+                            execute_sig = true;
                             close = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -4831,10 +5052,13 @@ impl RavPdfApp {
                     });
                 });
 
-            if create_sig {
+            if execute_sig {
                 let target_page = self.sig_target_page;
+                let mode = self.sig_mode_idx;
                 let field_name = self.sig_field_name.clone();
                 let signer = self.sig_signer_name.clone();
+                let org = self.sig_org.clone();
+                let email = self.sig_email.clone();
                 let reason = self.sig_reason.clone();
                 let location = self.sig_location.clone();
                 let is_visible = self.sig_is_visible;
@@ -4848,25 +5072,57 @@ impl RavPdfApp {
                         None
                     };
 
-                    match create_signature_field(
-                        &mut tab.doc,
-                        curr,
-                        &field_name,
-                        &signer,
-                        &reason,
-                        &location,
-                        rect,
-                    ) {
-                        Ok(_) => {
-                            tab.is_modified = true;
-                            tab.invalidate_render();
-                            status = Some((
-                                format!("Created digital signature field '{}' on page {}", field_name, curr + 1),
-                                true,
-                            ));
+                    if mode == 0 {
+                        match DigitalId::generate(&signer, &org, &email, 365) {
+                            Ok(digital_id) => {
+                                match sign_pdf_document(tab.doc.clone(), curr, &field_name, &digital_id, &reason, &location, rect) {
+                                    Ok(signed_bytes) => {
+                                        match PdfDocument::load_from_bytes(&signed_bytes) {
+                                            Ok(new_doc) => {
+                                                tab.doc = new_doc;
+                                                tab.raw_file_bytes = Some(signed_bytes);
+                                                tab.is_modified = true;
+                                                tab.invalidate_render();
+                                                status = Some((
+                                                    format!("Document digitally signed and verified by '{}' (ISO 32000-1 Clause 12.8)", signer),
+                                                    true,
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                status = Some((format!("Signature generated but re-reading PDF failed: {}", e), false));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        status = Some((format!("Cryptographic signing failed: {}", e), false));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                status = Some((format!("Digital ID certificate generation failed: {}", e), false));
+                            }
                         }
-                        Err(e) => {
-                            status = Some((format!("Failed to create signature: {}", e), false));
+                    } else {
+                        match create_signature_field(
+                            &mut tab.doc,
+                            curr,
+                            &field_name,
+                            &signer,
+                            &reason,
+                            &location,
+                            rect,
+                        ) {
+                            Ok(_) => {
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                status = Some((
+                                    format!("Created digital signature field '{}' on page {}", field_name, curr + 1),
+                                    true,
+                                ));
+                            }
+                            Err(e) => {
+                                status = Some((format!("Failed to create signature: {}", e), false));
+                            }
                         }
                     }
                 }
@@ -7025,6 +7281,894 @@ impl RavPdfApp {
 
             if close {
                 self.show_threed_dialog = false;
+            }
+        }
+
+        // --- Optical Character Recognition (OCR) Dialog (FR-16) ---
+        if self.show_ocr_dialog {
+            let mut close = false;
+            let mut run_ocr = false;
+
+            egui::Window::new("Recognize Text (OCR Engine) - FR-16")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([500.0, 480.0])
+                .show(ctx, |ui| {
+                    ui.heading("Optical Character Recognition (ISO 32000-1 / FR-16)");
+                    ui.label("Generate searchable, selectable text layers from scanned raster pages.");
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        ui.label("Document Language:");
+                        egui::ComboBox::from_id_salt("ocr_lang_combo")
+                            .selected_text(match self.ocr_lang_idx {
+                                0 => "English (eng)",
+                                1 => "Spanish (spa)",
+                                2 => "French (fra)",
+                                3 => "German (deu)",
+                                4 => "Italian (ita)",
+                                5 => "Portuguese (por)",
+                                6 => "Japanese (jpn)",
+                                7 => "Chinese Simplified (chi_sim)",
+                                _ => "English (eng)",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.ocr_lang_idx, 0, "English (eng)");
+                                ui.selectable_value(&mut self.ocr_lang_idx, 1, "Spanish (spa)");
+                                ui.selectable_value(&mut self.ocr_lang_idx, 2, "French (fra)");
+                                ui.selectable_value(&mut self.ocr_lang_idx, 3, "German (deu)");
+                                ui.selectable_value(&mut self.ocr_lang_idx, 4, "Italian (ita)");
+                                ui.selectable_value(&mut self.ocr_lang_idx, 5, "Portuguese (por)");
+                                ui.selectable_value(&mut self.ocr_lang_idx, 6, "Japanese (jpn)");
+                                ui.selectable_value(&mut self.ocr_lang_idx, 7, "Chinese Simplified (chi_sim)");
+                            });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Output Format:");
+                        egui::ComboBox::from_id_salt("ocr_mode_combo")
+                            .selected_text(match self.ocr_mode_idx {
+                                0 => "Searchable Image (Invisible 3 Tr Layer)",
+                                1 => "Searchable Image Exact (Precise Positioning)",
+                                2 => "Editable Text (Vector Replacement)",
+                                _ => "Searchable Image",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.ocr_mode_idx, 0, "Searchable Image (Invisible 3 Tr Layer)");
+                                ui.selectable_value(&mut self.ocr_mode_idx, 1, "Searchable Image Exact (Precise Positioning)");
+                                ui.selectable_value(&mut self.ocr_mode_idx, 2, "Editable Text (Vector Replacement)");
+                            });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Target Resolution:");
+                        egui::ComboBox::from_id_salt("ocr_dpi_combo")
+                            .selected_text(format!("{} DPI", self.ocr_dpi))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.ocr_dpi, 150, "150 DPI (Fast / Draft)");
+                                ui.selectable_value(&mut self.ocr_dpi, 300, "300 DPI (Recommended / Standard)");
+                                ui.selectable_value(&mut self.ocr_dpi, 600, "600 DPI (Archival / High Precision)");
+                            });
+                    });
+
+                    ui.checkbox(&mut self.ocr_auto_rotate, "Auto-detect orientation and correct rotation (FR-16.6)");
+
+                    ui.separator();
+                    ui.label("Page Range:");
+                    ui.radio_value(&mut self.ocr_all_pages, true, "All Pages in Document");
+                    ui.radio_value(&mut self.ocr_all_pages, false, "Current Page Only");
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("⚡ Run OCR Recognition").clicked() {
+                            run_ocr = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+
+                    if let Some(ref res) = self.ocr_result {
+                        ui.separator();
+                        ui.heading("Recognition Results Summary (FR-16.9)");
+                        ui.label(format!("• Total Recognized Words: {}", res.total_words));
+                        ui.label(format!("• Average Confidence Score: {:.1}%", res.average_confidence * 100.0));
+                        ui.label(format!("• Uncertain Words Flagged: {}", res.total_uncertain_words));
+                        ui.label(format!("• Pages Processed: {}", res.pages.len()));
+
+                        ui.collapsing("Extracted Text Preview", |ui| {
+                            egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                                for p in &res.pages {
+                                    ui.strong(format!("Page {}:", p.page_index + 1));
+                                    ui.label(&p.full_text);
+                                }
+                            });
+                        });
+                    }
+                });
+
+            if run_ocr {
+                let all_pages = self.ocr_all_pages;
+                let lang = match self.ocr_lang_idx {
+                    0 => "eng",
+                    1 => "spa",
+                    2 => "fra",
+                    3 => "deu",
+                    4 => "ita",
+                    5 => "por",
+                    6 => "jpn",
+                    7 => "chi_sim",
+                    _ => "eng",
+                };
+                let output_mode = match self.ocr_mode_idx {
+                    0 => OcrOutputMode::SearchableImage,
+                    1 => OcrOutputMode::SearchableImageExact,
+                    2 => OcrOutputMode::EditableText,
+                    _ => OcrOutputMode::SearchableImage,
+                };
+                let cfg = OcrConfig {
+                    language: lang.to_string(),
+                    output_mode,
+                    dpi: self.ocr_dpi,
+                    auto_rotate: self.ocr_auto_rotate,
+                    min_confidence: 0.70,
+                    preserve_appearance: true,
+                };
+
+                let ocr_outcome = if let Some(tab) = self.active_tab_mut() {
+                    let page_range = if all_pages {
+                        None
+                    } else {
+                        Some(vec![tab.current_page])
+                    };
+                    let outcome = perform_ocr_document(&mut tab.doc, &cfg, page_range.as_deref());
+                    if outcome.is_ok() {
+                        tab.is_modified = true;
+                        tab.invalidate_render();
+                    }
+                    Some(outcome)
+                } else {
+                    None
+                };
+
+                if let Some(outcome) = ocr_outcome {
+                    match outcome {
+                        Ok(res) => {
+                            self.status_message = format!(
+                                "OCR completed: {} words recognized across {} page(s)",
+                                res.total_words,
+                                res.pages.len()
+                            );
+                            self.ocr_result = Some(res);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("OCR failed: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_ocr_dialog = false;
+            }
+        }
+
+        // Print Production Output Preview & Plate Separations Dialog (FR-23.2)
+        if self.show_output_preview_dialog {
+            let mut close = false;
+            let mut inspect = false;
+            let mut reset_plates = false;
+
+            egui::Window::new("Output Preview & Separations (FR-23.2)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([460.0, 520.0])
+                .anchor(Align2::RIGHT_TOP, [-20.0, 60.0])
+                .show(ctx, |ui| {
+                    ui.heading("Separations & Press Density");
+                    ui.add_space(4.0);
+
+                    // Plate controls
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Process CMYK Plates:").strong());
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.plate_config.show_cyan, "Cyan (C)");
+                            ui.checkbox(&mut self.plate_config.show_magenta, "Magenta (M)");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.plate_config.show_yellow, "Yellow (Y)");
+                            ui.checkbox(&mut self.plate_config.show_black, "Black (K)");
+                        });
+                        ui.checkbox(
+                            &mut self.plate_config.single_plate_as_grayscale,
+                            "Render single plate as press film density (Grayscale)",
+                        );
+                        if ui.button("Show All Plates (CMYK)").clicked() {
+                            reset_plates = true;
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Total Area Coverage (TAC) controls
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Total Area Coverage (TAC / TIC):").strong());
+                        ui.checkbox(
+                            &mut self.plate_config.show_tac_warning,
+                            "Highlight TAC Ink Limits Exceeded",
+                        );
+                        let mut tac_pct = (self.plate_config.tac_threshold * 100.0).round() as u32;
+                        ui.horizontal(|ui| {
+                            ui.label("TAC Limit:");
+                            if ui
+                                .add(egui::Slider::new(&mut tac_pct, 150..=400).suffix("%"))
+                                .changed()
+                            {
+                                self.plate_config.tac_threshold = (tac_pct as f32) / 100.0;
+                            }
+                        });
+                        ui.weak("Highlights regions where ink coverage exceeds press limit with high-contrast neon overlay.");
+                    });
+
+                    // Live analysis readout
+                    if let Some(ref ana) = self.separation_analysis {
+                        ui.add_space(8.0);
+                        ui.group(|ui| {
+                            ui.label(RichText::new("Live Plate Analysis:").strong());
+                            ui.label(format!("• Max TAC on Page: {:.1}%", ana.max_tac * 100.0));
+                            let tac_color = if ana.tac_exceeded_pixels > 0 {
+                                Color32::from_rgb(220, 38, 38)
+                            } else {
+                                Color32::from_rgb(46, 160, 67)
+                            };
+                            ui.colored_label(
+                                tac_color,
+                                format!(
+                                    "• TAC Exceeded Pixels: {} ({:.2}%)",
+                                    ana.tac_exceeded_pixels, ana.tac_exceeded_percentage
+                                ),
+                            );
+                            ui.label(format!("• Cyan Plate Coverage: {:.1}%", ana.cyan_coverage_pct));
+                            ui.label(format!("• Magenta Plate Coverage: {:.1}%", ana.magenta_coverage_pct));
+                            ui.label(format!("• Yellow Plate Coverage: {:.1}%", ana.yellow_coverage_pct));
+                            ui.label(format!("• Black Plate Coverage: {:.1}%", ana.black_coverage_pct));
+                        });
+                    }
+
+                    ui.add_space(8.0);
+
+                    // Prepress Object Inspector (FR-23.2.5)
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Object Inspector:").strong());
+                            if ui.button("🔍 Inspect Current Page Objects").clicked() {
+                                inspect = true;
+                            }
+                        });
+
+                        if let Some(ref report) = self.object_inspection_report {
+                            ui.add_space(4.0);
+                            ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                                ui.label(RichText::new(format!("Page {} Prepress Objects:", report.page_index + 1)).underline());
+                                ui.label(format!("• Transparency Present: {}", if report.transparency_present { "Yes (Blend Modes)" } else { "None" }));
+                                ui.label(format!("• Overprint Settings: {}", if report.overprint_present { "Overprint Enabled" } else { "None" }));
+
+                                ui.strong("Color Spaces:");
+                                if report.color_spaces.is_empty() {
+                                    ui.weak("  (None detected)");
+                                } else {
+                                    for cs in &report.color_spaces {
+                                        ui.label(format!("  • {}", cs));
+                                    }
+                                }
+
+                                ui.strong("Fonts:");
+                                if report.fonts.is_empty() {
+                                    ui.weak("  (None detected)");
+                                } else {
+                                    for font in &report.fonts {
+                                        ui.label(format!("  • {}", font));
+                                    }
+                                }
+
+                                ui.strong("Images:");
+                                if report.images_info.is_empty() {
+                                    ui.weak("  (None detected)");
+                                } else {
+                                    for img in &report.images_info {
+                                        ui.label(format!("  • {}", img));
+                                    }
+                                }
+                            });
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    if ui.button("Close Output Preview").clicked() {
+                        close = true;
+                    }
+                });
+
+            if reset_plates {
+                self.plate_config.show_cyan = true;
+                self.plate_config.show_magenta = true;
+                self.plate_config.show_yellow = true;
+                self.plate_config.show_black = true;
+                self.plate_config.single_plate_as_grayscale = false;
+            }
+
+            if inspect {
+                if let Some(tab) = self.active_tab() {
+                    let rep = inspect_page_objects(&tab.doc, tab.current_page, [0.0, 0.0]).ok();
+                    self.object_inspection_report = rep;
+                }
+            }
+
+            if close {
+                self.show_output_preview_dialog = false;
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.invalidate_render();
+                }
+            }
+        }
+
+        // Color Management & Soft-Proofing Dialog (FR-24)
+        if self.show_color_management_dialog {
+            let mut close = false;
+            let mut apply_soft_proof_toggle = false;
+            let mut execute_convert = false;
+            let mut execute_embed_oi = false;
+
+            egui::Window::new("Color Management & Soft Proofing (FR-24)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([540.0, 560.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.heading("Soft-Proofing Simulation (FR-24.5)");
+                    ui.label("Simulate press output, ink gamut, paper white, and black ink on your display.");
+                    ui.add_space(4.0);
+
+                    ui.group(|ui| {
+                        let mut sp_active = self.soft_proof_active;
+                        if ui.checkbox(&mut sp_active, RichText::new("Enable CMYK Soft-Proofing").strong()).changed() {
+                            self.soft_proof_active = sp_active;
+                            apply_soft_proof_toggle = true;
+                        }
+
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Working CMYK Profile:");
+                            egui::ComboBox::from_id_salt("sp_cmyk_profile")
+                                .selected_text(self.soft_proof_config.cmyk_profile.display_name())
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_value(&mut self.soft_proof_config.cmyk_profile, StandardIccProfile::USWebCoatedSWOP, "U.S. Web Coated (SWOP) v2").clicked() {
+                                        apply_soft_proof_toggle = true;
+                                    }
+                                    if ui.selectable_value(&mut self.soft_proof_config.cmyk_profile, StandardIccProfile::FOGRA39, "Coated FOGRA39 (ISO 12647-2)").clicked() {
+                                        apply_soft_proof_toggle = true;
+                                    }
+                                    if ui.selectable_value(&mut self.soft_proof_config.cmyk_profile, StandardIccProfile::GRACoL2006, "GRACoL 2006 Coated 1").clicked() {
+                                        apply_soft_proof_toggle = true;
+                                    }
+                                    if ui.selectable_value(&mut self.soft_proof_config.cmyk_profile, StandardIccProfile::JapanColor2001Coated, "Japan Color 2001 Coated").clicked() {
+                                        apply_soft_proof_toggle = true;
+                                    }
+                                });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Rendering Intent (FR-24.2):");
+                            egui::ComboBox::from_id_salt("sp_rendering_intent")
+                                .selected_text(self.soft_proof_config.rendering_intent.to_pdf_name())
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_value(&mut self.soft_proof_config.rendering_intent, RenderingIntent::RelativeColorimetric, "Relative Colorimetric (Standard)").clicked() {
+                                        apply_soft_proof_toggle = true;
+                                    }
+                                    if ui.selectable_value(&mut self.soft_proof_config.rendering_intent, RenderingIntent::Perceptual, "Perceptual (Photographic)").clicked() {
+                                        apply_soft_proof_toggle = true;
+                                    }
+                                    if ui.selectable_value(&mut self.soft_proof_config.rendering_intent, RenderingIntent::Saturation, "Saturation (Vivid Graphics)").clicked() {
+                                        apply_soft_proof_toggle = true;
+                                    }
+                                    if ui.selectable_value(&mut self.soft_proof_config.rendering_intent, RenderingIntent::AbsoluteColorimetric, "Absolute Colorimetric (Proofing)").clicked() {
+                                        apply_soft_proof_toggle = true;
+                                    }
+                                });
+                        });
+
+                        if ui.checkbox(&mut self.soft_proof_config.simulate_paper_white, "Simulate Paper White (unprinted stock tint)").changed() {
+                            apply_soft_proof_toggle = true;
+                        }
+                        if ui.checkbox(&mut self.soft_proof_config.simulate_black_ink, "Simulate Black Ink (press dynamic range floor)").changed() {
+                            apply_soft_proof_toggle = true;
+                        }
+                    });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.heading("Convert Document Colors (FR-24.6)");
+                    ui.label("Transform color operators in all page content streams to a target working color space.");
+                    ui.add_space(4.0);
+
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Target Color Space:");
+                            ui.radio_value(&mut self.color_convert_target_idx, 0, "DeviceCMYK (Press)");
+                            ui.radio_value(&mut self.color_convert_target_idx, 1, "DeviceRGB (Screen)");
+                            ui.radio_value(&mut self.color_convert_target_idx, 2, "DeviceGray (Monochrome)");
+                        });
+                        if ui.button("🔄 Convert All Page Colors").clicked() {
+                            execute_convert = true;
+                        }
+                    });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.heading("Output Intent & ICC Profiles (FR-24.1, FR-24.4)");
+                    ui.label("Embed PDF/X or PDF/A OutputIntent with embedded ICC binary profile.");
+                    ui.add_space(4.0);
+
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("ICC Profile:");
+                            egui::ComboBox::from_id_salt("oi_embed_profile")
+                                .selected_text(match self.output_intent_profile_idx {
+                                    0 => "sRGB IEC61966-2.1",
+                                    1 => "Adobe RGB (1998)",
+                                    2 => "Display P3",
+                                    3 => "U.S. Web Coated (SWOP) v2",
+                                    4 => "Coated FOGRA39",
+                                    5 => "GRACoL 2006",
+                                    6 => "Japan Color 2001 Coated",
+                                    _ => "Dot Gain 20%",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.output_intent_profile_idx, 0, "sRGB IEC61966-2.1");
+                                    ui.selectable_value(&mut self.output_intent_profile_idx, 1, "Adobe RGB (1998)");
+                                    ui.selectable_value(&mut self.output_intent_profile_idx, 2, "Display P3");
+                                    ui.selectable_value(&mut self.output_intent_profile_idx, 3, "U.S. Web Coated (SWOP) v2");
+                                    ui.selectable_value(&mut self.output_intent_profile_idx, 4, "Coated FOGRA39");
+                                    ui.selectable_value(&mut self.output_intent_profile_idx, 5, "GRACoL 2006");
+                                    ui.selectable_value(&mut self.output_intent_profile_idx, 6, "Japan Color 2001 Coated");
+                                    ui.selectable_value(&mut self.output_intent_profile_idx, 7, "Dot Gain 20%");
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Condition Identifier:");
+                            ui.text_edit_singleline(&mut self.output_intent_condition);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Registry URL:");
+                            ui.text_edit_singleline(&mut self.output_intent_registry);
+                        });
+                        if ui.button("📌 Embed Output Intent & ICC Profile").clicked() {
+                            execute_embed_oi = true;
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+            if apply_soft_proof_toggle {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.invalidate_render();
+                }
+            }
+
+            if execute_convert {
+                let target = match self.color_convert_target_idx {
+                    0 => "DeviceCMYK",
+                    1 => "DeviceRGB",
+                    _ => "DeviceGray",
+                };
+                if let Some(tab) = self.active_tab_mut() {
+                    match convert_document_colors(&mut tab.doc, target) {
+                        Ok(modified) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Converted document colors to {}: {} stream(s) modified", target, modified);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Color conversion failed: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if execute_embed_oi {
+                let profile = match self.output_intent_profile_idx {
+                    0 => StandardIccProfile::SRgb,
+                    1 => StandardIccProfile::AdobeRgb1998,
+                    2 => StandardIccProfile::DisplayP3,
+                    3 => StandardIccProfile::USWebCoatedSWOP,
+                    4 => StandardIccProfile::FOGRA39,
+                    5 => StandardIccProfile::GRACoL2006,
+                    6 => StandardIccProfile::JapanColor2001Coated,
+                    _ => StandardIccProfile::DotGain20,
+                };
+                let cond = self.output_intent_condition.clone();
+                let reg = self.output_intent_registry.clone();
+
+                if let Some(tab) = self.active_tab_mut() {
+                    match embed_output_intent(&mut tab.doc, profile, &cond, &reg) {
+                        Ok(oi_id) => {
+                            tab.is_modified = true;
+                            self.status_message = format!("Embedded Output Intent {} for '{}'", oi_id, cond);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Embedding Output Intent failed: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_color_management_dialog = false;
+            }
+        }
+
+        // Prepress Tools Modal (FR-23.3)
+        if self.show_prepress_dialog {
+            let mut close = false;
+            let mut execute_add_marks = false;
+            let mut execute_flatten = false;
+            let mut execute_convert_spots = false;
+            let mut execute_add_trap = false;
+
+            egui::Window::new("Commercial Prepress & Print Production (FR-23.3)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([600.0, 520.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.prepress_tab_idx, 0, "📐 Printer Marks");
+                        ui.selectable_value(&mut self.prepress_tab_idx, 1, "🎨 Ink Manager");
+                        ui.selectable_value(&mut self.prepress_tab_idx, 2, "🪟 Transparency Flattener");
+                        ui.selectable_value(&mut self.prepress_tab_idx, 3, "🪤 Trap Presets");
+                    });
+                    ui.separator();
+
+                    match self.prepress_tab_idx {
+                        0 => {
+                            ui.heading("Add Prepress Printer Marks (FR-23.3.4)");
+                            ui.label("Embed cutting ticks, bleed boundaries, registration bullseyes, color bars, and slug info.");
+                            ui.add_space(4.0);
+                            ui.group(|ui| {
+                                ui.checkbox(&mut self.printer_marks_config.trim_marks, "Trim Marks (corner cutting boundaries)");
+                                ui.checkbox(&mut self.printer_marks_config.bleed_marks, "Bleed Marks (outer artwork boundaries)");
+                                ui.checkbox(&mut self.printer_marks_config.registration_marks, "Registration Marks (4-edge alignment targets)");
+                                ui.checkbox(&mut self.printer_marks_config.color_bars, "Color Bars (CMYK tint step wedges)");
+                                ui.checkbox(&mut self.printer_marks_config.page_information, "Page Information (job title, page number, timestamp in slug)");
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    ui.label("Slug Margin (pt):");
+                                    ui.add(egui::DragValue::new(&mut self.printer_marks_config.slug_margin).speed(1.0).range(18.0..=72.0));
+                                    ui.label("Bleed Offset (pt):");
+                                    ui.add(egui::DragValue::new(&mut self.printer_marks_config.bleed_offset).speed(0.5).range(3.0..=24.0));
+                                });
+                            });
+                            ui.add_space(8.0);
+                            if ui.button("✅ Inject Printer Marks into Pages").clicked() {
+                                execute_add_marks = true;
+                            }
+                        }
+                        1 => {
+                            ui.heading("Ink Manager & Separation Plates (FR-23.3.2)");
+                            ui.label("Inspect process inks and spot color separations; map spot plates to process CMYK.");
+                            ui.add_space(4.0);
+                            if let Some(tab) = self.active_tab() {
+                                let inks = get_document_inks(&tab.doc);
+                                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                                    for (i, ink) in inks.iter().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            let badge = if ink.is_spot { "SPOT" } else { "PROCESS" };
+                                            ui.label(RichText::new(format!("{}. {} [{}]", i + 1, ink.name, badge)).strong());
+                                            ui.label(format!("CMYK: ({:.2}, {:.2}, {:.2}, {:.2})", ink.process_cmyk.0, ink.process_cmyk.1, ink.process_cmyk.2, ink.process_cmyk.3));
+                                        });
+                                    }
+                                });
+                            }
+                            ui.add_space(8.0);
+                            if ui.button("🔄 Convert All Spot Colors to Process CMYK").clicked() {
+                                execute_convert_spots = true;
+                            }
+                        }
+                        2 => {
+                            ui.heading("Transparency Flattener (FR-23.3.3)");
+                            ui.label("Flatten transparency groups and normalize opacity for prepress PostScript RIPs.");
+                            ui.add_space(4.0);
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Raster / Vector Balance:");
+                                    ui.add(egui::Slider::new(&mut self.transparency_flatten_config.raster_vector_balance, 0..=100).text("% vectors"));
+                                });
+                                ui.checkbox(&mut self.transparency_flatten_config.flatten_opacity, "Normalize ExtGState opacity (/CA /ca) to 1.0");
+                                ui.checkbox(&mut self.transparency_flatten_config.normalize_blend_modes, "Reset blend modes (/BM) to /Normal");
+                                ui.checkbox(&mut self.transparency_flatten_config.remove_page_transparency_groups, "Remove page-level /Group /Transparency dictionaries");
+                            });
+                            ui.add_space(8.0);
+                            if ui.button("⚡ Flatten Document Transparency").clicked() {
+                                execute_flatten = true;
+                            }
+                        }
+                        _ => {
+                            ui.heading("Trap Presets (FR-23.3.5)");
+                            ui.label("Manage ink trapping tolerances to prevent press registration gaps.");
+                            ui.add_space(4.0);
+                            if let Some(tab) = self.active_tab() {
+                                let presets = get_trap_presets(&tab.doc);
+                                for (i, p) in presets.iter().enumerate() {
+                                    ui.label(format!("{}. '{}': Trap Width: {} pt, Black Width: {} pt", i + 1, p.name, p.trap_width, p.black_width));
+                                }
+                            }
+                            ui.separator();
+                            ui.label(RichText::new("Configure New Trap Preset:").strong());
+                            ui.horizontal(|ui| {
+                                ui.label("Name:");
+                                ui.text_edit_singleline(&mut self.new_trap_preset_name);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Trap Width (pt):");
+                                ui.add(egui::DragValue::new(&mut self.new_trap_width).speed(0.05).range(0.05..=2.0));
+                                ui.label("Black Width (pt):");
+                                ui.add(egui::DragValue::new(&mut self.new_black_width).speed(0.05).range(0.1..=4.0));
+                            });
+                            if ui.button("➕ Save Trap Preset").clicked() {
+                                execute_add_trap = true;
+                            }
+                        }
+                    }
+
+                    ui.add_space(10.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+            if execute_add_marks {
+                let cfg = self.printer_marks_config.clone();
+                if let Some(tab) = self.active_tab_mut() {
+                    match add_printer_marks(&mut tab.doc, &cfg) {
+                        Ok(count) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Injected prepress printer marks into {} page(s)", count);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Printer marks error: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if execute_convert_spots {
+                let cfg = InkManagerConfig {
+                    mappings: Vec::new(),
+                    convert_all_spots_to_process: true,
+                };
+                if let Some(tab) = self.active_tab_mut() {
+                    match apply_ink_manager(&mut tab.doc, &cfg) {
+                        Ok(count) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Converted {} spot color space(s) to DeviceCMYK", count);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Ink conversion error: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if execute_flatten {
+                let cfg = self.transparency_flatten_config.clone();
+                if let Some(tab) = self.active_tab_mut() {
+                    match flatten_document_transparency(&mut tab.doc, &cfg) {
+                        Ok(rep) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!(
+                                "Flattened transparency: {} ExtGState, {} groups across {} pages",
+                                rep.extgstate_flattened, rep.groups_removed, rep.total_pages_processed
+                            );
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Transparency flattening error: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if execute_add_trap {
+                let preset = TrapPreset {
+                    name: self.new_trap_preset_name.clone(),
+                    trap_width: self.new_trap_width,
+                    black_width: self.new_black_width,
+                    ..Default::default()
+                };
+                if let Some(tab) = self.active_tab_mut() {
+                    match set_trap_presets(&mut tab.doc, std::slice::from_ref(&preset)) {
+                        Ok(()) => {
+                            tab.is_modified = true;
+                            self.status_message = format!("Saved trap preset '{}'", preset.name);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Trap preset error: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_prepress_dialog = false;
+            }
+        }
+
+        // Standards Compliance Wizard Modal (FR-22)
+        if self.show_standards_dialog {
+            let mut close = false;
+            let mut execute_validate = false;
+            let mut execute_convert = false;
+
+            egui::Window::new("Standards Compliance Wizard (PDF/A, PDF/X, PDF/E) (FR-22)")
+                .collapsible(false)
+                .resizable(true)
+                .default_size([580.0, 520.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.heading("Target Standard Profile");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("std_target_format")
+                            .selected_text(match self.standards_format_idx {
+                                0 => "PDF/A-1b (ISO 19005-1:2005 Archival)",
+                                1 => "PDF/A-2b (ISO 19005-2:2011 Archival)",
+                                2 => "PDF/A-3b (ISO 19005-3:2012 Archival)",
+                                3 => "PDF/X-1a (ISO 15930-1:2001 Prepress CMYK)",
+                                4 => "PDF/X-3 (ISO 15930-3:2002 Prepress)",
+                                5 => "PDF/X-4 (ISO 15930-7:2010 Prepress)",
+                                _ => "PDF/E-1 (ISO 24517-1:2008 Engineering)",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.standards_format_idx, 0, "PDF/A-1b (ISO 19005-1:2005 Archival)");
+                                ui.selectable_value(&mut self.standards_format_idx, 1, "PDF/A-2b (ISO 19005-2:2011 Archival)");
+                                ui.selectable_value(&mut self.standards_format_idx, 2, "PDF/A-3b (ISO 19005-3:2012 Archival)");
+                                ui.selectable_value(&mut self.standards_format_idx, 3, "PDF/X-1a (ISO 15930-1:2001 Prepress CMYK)");
+                                ui.selectable_value(&mut self.standards_format_idx, 4, "PDF/X-3 (ISO 15930-3:2002 Prepress)");
+                                ui.selectable_value(&mut self.standards_format_idx, 5, "PDF/X-4 (ISO 15930-7:2010 Prepress)");
+                                ui.selectable_value(&mut self.standards_format_idx, 6, "PDF/E-1 (ISO 24517-1:2008 Engineering)");
+                            });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("OutputIntent Profile:");
+                        egui::ComboBox::from_id_salt("std_icc_profile")
+                            .selected_text(match self.standards_icc_idx {
+                                0 => "Auto (Format Default)",
+                                1 => "sRGB IEC61966-2.1 (RGB)",
+                                2 => "U.S. Web Coated (SWOP) v2 (CMYK)",
+                                3 => "FOGRA39 / ISO 12647-2 (CMYK)",
+                                4 => "GRACoL 2006 Coated (CMYK)",
+                                _ => "Japan Color 2001 Coated (CMYK)",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.standards_icc_idx, 0, "Auto (Format Default)");
+                                ui.selectable_value(&mut self.standards_icc_idx, 1, "sRGB IEC61966-2.1 (RGB)");
+                                ui.selectable_value(&mut self.standards_icc_idx, 2, "U.S. Web Coated (SWOP) v2 (CMYK)");
+                                ui.selectable_value(&mut self.standards_icc_idx, 3, "FOGRA39 / ISO 12647-2 (CMYK)");
+                                ui.selectable_value(&mut self.standards_icc_idx, 4, "GRACoL 2006 Coated (CMYK)");
+                                ui.selectable_value(&mut self.standards_icc_idx, 5, "Japan Color 2001 Coated (CMYK)");
+                            });
+                    });
+
+                    ui.add_space(4.0);
+                    ui.group(|ui| {
+                        ui.checkbox(&mut self.standards_remove_js, "Remove JavaScript actions (mandatory for PDF/A-1)");
+                        ui.checkbox(&mut self.standards_remove_enc, "Strip encryption passwords (mandatory for PDF/A)");
+                        ui.checkbox(&mut self.standards_convert_cmyk, "Convert all colors to CMYK (mandatory for PDF/X-1a)");
+                    });
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("🔍 Validate Document Compliance").clicked() {
+                            execute_validate = true;
+                        }
+                        if ui.button("⚙️ Convert & Enforce Standard").clicked() {
+                            execute_convert = true;
+                        }
+                    });
+
+                    if let Some(ref rep) = self.standards_validation_report {
+                        ui.separator();
+                        let status_text = if rep.is_compliant { "✓ COMPLIANT" } else { "✗ NON-COMPLIANT" };
+                        ui.label(RichText::new(format!("Validation Result for {}: {}", rep.standard.display_name(), status_text)).strong());
+                        egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                            for check in &rep.checks {
+                                ui.horizontal(|ui| {
+                                    let badge = if check.passed { "PASS" } else { "FAIL" };
+                                    ui.label(format!("[{}] {}: {}", badge, check.code, check.description));
+                                });
+                            }
+                        });
+                    }
+
+                    ui.add_space(8.0);
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+
+            let std_enum = match self.standards_format_idx {
+                0 => StandardFormat::PdfA1b,
+                1 => StandardFormat::PdfA2b,
+                2 => StandardFormat::PdfA3b,
+                3 => StandardFormat::PdfX1a,
+                4 => StandardFormat::PdfX3,
+                5 => StandardFormat::PdfX4,
+                _ => StandardFormat::PdfE1,
+            };
+
+            if execute_validate {
+                if let Some(tab) = self.active_tab() {
+                    let rep = validate_standard_compliance(&tab.doc, std_enum);
+                    self.standards_validation_report = Some(rep);
+                }
+            }
+
+            if execute_convert {
+                let icc_enum = match self.standards_icc_idx {
+                    1 => StandardIccProfile::SRgb,
+                    2 => StandardIccProfile::USWebCoatedSWOP,
+                    3 => StandardIccProfile::FOGRA39,
+                    4 => StandardIccProfile::GRACoL2006,
+                    5 => StandardIccProfile::JapanColor2001Coated,
+                    _ => {
+                        if std_enum == StandardFormat::PdfX1a {
+                            StandardIccProfile::USWebCoatedSWOP
+                        } else {
+                            StandardIccProfile::SRgb
+                        }
+                    }
+                };
+                let cfg = StandardConversionConfig {
+                    target: std_enum,
+                    icc_profile: icc_enum,
+                    remove_javascript: self.standards_remove_js,
+                    remove_encryption: self.standards_remove_enc,
+                    convert_colors_to_cmyk: self.standards_convert_cmyk,
+                    embed_output_intent: true,
+                    embed_xmp_metadata: true,
+                };
+                let result = if let Some(tab) = self.active_tab_mut() {
+                    match convert_to_standard(&mut tab.doc, &cfg) {
+                        Ok(rep) => {
+                            tab.is_modified = true;
+                            let val = validate_standard_compliance(&tab.doc, std_enum);
+                            Ok((rep.actions_applied.len(), val))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                } else {
+                    Err("No active document".to_string())
+                };
+
+                match result {
+                    Ok((count, val)) => {
+                        self.status_message = format!("Converted document to {}: {} action(s) applied", std_enum.display_name(), count);
+                        self.standards_validation_report = Some(val);
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Standard conversion failed: {}", e);
+                    }
+                }
+            }
+
+            if close {
+                self.show_standards_dialog = false;
             }
         }
     }

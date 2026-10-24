@@ -5,7 +5,7 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser as ClapParser, Subcommand};
 use ravpdf_core::document::PdfDocument;
-use ravpdf_crypto::{decrypt_document, encrypt_document, Permissions};
+use ravpdf_crypto::{decrypt_document, encrypt_document, DigitalId, Permissions, sign_pdf_document};
 use ravpdf_edit::{merge_documents, rotate_page, split_document};
 use ravpdf_forms::{
     apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
@@ -13,20 +13,26 @@ use ravpdf_forms::{
 };
 use ravpdf_render::{pixmap_to_png, render_page, Color, RenderOptions};
 use ravpdf_tools::{
+    add_printer_marks, convert_to_standard, flatten_document_transparency,
+    get_document_inks, get_trap_presets, set_trap_presets, validate_standard_compliance,
+    PrinterMarksConfig, StandardConversionConfig, StandardFormat, TransparencyFlattenConfig,
+    TrapPreset,
     add_3d_annotation, add_measurement_line_annotation, add_rich_media_annotation,
     apply_bates_numbering, apply_text_watermark, audit_accessibility, batch_scan_to_pdf,
-    calculate_distance, create_portfolio, execute_all_field_calculations, execute_batch_cancellable,
+    calculate_distance, convert_document_colors, create_portfolio, embed_output_intent,
+    execute_all_field_calculations, execute_batch_cancellable, execute_preflight_fixup,
     execute_script, export_comments_to_csv, export_page_to_image, export_to_html,
     export_to_plain_text, extract_3d_stream, extract_all_text, extract_portfolio_item,
     extract_rich_media_content, generate_postscript, get_3d_annotations, get_document_comments,
-    get_document_info, get_document_javascript, get_portfolio, get_rich_media_annotations,
-    linearize_document, optimize_document, redact_pattern, remediate_all_automatic,
-    AccessibilityStatus, ActionSequence, BatchJob, BookletBinding,
-    ExportImageFormat, JsExecutionContext, LinearUnit, MediaContent, NUpCount, NUpOrder,
-    PluginPermission, PluginRegistry, PortfolioItem, PortfolioLayout, PrintJobConfig,
-    PrintLayoutMode, RichMediaActivation, RichMediaConfig, RichMediaDeactivation,
-    SampleWatermarkPlugin, ScaleRatio, ScannerJobConfig, ThreeDConfig, ThreeDFormat,
-    ThreeDLighting, ThreeDRenderMode, ThreeDView,
+    get_document_info, get_document_javascript, get_output_intents, get_portfolio,
+    get_rich_media_annotations, linearize_document, optimize_document, perform_ocr_document,
+    redact_pattern, remediate_all_automatic, run_preflight, AccessibilityStatus, ActionSequence,
+    BatchJob, BookletBinding, ExportImageFormat, JsExecutionContext, LinearUnit, MediaContent,
+    NUpCount, NUpOrder, OcrConfig, OcrOutputMode, PluginPermission, PluginRegistry, PortfolioItem,
+    PortfolioLayout, PreflightFixup, PreflightProfile, PrintJobConfig, PrintLayoutMode,
+    RichMediaActivation, RichMediaConfig, RichMediaDeactivation, SampleWatermarkPlugin, ScaleRatio,
+    ScannerJobConfig, StandardIccProfile, ThreeDConfig, ThreeDFormat, ThreeDLighting,
+    ThreeDRenderMode, ThreeDView,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -369,6 +375,228 @@ enum Commands {
     Batch {
         #[command(subcommand)]
         action: BatchCommands,
+    },
+
+    #[command(about = "Perform Optical Character Recognition (OCR) and generate searchable text layer (FR-16)")]
+    Ocr {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file path with searchable text layer")]
+        output: PathBuf,
+
+        #[arg(long, default_value = "eng", help = "Recognition language code (e.g. eng, spa, fra, deu) (FR-16.3)")]
+        lang: String,
+
+        #[arg(long, default_value = "searchable-image", help = "Output mode: searchable-image, exact, editable (FR-16.4)")]
+        mode: String,
+
+        #[arg(long, default_value_t = 300, help = "Processing DPI resolution (72-600) (FR-16.8)")]
+        dpi: u32,
+
+        #[arg(long, help = "Disable automatic page orientation correction")]
+        no_rotate: bool,
+
+        #[arg(long, help = "Page range to process (e.g. '1-3, 5' 1-based, default all)")]
+        pages: Option<String>,
+    },
+
+    #[command(about = "Digitally sign a PDF using PKCS#7/CMS detached cryptographic signatures (FR-13.1, FR-13.6)")]
+    Sign {
+        #[arg(help = "Input PDF file to sign")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output signed PDF file path")]
+        output: PathBuf,
+
+        #[arg(long, default_value = "Authorized Signer", help = "Signer full name")]
+        signer: String,
+
+        #[arg(long, default_value = "RavPDF Authority", help = "Signer organization")]
+        org: String,
+
+        #[arg(long, default_value = "signer@ravpdf.org", help = "Signer email address")]
+        email: String,
+
+        #[arg(long, default_value = "Document Approval", help = "Reason for signing")]
+        reason: String,
+
+        #[arg(long, default_value = "Headquarters", help = "Location of signing")]
+        location: String,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index for visible signature box")]
+        page: usize,
+
+        #[arg(long, help = "Render a visible signature box on the specified page")]
+        visible: bool,
+    },
+
+    #[command(about = "Preflight standards validation (PDF/A, Print Prepress) and automated fixups (FR-22, FR-23)")]
+    Preflight {
+        #[arg(help = "Input PDF file to audit")]
+        input: PathBuf,
+
+        #[arg(long, default_value = "pdfa1b", help = "Validation profile: pdfa1b, print, quality")]
+        profile: String,
+
+        #[arg(long, help = "Automatically execute preflight fixups on non-compliant documents (FR-23.1.4)")]
+        fix: bool,
+
+        #[arg(short, long, help = "Output path for fixed PDF (required if --fix is set)")]
+        output: Option<PathBuf>,
+    },
+
+    #[command(about = "Color management, ICC profiles, Output Intent, and color conversions (FR-24)")]
+    Color {
+        #[command(subcommand)]
+        action: ColorCommands,
+    },
+
+    #[command(about = "Commercial print production, printer marks, ink management, and trap presets (FR-23.3)")]
+    Prepress {
+        #[command(subcommand)]
+        action: PrepressCommands,
+    },
+
+    #[command(about = "Standards compliance conversion and verification for PDF/A, PDF/X, and PDF/E (FR-22)")]
+    Standards {
+        #[command(subcommand)]
+        action: StandardsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum PrepressCommands {
+    #[command(about = "Add prepress printer marks (trim, bleed, registration bullseyes, color bars, page info) (FR-23.3.4)")]
+    Marks {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file with printer marks")]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = true, help = "Include trim corner ticks")]
+        trim: bool,
+
+        #[arg(long, default_value_t = true, help = "Include bleed corner ticks")]
+        bleed: bool,
+
+        #[arg(long, default_value_t = true, help = "Include registration bullseye targets")]
+        registration: bool,
+
+        #[arg(long, default_value_t = true, help = "Include CMYK tint step color bars")]
+        color_bars: bool,
+
+        #[arg(long, default_value_t = true, help = "Include page title and numbering info in slug")]
+        info: bool,
+
+        #[arg(long, default_value_t = 36.0, help = "Slug margin in points added outside the page (default: 36.0 pt = 0.5 in)")]
+        slug_margin: f64,
+
+        #[arg(long, default_value_t = 9.0, help = "Bleed offset in points (default: 9.0 pt = 1/8 in)")]
+        bleed_offset: f64,
+    },
+
+    #[command(about = "Inspect process and spot color ink plates in document (FR-23.3.2)")]
+    Inks {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+    },
+
+    #[command(about = "Flatten document transparency across ExtGState and page groups (FR-23.3.3)")]
+    Flatten {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file with flattened transparency")]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = 75, help = "Raster/Vector balance from 0 (all raster) to 100 (keep vectors)")]
+        balance: u8,
+    },
+
+    #[command(about = "Configure or inspect prepress ink trap presets (FR-23.3.5)")]
+    Trap {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, help = "Output PDF file (if setting presets)")]
+        output: Option<PathBuf>,
+
+        #[arg(long, help = "Trap width in points (e.g. 0.25)")]
+        trap_width: Option<f64>,
+
+        #[arg(long, help = "Black width in points (e.g. 0.50)")]
+        black_width: Option<f64>,
+
+        #[arg(long, help = "Trap preset name")]
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum StandardsCommands {
+    #[command(about = "Convert document to ISO standard format (PDF/A, PDF/X, PDF/E) (FR-22.1, FR-22.2, FR-22.3, FR-22.5)")]
+    Convert {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output conformant PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value = "pdfa-1b", help = "Target format: pdfa-1b, pdfa-2b, pdfa-3b, pdfx-1a, pdfx-3, pdfx-4, pdfe-1")]
+        format: String,
+
+        #[arg(long, default_value = "srgb", help = "ICC profile for OutputIntent: srgb, swop, fogra39, gracol, japancolor")]
+        icc: String,
+    },
+
+    #[command(about = "Validate document against ISO standard profile rules (FR-22.4)")]
+    Validate {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(long, default_value = "pdfa-1b", help = "Target format to validate: pdfa-1b, pdfa-2b, pdfa-3b, pdfx-1a, pdfx-3, pdfx-4, pdfe-1")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ColorCommands {
+    #[command(about = "Embed ISO-compliant Output Intent and ICC profile (FR-24.1, FR-24.4)")]
+    EmbedOutputIntent {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value = "swop", help = "ICC Profile: srgb, adobergb, p3, swop, fogra39, gracol, japancolor, dotgain20")]
+        profile: String,
+
+        #[arg(long, default_value = "U.S. Web Coated (SWOP) v2", help = "Output condition identifier")]
+        condition: String,
+
+        #[arg(long, default_value = "http://www.color.org", help = "Registry name")]
+        registry: String,
+    },
+
+    #[command(about = "List Output Intent profiles configured in document catalog (FR-24.4)")]
+    ListOutputIntents {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+    },
+
+    #[command(about = "Convert document colors to target color space (FR-24.6)")]
+    Convert {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value = "DeviceCMYK", help = "Target color space: DeviceCMYK, DeviceRGB, DeviceGray")]
+        target: String,
     },
 }
 
@@ -1772,6 +2000,451 @@ fn main() -> Result<()> {
                     }));
                 } else {
                     println!("Saved \"{}\" template recipe to {}", template.name, output.display());
+                }
+            }
+        },
+
+        Commands::Ocr {
+            input,
+            output,
+            lang,
+            mode,
+            dpi,
+            no_rotate,
+            pages,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let page_indices: Option<Vec<usize>> = pages.map(|p_str| {
+                p_str
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<usize>().ok().map(|n| n.saturating_sub(1)))
+                    .collect()
+            });
+
+            let out_mode = match mode.to_lowercase().as_str() {
+                "exact" | "searchable-image-exact" => OcrOutputMode::SearchableImageExact,
+                "editable" | "editable-text" => OcrOutputMode::EditableText,
+                _ => OcrOutputMode::SearchableImage,
+            };
+
+            let config = OcrConfig {
+                language: lang.clone(),
+                output_mode: out_mode,
+                dpi,
+                auto_rotate: !no_rotate,
+                ..Default::default()
+            };
+
+            let result = perform_ocr_document(&mut doc, &config, page_indices.as_deref())?;
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("Successfully performed OCR on '{}'", input.display());
+                println!("  Processed pages: {}", result.pages.len());
+                println!("  Total words recognized: {}", result.total_words);
+                println!("  Average confidence: {:.1}%", result.average_confidence * 100.0);
+                println!("  Uncertain words: {}", result.total_uncertain_words);
+                println!("  Saved searchable PDF to '{}'", output.display());
+            }
+        }
+
+        Commands::Sign {
+            input,
+            output,
+            signer,
+            org,
+            email,
+            reason,
+            location,
+            page,
+            visible,
+        } => {
+            let doc = PdfDocument::load_from_file(&input)?;
+            let curr_page = page.saturating_sub(1);
+            let rect = if visible {
+                Some([72.0, 72.0, 260.0, 130.0])
+            } else {
+                None
+            };
+            let digital_id = DigitalId::generate(&signer, &org, &email, 365)?;
+            let signed_bytes = sign_pdf_document(
+                doc,
+                curr_page,
+                "Signature1",
+                &digital_id,
+                &reason,
+                &location,
+                rect,
+            )?;
+            fs::write(&output, &signed_bytes)?;
+
+            if cli.json {
+                let info = serde_json::json!({
+                    "status": "success",
+                    "signer": signer,
+                    "organization": org,
+                    "email": email,
+                    "reason": reason,
+                    "location": location,
+                    "page": page,
+                    "visible": visible,
+                    "output": output.display().to_string(),
+                });
+                println!("{}", serde_json::to_string_pretty(&info)?);
+            } else {
+                println!("Successfully digitally signed document '{}'", input.display());
+                println!("  Signer: {}", signer);
+                println!("  Organization: {}", org);
+                println!("  Reason: {}", reason);
+                println!("  Location: {}", location);
+                println!("  Standard: ISO 32000-1 Section 12.8 / PKCS#7 detached");
+                println!("  Saved signed PDF to '{}'", output.display());
+            }
+        }
+
+        Commands::Preflight {
+            input,
+            profile,
+            fix,
+            output,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let p_enum = match profile.to_lowercase().as_str() {
+                "print" | "printproduction" => PreflightProfile::PrintProduction,
+                "quality" | "generalquality" => PreflightProfile::GeneralQuality,
+                _ => PreflightProfile::PdfA1b,
+            };
+
+            let report = run_preflight(&doc, p_enum);
+
+            let mut fixup_summary = None;
+            if fix {
+                let out_path = output.ok_or_else(|| anyhow!("--output path is required when --fix is specified"))?;
+                let summary = execute_preflight_fixup(&mut doc, PreflightFixup::FixAll)?;
+                doc.save_to_file(&out_path)?;
+                fixup_summary = Some(summary);
+            }
+
+            if cli.json {
+                let mut val = serde_json::to_value(&report)?;
+                if let Some(ref s) = fixup_summary {
+                    val["fixup_applied"] = serde_json::Value::String(s.clone());
+                }
+                println!("{}", serde_json::to_string_pretty(&val)?);
+            } else {
+                println!("Preflight Audit for '{}' [{}]", input.display(), p_enum.display_name());
+                println!("  Status: {}", if report.is_compliant { "✓ COMPLIANT" } else { "✗ NON-COMPLIANT" });
+                println!("  Passed: {}, Warnings: {}, Errors: {}", report.total_passed, report.total_warnings, report.total_errors);
+                for c in &report.checks {
+                    let mark = if c.passed { "✓" } else { "✗" };
+                    println!("    {} [{}] {}: {}", mark, c.category, c.title, c.details);
+                }
+                if let Some(ref s) = fixup_summary {
+                    println!("\n  Fixups applied: {}", s);
+                }
+            }
+        }
+
+        Commands::Color { action } => match action {
+            ColorCommands::EmbedOutputIntent {
+                input,
+                output,
+                profile,
+                condition,
+                registry,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let p_enum = match profile.to_lowercase().as_str() {
+                    "srgb" => StandardIccProfile::SRgb,
+                    "adobergb" | "adobe" => StandardIccProfile::AdobeRgb1998,
+                    "p3" | "displayp3" => StandardIccProfile::DisplayP3,
+                    "fogra39" => StandardIccProfile::FOGRA39,
+                    "gracol" => StandardIccProfile::GRACoL2006,
+                    "japancolor" | "japan" => StandardIccProfile::JapanColor2001Coated,
+                    "dotgain20" | "dotgain" => StandardIccProfile::DotGain20,
+                    _ => StandardIccProfile::USWebCoatedSWOP,
+                };
+
+                let oi_id = embed_output_intent(&mut doc, p_enum, &condition, &registry)?;
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    let info = serde_json::json!({
+                        "status": "success",
+                        "profile": p_enum.display_name(),
+                        "condition": condition,
+                        "registry": registry,
+                        "output_intent_id": oi_id.to_string(),
+                        "output": output.display().to_string(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&info)?);
+                } else {
+                    println!("Successfully embedded Output Intent in '{}'", input.display());
+                    println!("  Profile: {}", p_enum.display_name());
+                    println!("  Condition: {}", condition);
+                    println!("  Registry: {}", registry);
+                    println!("  Saved PDF to '{}'", output.display());
+                }
+            }
+
+            ColorCommands::ListOutputIntents { input } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                let intents = get_output_intents(&doc)?;
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&intents)?);
+                } else {
+                    println!("Output Intents in '{}':", input.display());
+                    if intents.is_empty() {
+                        println!("  (No output intents configured)");
+                    } else {
+                        for (i, oi) in intents.iter().enumerate() {
+                            println!("  {}. Subtype: {}", i + 1, oi.subtype);
+                            println!("     Condition: {}", oi.output_condition_identifier);
+                            println!("     Registry: {}", oi.registry_name);
+                            if let Some(ref inf) = oi.info {
+                                println!("     Info: {}", inf);
+                            }
+                        }
+                    }
+                }
+            }
+
+            ColorCommands::Convert {
+                input,
+                output,
+                target,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let modified = convert_document_colors(&mut doc, &target)?;
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    let info = serde_json::json!({
+                        "status": "success",
+                        "target_color_space": target,
+                        "modified_streams": modified,
+                        "output": output.display().to_string(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&info)?);
+                } else {
+                    println!("Converted document colors for '{}'", input.display());
+                    println!("  Target Color Space: {}", target);
+                    println!("  Modified Content Streams: {}", modified);
+                    println!("  Saved converted PDF to '{}'", output.display());
+                }
+            }
+        },
+
+        Commands::Prepress { action } => match action {
+            PrepressCommands::Marks {
+                input,
+                output,
+                trim,
+                bleed,
+                registration,
+                color_bars,
+                info,
+                slug_margin,
+                bleed_offset,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let cfg = PrinterMarksConfig {
+                    trim_marks: trim,
+                    bleed_marks: bleed,
+                    registration_marks: registration,
+                    color_bars,
+                    page_information: info,
+                    slug_margin,
+                    bleed_offset,
+                    ..Default::default()
+                };
+                let pages_marked = add_printer_marks(&mut doc, &cfg)?;
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    let res = serde_json::json!({
+                        "status": "success",
+                        "pages_marked": pages_marked,
+                        "slug_margin": slug_margin,
+                        "bleed_offset": bleed_offset,
+                        "output": output.display().to_string(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&res)?);
+                } else {
+                    println!("Added prepress printer marks to '{}'", input.display());
+                    println!("  Pages Marked: {}", pages_marked);
+                    println!("  Slug Margin: {} pt, Bleed Offset: {} pt", slug_margin, bleed_offset);
+                    println!("  Saved marked PDF to '{}'", output.display());
+                }
+            }
+
+            PrepressCommands::Inks { input } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                let inks = get_document_inks(&doc);
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&inks)?);
+                } else {
+                    println!("Document Ink Plates in '{}':", input.display());
+                    for (i, ink) in inks.iter().enumerate() {
+                        let kind = if ink.is_spot { "Spot Plate" } else { "Process Plate" };
+                        println!(
+                            "  {}. {} [{}] CMYK: ({:.2}, {:.2}, {:.2}, {:.2})",
+                            i + 1, ink.name, kind, ink.process_cmyk.0, ink.process_cmyk.1, ink.process_cmyk.2, ink.process_cmyk.3
+                        );
+                    }
+                }
+            }
+
+            PrepressCommands::Flatten {
+                input,
+                output,
+                balance,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let cfg = TransparencyFlattenConfig {
+                    raster_vector_balance: balance,
+                    ..Default::default()
+                };
+                let rep = flatten_document_transparency(&mut doc, &cfg)?;
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&rep)?);
+                } else {
+                    println!("Flattened document transparency in '{}'", input.display());
+                    println!("  ExtGState Flattened: {}", rep.extgstate_flattened);
+                    println!("  Transparency Groups Removed: {}", rep.groups_removed);
+                    println!("  Pages Processed: {}", rep.total_pages_processed);
+                    println!("  Saved flattened PDF to '{}'", output.display());
+                }
+            }
+
+            PrepressCommands::Trap {
+                input,
+                output,
+                trap_width,
+                black_width,
+                name,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                if let Some(out) = output {
+                    let preset = TrapPreset {
+                        name: name.unwrap_or_else(|| "Prepress Trap Preset".into()),
+                        trap_width: trap_width.unwrap_or(0.25),
+                        black_width: black_width.unwrap_or(0.50),
+                        ..Default::default()
+                    };
+                    set_trap_presets(&mut doc, std::slice::from_ref(&preset))?;
+                    doc.save_to_file(&out)?;
+
+                    if cli.json {
+                        let res = serde_json::json!({
+                            "status": "success",
+                            "preset": preset,
+                            "output": out.display().to_string(),
+                        });
+                        println!("{}", serde_json::to_string_pretty(&res)?);
+                    } else {
+                        println!("Configured trap preset in '{}'", input.display());
+                        println!("  Name: {}", preset.name);
+                        println!("  Trap Width: {} pt, Black Width: {} pt", preset.trap_width, preset.black_width);
+                        println!("  Saved PDF to '{}'", out.display());
+                    }
+                } else {
+                    let presets = get_trap_presets(&doc);
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&presets)?);
+                    } else {
+                        println!("Trap Presets in '{}':", input.display());
+                        for (i, p) in presets.iter().enumerate() {
+                            println!("  {}. '{}': trap_width={} pt, black_width={} pt", i + 1, p.name, p.trap_width, p.black_width);
+                        }
+                    }
+                }
+            }
+        },
+
+        Commands::Standards { action } => match action {
+            StandardsCommands::Convert {
+                input,
+                output,
+                format,
+                icc,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let std_enum = match format.to_lowercase().replace(['-', '/'], "").as_str() {
+                    "pdfa1b" | "a1b" => StandardFormat::PdfA1b,
+                    "pdfa2b" | "a2b" => StandardFormat::PdfA2b,
+                    "pdfa3b" | "a3b" => StandardFormat::PdfA3b,
+                    "pdfx1a" | "x1a" => StandardFormat::PdfX1a,
+                    "pdfx3" | "x3" => StandardFormat::PdfX3,
+                    "pdfx4" | "x4" => StandardFormat::PdfX4,
+                    "pdfe1" | "e1" => StandardFormat::PdfE1,
+                    _ => StandardFormat::PdfA1b,
+                };
+
+                let icc_enum = match icc.to_lowercase().as_str() {
+                    "swop" => StandardIccProfile::USWebCoatedSWOP,
+                    "fogra39" | "fogra" => StandardIccProfile::FOGRA39,
+                    "gracol" => StandardIccProfile::GRACoL2006,
+                    "japancolor" | "japan" => StandardIccProfile::JapanColor2001Coated,
+                    _ => StandardIccProfile::SRgb,
+                };
+
+                let cfg = StandardConversionConfig {
+                    target: std_enum,
+                    icc_profile: icc_enum,
+                    ..Default::default()
+                };
+
+                let rep = convert_to_standard(&mut doc, &cfg)?;
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&rep)?);
+                } else {
+                    println!("Converted document to standard '{}'", std_enum.display_name());
+                    println!("  Version: %PDF-{}.{}", rep.target_version.0, rep.target_version.1);
+                    for a in &rep.actions_applied {
+                        println!("  • {}", a);
+                    }
+                    println!("  Saved compliant PDF to '{}'", output.display());
+                }
+            }
+
+            StandardsCommands::Validate { input, format } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                let std_enum = match format.to_lowercase().replace(['-', '/'], "").as_str() {
+                    "pdfa1b" | "a1b" => StandardFormat::PdfA1b,
+                    "pdfa2b" | "a2b" => StandardFormat::PdfA2b,
+                    "pdfa3b" | "a3b" => StandardFormat::PdfA3b,
+                    "pdfx1a" | "x1a" => StandardFormat::PdfX1a,
+                    "pdfx3" | "x3" => StandardFormat::PdfX3,
+                    "pdfx4" | "x4" => StandardFormat::PdfX4,
+                    "pdfe1" | "e1" => StandardFormat::PdfE1,
+                    _ => StandardFormat::PdfA1b,
+                };
+
+                let rep = validate_standard_compliance(&doc, std_enum);
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&rep)?);
+                } else {
+                    let status = if rep.is_compliant { "COMPLIANT" } else { "NON-COMPLIANT" };
+                    println!("Standards Compliance Audit for '{}': {}", std_enum.display_name(), status);
+                    for check in &rep.checks {
+                        let sym = if check.passed { "✓ PASS" } else { "✗ FAIL" };
+                        println!("  {} [{}]: {}", sym, check.code, check.description);
+                        println!("     Details: {}", check.details);
+                    }
+                }
+
+                if !rep.is_compliant {
+                    std::process::exit(1);
                 }
             }
         },

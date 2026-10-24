@@ -16,6 +16,7 @@ use crate::header_footer::{apply_headers_and_footers, HeaderFooterConfig};
 use crate::js::{execute_script, JsExecutionContext};
 use crate::linearize::linearize_document;
 use crate::metadata::{set_document_info, DocumentInfo};
+use crate::ocr::{perform_ocr_document, OcrConfig};
 use crate::optimize::optimize_document;
 use crate::preflight::{run_preflight, PreflightProfile};
 use crate::redact::redact_pattern;
@@ -59,6 +60,7 @@ pub enum BatchAction {
     Preflight {
         profile: PreflightProfile,
     },
+    Ocr(OcrConfig),
 }
 
 impl BatchAction {
@@ -75,6 +77,7 @@ impl BatchAction {
             Self::Encrypt { .. } => "Password Encrypt",
             Self::RunJavaScript { .. } => "Execute JavaScript",
             Self::Preflight { .. } => "Verify Preflight Conformance",
+            Self::Ocr(_) => "Recognize Text (OCR)",
         }
     }
 }
@@ -132,6 +135,18 @@ impl ActionSequence {
             actions: vec![
                 BatchAction::Optimize,
                 BatchAction::Linearize,
+            ],
+        }
+    }
+
+    /// Predefined template: "Scan and Make Searchable" (FR-30.3).
+    pub fn template_scan_and_make_searchable() -> Self {
+        Self {
+            name: "Scan and Make Searchable".to_string(),
+            description: "Runs OCR text recognition, generates searchable image layer, and optimizes structure.".to_string(),
+            actions: vec![
+                BatchAction::Ocr(OcrConfig::default()),
+                BatchAction::Optimize,
             ],
         }
     }
@@ -296,6 +311,9 @@ fn process_single_file(
                 if !rep.is_compliant {
                     tracing::warn!("Batch preflight non-compliance on {:?}", input_path);
                 }
+            }
+            BatchAction::Ocr(cfg) => {
+                let _ = perform_ocr_document(&mut doc, cfg, None)?;
             }
         }
     }

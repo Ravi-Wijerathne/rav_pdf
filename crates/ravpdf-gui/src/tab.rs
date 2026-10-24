@@ -10,7 +10,10 @@ use eframe::egui::{self, Color32, TextureOptions};
 use ravpdf_core::document::PdfDocument;
 use ravpdf_core::outline::{get_document_bookmarks, Bookmark};
 use ravpdf_render::{render_page, Color, RenderOptions};
-use ravpdf_tools::{get_document_info, DocumentInfo};
+use ravpdf_tools::{
+    apply_plate_separations, apply_soft_proof, get_document_info, DocumentInfo, PlateSeparationConfig,
+    SeparationAnalysis, SoftProofConfig,
+};
 use std::path::PathBuf;
 
 /// Represents an individual opened PDF document in a tab.
@@ -31,6 +34,9 @@ pub struct DocumentTab {
     pub cached_page_index: Option<usize>,
     pub cached_zoom: Option<f32>,
     pub cached_rotation: Option<i64>,
+    pub cached_plate_config: Option<PlateSeparationConfig>,
+    pub cached_soft_proof: Option<SoftProofConfig>,
+    pub raw_file_bytes: Option<Vec<u8>>,
 }
 
 impl DocumentTab {
@@ -56,6 +62,9 @@ impl DocumentTab {
             cached_page_index: None,
             cached_zoom: None,
             cached_rotation: None,
+            cached_plate_config: None,
+            cached_soft_proof: None,
+            raw_file_bytes: None,
         }
     }
 
@@ -116,11 +125,26 @@ impl DocumentTab {
     }
 
     /// Ensures that the current page raster texture is up to date in the egui context.
+    #[allow(dead_code)]
     pub fn ensure_page_rendered(&mut self, ctx: &egui::Context) {
+        let _ = self.ensure_page_rendered_with_plate(ctx, None, None);
+    }
+
+    /// Ensures that the current page texture is rendered, optionally applying CMYK plate separations, TAC warnings (FR-23.2), and Soft-Proofing simulation (FR-24.5).
+    pub fn ensure_page_rendered_with_plate(
+        &mut self,
+        ctx: &egui::Context,
+        plate_config: Option<&PlateSeparationConfig>,
+        soft_proof_config: Option<&SoftProofConfig>,
+    ) -> Option<SeparationAnalysis> {
         let needs_render = self.page_texture.is_none()
             || self.cached_page_index != Some(self.current_page)
             || self.cached_zoom != Some(self.zoom)
-            || self.cached_rotation != Some(self.rotation);
+            || self.cached_rotation != Some(self.rotation)
+            || self.cached_plate_config.as_ref() != plate_config
+            || self.cached_soft_proof.as_ref() != soft_proof_config;
+
+        let mut analysis = None;
 
         if needs_render && self.current_page < self.doc.page_count() {
             let options = RenderOptions {
@@ -132,8 +156,26 @@ impl DocumentTab {
             if let Ok(pixmap) = render_page(&self.doc, self.current_page, &options) {
                 let width = pixmap.width() as usize;
                 let height = pixmap.height() as usize;
-                let pixels: Vec<Color32> = pixmap
-                    .data()
+
+                let (mut processed_data, ana) = if let Some(cfg) = plate_config {
+                    let (data, a) = apply_plate_separations(
+                        pixmap.data(),
+                        pixmap.width(),
+                        pixmap.height(),
+                        cfg,
+                    );
+                    (data, Some(a))
+                } else {
+                    (pixmap.data().to_vec(), None)
+                };
+                analysis = ana;
+
+                // Apply soft-proofing simulation if enabled (FR-24.5)
+                if let Some(sp_cfg) = soft_proof_config {
+                    processed_data = apply_soft_proof(&processed_data, width as u32, height as u32, sp_cfg);
+                }
+
+                let pixels: Vec<Color32> = processed_data
                     .chunks_exact(4)
                     .map(|rgba| Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]))
                     .collect();
@@ -152,8 +194,12 @@ impl DocumentTab {
                 self.cached_page_index = Some(self.current_page);
                 self.cached_zoom = Some(self.zoom);
                 self.cached_rotation = Some(self.rotation);
+                self.cached_plate_config = plate_config.cloned();
+                self.cached_soft_proof = soft_proof_config.cloned();
             }
         }
+
+        analysis
     }
 
     /// Fits current page to the view width (FR-01.3.2).

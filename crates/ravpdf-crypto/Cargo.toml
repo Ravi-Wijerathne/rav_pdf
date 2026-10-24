@@ -17,3 +17,4 @@ cipher.workspace = true
 sha2.workspace = true
 md-5.workspace = true
 serde.workspace = true
+chrono.workspace = true
