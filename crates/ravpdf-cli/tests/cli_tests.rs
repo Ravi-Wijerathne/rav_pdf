@@ -767,6 +767,181 @@ fn test_prepress_marks_flattening_and_standards_compliance() {
     assert!(x_val.is_compliant);
 }
 
+#[test]
+fn test_aes256_encryption_and_certification_signature_ltv_workflow() {
+    use ravpdf_crypto::{
+        decrypt_document, encrypt_document_with_algorithm, get_document_signatures,
+        sign_pdf_document_advanced, DigitalId, DocMdpPermission, EncryptionAlgorithm, Permissions,
+        SignatureStatus, SigningOptions,
+    };
+
+    // 1. Modern AES-256 (Revision 6) PDF 2.0 Document Encryption & Decryption (FR-14.4)
+    let mut enc_doc = PdfDocument::new();
+    let stream_payload = b"q\n0.2 0.4 0.8 rg\n50 50 200 100 re\nf\nQ\n";
+    enc_doc.add_page_with_content(612.0, 792.0, stream_payload.to_vec());
+
+    encrypt_document_with_algorithm(
+        &mut enc_doc,
+        "SecretUserPass#2026",
+        "MasterOwnerPass#2026",
+        Permissions::all_permitted(),
+        EncryptionAlgorithm::Aes256,
+    )
+    .expect("encrypt with AES-256");
+
+    let enc_id = enc_doc.trailer.get_ref("Encrypt").expect("Encrypt dictionary");
+    let enc_dict = enc_doc.objects.get(&enc_id).unwrap().as_dict().unwrap();
+    assert_eq!(enc_dict.get_i64("Length"), Some(256));
+    assert_eq!(enc_dict.get_i64("V"), Some(5));
+    assert_eq!(enc_dict.get_i64("R"), Some(6));
+
+    decrypt_document(&mut enc_doc, "SecretUserPass#2026").expect("decrypt AES-256 document");
+    assert!(!enc_doc.trailer.contains_key("Encrypt"));
+
+    // 2. Author Certification Signature (DocMDP) with LTV (/DSS) (FR-13.3, FR-13.8)
+    let mut cert_doc = PdfDocument::new();
+    cert_doc.add_blank_page(612.0, 792.0);
+
+    let digital_id = DigitalId::generate(
+        "Chief Executive Officer",
+        "Global Enterprise Corp",
+        "ceo@enterprise.com",
+        365,
+    )
+    .expect("generate digital ID");
+
+    let opts = SigningOptions {
+        field_name: "AuthorCertSig".into(),
+        reason: "Author Certification with Form Filling Permitted".into(),
+        location: "Zurich, Switzerland".into(),
+        contact_info: Some("legal@enterprise.com".into()),
+        rect: Some([50.0, 50.0, 250.0, 120.0]),
+        is_certification: true,
+        certification_permission: Some(DocMdpPermission::AnnotationsAndFormFilling),
+        embed_ltv: true,
+    };
+
+    let signed_bytes = sign_pdf_document_advanced(cert_doc, 0, &digital_id, &opts)
+        .expect("sign certified document with ltv");
+    assert!(!signed_bytes.is_empty());
+
+    let verified_doc = PdfDocument::load_from_bytes(&signed_bytes).expect("parse certified signed doc");
+    let sigs = get_document_signatures(&verified_doc, Some(&signed_bytes)).expect("get sigs");
+    assert_eq!(sigs.len(), 1);
+
+    let s = &sigs[0];
+    assert_eq!(s.field_name, "AuthorCertSig");
+    assert_eq!(s.signer_name.as_deref(), Some("Chief Executive Officer"));
+    assert_eq!(s.reason.as_deref(), Some("Author Certification with Form Filling Permitted"));
+    assert_eq!(s.location.as_deref(), Some("Zurich, Switzerland"));
+    assert!(s.is_certification);
+    assert_eq!(s.doc_mdp_permission, Some(DocMdpPermission::AnnotationsAndFormFilling));
+    assert!(s.has_ltv);
+    assert!(matches!(s.status, SignatureStatus::Valid(_)));
+}
+
+#[test]
+fn test_text_editing_and_markdown_creation_workflows() {
+    use ravpdf_edit::{
+        create_pdf_from_markdown, extract_page_text_spans, insert_formatted_text_block,
+        replace_text_span_in_page, suggest_font_substitute, FormattedTextBlockOptions,
+        MarkdownPdfOptions, TextAlignment,
+    };
+
+    // 1. Markdown document generation with headers, lists, code block, and pagination (FR-02.5, FR-02.6, FR-03.1.6)
+    let md = r#"# Technical Architecture Specification
+
+RavPDF is engineered with pure Rust for memory safety and maximum execution throughput.
+
+## Core Capabilities
+
+- In-place text editing and font substitution
+- Interactive AcroForms and Digital Signatures
+- ISO 32000-1 and ISO 32000-2 compliance
+
+> "Rust provides memory safety guarantees without garbage collection overhead."
+
+```rust
+fn engine_start() -> bool {
+    true
+}
+```
+
+---
+
+Section continued with detailed specifications.
+"#;
+
+    let md_opts = MarkdownPdfOptions {
+        page_size: (500.0, 400.0),
+        margin: 36.0,
+        base_font_size: 11.0,
+        line_spacing: 15.0,
+        title: Some("RavPDF Architecture".to_string()),
+        include_page_numbers: true,
+    };
+
+    let mut doc = create_pdf_from_markdown(md, &md_opts).expect("generate markdown PDF");
+    assert!(doc.page_count() >= 1);
+
+    // 2. Extract structured text spans (FR-04.1, FR-04.3)
+    let spans = extract_page_text_spans(&doc, 0).expect("extract text spans");
+    assert!(!spans.is_empty());
+    assert!(spans.iter().any(|s| s.text.contains("Technical Architecture Specification")));
+
+    // 3. In-place text replacement with font & color update (FR-04.1, FR-04.3, FR-04.12)
+    let rep_count = replace_text_span_in_page(
+        &mut doc,
+        0,
+        "Technical Architecture Specification",
+        "Executive Engineering Report",
+        Some("Helvetica-Bold"),
+        Some(20.0),
+        Some((0.15, 0.35, 0.75)),
+    )
+    .expect("replace text span");
+    assert_eq!(rep_count, 1);
+
+    let updated_spans = extract_page_text_spans(&doc, 0).expect("extract updated spans");
+    assert!(updated_spans.iter().any(|s| s.text.contains("Executive Engineering Report")));
+
+    // 4. Insert formatted text block with Justify alignment and Underline (FR-04.2, FR-04.4)
+    let block_opts = FormattedTextBlockOptions {
+        rect: [36.0, 50.0, 428.0, 80.0],
+        font_family: "Times-Roman".to_string(),
+        font_size: 11.0,
+        alignment: TextAlignment::Justify,
+        line_spacing: 14.0,
+        char_spacing: 0.25,
+        color: (0.1, 0.1, 0.1),
+        underline: true,
+        strikethrough: false,
+    };
+
+    insert_formatted_text_block(
+        &mut doc,
+        0,
+        "Approved by executive steering committee for immediate release and implementation across all target desktop environments.",
+        &block_opts,
+    )
+    .expect("insert formatted text block");
+
+    let final_content = doc.get_page_content(0).expect("get final page content");
+    let final_str = String::from_utf8_lossy(&final_content);
+    assert!(final_str.contains("Executive Engineering Report"));
+    assert!(final_str.contains("approved by executive steering committee") || final_str.contains("Approved by executive"));
+
+    // 5. Font substitution verification (FR-04.12)
+    let arial_sub = suggest_font_substitute("Arial");
+    assert_eq!(arial_sub.substitute_font, "Helvetica");
+    assert!(!arial_sub.is_exact_match);
+
+    let times_sub = suggest_font_substitute("Times-Roman");
+    assert_eq!(times_sub.substitute_font, "Times-Roman");
+    assert!(times_sub.is_exact_match);
+}
+
+
 
 
 
