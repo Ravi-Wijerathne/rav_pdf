@@ -1,14 +1,84 @@
 //! Digital Signatures detection, parsing, validation, and placement conforming to ISO 32000-1 Section 12.8.
 //!
-//! Traceability: FR-13.1 - FR-13.5, FR-13.10.
+//! Traceability: FR-13.1 - FR-13.10.
 
 use ravpdf_core::document::PdfDocument;
 use ravpdf_core::error::{PdfError, Result};
-use ravpdf_core::object::{Object, ObjectId, PdfDictionary, PdfName, PdfString};
+use ravpdf_core::object::{Object, ObjectId, PdfDictionary, PdfName, PdfStream, PdfString};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::digital_id::DigitalId;
+
+/// DocMDP transform permission levels conforming to ISO 32000-1 Clause 12.8.2.2 (FR-13.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DocMdpPermission {
+    /// P=1: No changes to the document shall be permitted; any change shall invalidate the signature.
+    #[default]
+    NoChanges = 1,
+    /// P=2: Permitted changes shall be filling in forms, instantiating page templates, and signing.
+    FormFilling = 2,
+    /// P=3: Permitted changes shall be the same as 2, plus annotation creation, deletion, and modification.
+    AnnotationsAndFormFilling = 3,
+}
+
+impl DocMdpPermission {
+    pub fn from_i64(p: i64) -> Option<Self> {
+        match p {
+            1 => Some(Self::NoChanges),
+            2 => Some(Self::FormFilling),
+            3 => Some(Self::AnnotationsAndFormFilling),
+            _ => None,
+        }
+    }
+
+    pub fn value(&self) -> i64 {
+        match self {
+            Self::NoChanges => 1,
+            Self::FormFilling => 2,
+            Self::AnnotationsAndFormFilling => 3,
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::NoChanges => "P=1: No changes allowed",
+            Self::FormFilling => "P=2: Form filling and signing only",
+            Self::AnnotationsAndFormFilling => "P=3: Annotations, form filling, and signing allowed",
+        }
+    }
+}
+
+/// Advanced options for digital signature creation conforming to ISO 32000-1 and PAdES (FR-13.1, FR-13.3, FR-13.6, FR-13.8).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SigningOptions {
+    pub field_name: String,
+    pub reason: String,
+    pub location: String,
+    pub contact_info: Option<String>,
+    pub rect: Option<[f64; 4]>,
+    /// Whether this signature is an author certification signature (FR-13.3).
+    pub is_certification: bool,
+    /// Permission restriction level for certification signatures.
+    pub certification_permission: Option<DocMdpPermission>,
+    /// Whether to embed Document Security Store (/DSS) for Long-Term Validation (LTV) (FR-13.8).
+    pub embed_ltv: bool,
+}
+
+impl Default for SigningOptions {
+    fn default() -> Self {
+        Self {
+            field_name: "Signature1".into(),
+            reason: "Document Approval".into(),
+            location: "Headquarters".into(),
+            contact_info: None,
+            rect: None,
+            is_certification: false,
+            certification_permission: None,
+            embed_ltv: false,
+        }
+    }
+}
 
 /// Integrity and authenticity validation status for a digital signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +107,9 @@ pub struct SignatureInfo {
     pub is_visible: bool,
     pub rect: Option<[f64; 4]>,
     pub page_index: Option<usize>,
+    pub is_certification: bool,
+    pub doc_mdp_permission: Option<DocMdpPermission>,
+    pub has_ltv: bool,
     pub status: SignatureStatus,
 }
 
@@ -164,6 +237,41 @@ fn collect_signatures_from_field(
             });
             let has_contents = contents_bytes.is_some();
 
+            // Check for /Reference and /DocMDP
+            let mut is_certification = false;
+            let mut doc_mdp_permission = None;
+            if let Some(refs) = sig.get_array("Reference") {
+                for r in refs {
+                    if let Some(dict) = r.as_dict() {
+                        if dict.get_name("TransformMethod") == Some("DocMDP") {
+                            is_certification = true;
+                            if let Some(tp) = dict.get("TransformParams").and_then(Object::as_dict) {
+                                if let Some(p) = tp.get_i64("P") {
+                                    doc_mdp_permission = DocMdpPermission::from_i64(p);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Also check catalog /Perms /DocMDP
+            if !is_certification {
+                if let Some(catalog) = doc.catalog() {
+                    if let Some(perms) = catalog.get("Perms").and_then(Object::as_dict) {
+                        if perms.contains_key("DocMDP") {
+                            is_certification = true;
+                            if doc_mdp_permission.is_none() {
+                                doc_mdp_permission = Some(DocMdpPermission::NoChanges);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if catalog has /DSS (LTV)
+            let has_ltv = doc.catalog().map(|c| c.contains_key("DSS")).unwrap_or(false);
+
             // Validate status
             let status = validate_signature(byte_range, contents_bytes.as_deref(), file_bytes);
 
@@ -181,6 +289,9 @@ fn collect_signatures_from_field(
                 is_visible,
                 rect,
                 page_index,
+                is_certification,
+                doc_mdp_permission,
+                has_ltv,
                 status,
             });
         } else {
@@ -199,6 +310,9 @@ fn collect_signatures_from_field(
                 is_visible,
                 rect,
                 page_index,
+                is_certification: false,
+                doc_mdp_permission: None,
+                has_ltv: false,
                 status: SignatureStatus::Indeterminate("Unsigned signature field".into()),
             });
         }
@@ -399,8 +513,9 @@ pub fn create_signature_field(
 }
 
 /// Signs a PDF document using a Digital ID and produces an ISO 32000-1 Clause 12.8 compliant signed PDF byte array (FR-13.1, FR-13.6).
+/// Convenience wrapper around `sign_pdf_document_advanced`.
 pub fn sign_pdf_document(
-    mut doc: PdfDocument,
+    doc: PdfDocument,
     page_index: usize,
     field_name: &str,
     digital_id: &DigitalId,
@@ -408,10 +523,89 @@ pub fn sign_pdf_document(
     location: &str,
     rect: Option<[f64; 4]>,
 ) -> Result<Vec<u8>> {
+    let opts = SigningOptions {
+        field_name: field_name.to_string(),
+        reason: reason.to_string(),
+        location: location.to_string(),
+        contact_info: None,
+        rect,
+        is_certification: false,
+        certification_permission: None,
+        embed_ltv: false,
+    };
+    sign_pdf_document_advanced(doc, page_index, digital_id, &opts)
+}
+
+/// Adds or updates Document Security Store (/DSS) in the document catalog for Long-Term Validation (LTV) (FR-13.8).
+pub fn embed_document_security_store(
+    doc: &mut PdfDocument,
+    certs_der: &[Vec<u8>],
+    crls_der: &[Vec<u8>],
+    ocsps_der: &[Vec<u8>],
+) -> Result<ObjectId> {
+    let mut cert_ids = Vec::new();
+    for cert in certs_der {
+        let stream_id = doc.next_object_id();
+        let stream = PdfStream::with_plain_data(PdfDictionary::new(), cert.clone());
+        doc.objects.insert(stream_id, Object::Stream(stream));
+        cert_ids.push(Object::Reference(stream_id));
+    }
+
+    let mut crl_ids = Vec::new();
+    for crl in crls_der {
+        let stream_id = doc.next_object_id();
+        let stream = PdfStream::with_plain_data(PdfDictionary::new(), crl.clone());
+        doc.objects.insert(stream_id, Object::Stream(stream));
+        crl_ids.push(Object::Reference(stream_id));
+    }
+
+    let mut ocsp_ids = Vec::new();
+    for ocsp in ocsps_der {
+        let stream_id = doc.next_object_id();
+        let stream = PdfStream::with_plain_data(PdfDictionary::new(), ocsp.clone());
+        doc.objects.insert(stream_id, Object::Stream(stream));
+        ocsp_ids.push(Object::Reference(stream_id));
+    }
+
+    let dss_id = doc.next_object_id();
+    let mut dss_dict = PdfDictionary::new();
+    dss_dict.insert("Type", PdfName::new("DSS"));
+    if !cert_ids.is_empty() {
+        dss_dict.insert("Certs", Object::Array(cert_ids));
+    }
+    if !crl_ids.is_empty() {
+        dss_dict.insert("CRLs", Object::Array(crl_ids));
+    }
+    if !ocsp_ids.is_empty() {
+        dss_dict.insert("OCSPs", Object::Array(ocsp_ids));
+    }
+
+    doc.objects.insert(dss_id, Object::Dictionary(dss_dict));
+
+    let catalog_id = doc.root_id;
+    if let Some(catalog) = doc.objects.get_mut(&catalog_id).and_then(Object::as_dict_mut) {
+        catalog.insert("DSS", dss_id);
+    }
+
+    Ok(dss_id)
+}
+
+/// Advanced digital signing supporting Certification Signatures (DocMDP) and LTV (/DSS) (FR-13.1, FR-13.3, FR-13.6, FR-13.8).
+pub fn sign_pdf_document_advanced(
+    mut doc: PdfDocument,
+    page_index: usize,
+    digital_id: &DigitalId,
+    options: &SigningOptions,
+) -> Result<Vec<u8>> {
     let page_ids = doc.page_ids();
     let page_id = *page_ids.get(page_index).ok_or_else(|| {
         PdfError::InvalidStructure(format!("Page index {} out of range", page_index))
     })?;
+
+    // If LTV is requested, embed /DSS beforehand
+    if options.embed_ltv {
+        embed_document_security_store(&mut doc, std::slice::from_ref(&digital_id.certificate_der), &[], &[])?;
+    }
 
     let now_str = chrono::Utc::now().format("D:%Y%m%d%H%M%SZ").to_string();
 
@@ -422,9 +616,28 @@ pub fn sign_pdf_document(
     sig_dict.insert("Filter", PdfName::new("Adobe.PPKLite"));
     sig_dict.insert("SubFilter", PdfName::new("adbe.pkcs7.detached"));
     sig_dict.insert("Name", PdfString::from_str(&digital_id.common_name));
-    sig_dict.insert("Reason", PdfString::from_str(reason));
-    sig_dict.insert("Location", PdfString::from_str(location));
+    sig_dict.insert("Reason", PdfString::from_str(&options.reason));
+    sig_dict.insert("Location", PdfString::from_str(&options.location));
+    if let Some(ref ci) = options.contact_info {
+        sig_dict.insert("ContactInfo", PdfString::from_str(ci));
+    }
     sig_dict.insert("M", PdfString::from_str(&now_str));
+
+    // Handle Certification Signature (DocMDP - FR-13.3)
+    if options.is_certification {
+        let perm = options.certification_permission.unwrap_or(DocMdpPermission::NoChanges);
+        let mut sig_ref = PdfDictionary::new();
+        sig_ref.insert("Type", PdfName::new("SigRef"));
+        sig_ref.insert("TransformMethod", PdfName::new("DocMDP"));
+        let mut transform_params = PdfDictionary::new();
+        transform_params.insert("Type", PdfName::new("TransformParams"));
+        transform_params.insert("P", perm.value());
+        transform_params.insert("V", PdfName::new("1.2"));
+        sig_ref.insert("TransformParams", Object::Dictionary(transform_params));
+        sig_ref.insert("Data", doc.root_id);
+
+        sig_dict.insert("Reference", Object::Array(vec![Object::Dictionary(sig_ref)]));
+    }
 
     // Allocate placeholder 2048 bytes (4096 hex chars)
     let placeholder_cms_bytes = vec![0u8; 2048];
@@ -447,11 +660,11 @@ pub fn sign_pdf_document(
     let field_id = doc.next_object_id();
     let mut field_dict = PdfDictionary::new();
     field_dict.insert("FT", PdfName::new("Sig"));
-    field_dict.insert("T", PdfString::from_str(field_name));
+    field_dict.insert("T", PdfString::from_str(&options.field_name));
     field_dict.insert("V", sig_val_id);
     field_dict.insert("P", page_id);
 
-    if let Some(r) = rect {
+    if let Some(r) = options.rect {
         field_dict.insert(
             "Rect",
             vec![
@@ -514,6 +727,15 @@ pub fn sign_pdf_document(
             if let Object::Array(arr) = fields {
                 arr.push(Object::Reference(field_id));
             }
+        }
+    }
+
+    // If certification signature, register in Catalog /Perms /DocMDP
+    if options.is_certification {
+        if let Some(catalog) = doc.objects.get_mut(&catalog_id).and_then(Object::as_dict_mut) {
+            let mut perms_dict = catalog.get("Perms").and_then(Object::as_dict).cloned().unwrap_or_default();
+            perms_dict.insert("DocMDP", sig_val_id);
+            catalog.insert("Perms", Object::Dictionary(perms_dict));
         }
     }
 
@@ -661,6 +883,8 @@ mod tests {
         assert_eq!(s.signer_name.as_deref(), Some("Dr. Elena Rostova"));
         assert_eq!(s.reason.as_deref(), Some("Authorized for Publication"));
         assert_eq!(s.location.as_deref(), Some("Geneva, Switzerland"));
+        assert!(!s.is_certification);
+        assert!(!s.has_ltv);
         assert!(matches!(s.status, SignatureStatus::Valid(_)));
 
         // Tamper test: modify one byte of the document and verify status becomes Invalid
@@ -670,5 +894,47 @@ mod tests {
         let tampered_sigs = get_document_signatures(&tampered_doc, Some(&tampered_bytes)).expect("get sigs");
         assert_eq!(tampered_sigs.len(), 1);
         assert!(matches!(tampered_sigs[0].status, SignatureStatus::Invalid(_)));
+    }
+
+    #[test]
+    fn test_certification_signature_docmdp_and_ltv() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(612.0, 792.0);
+
+        let did = DigitalId::generate(
+            "Chief Compliance Officer",
+            "Global Standards Organization",
+            "compliance@standards.org",
+            730,
+        )
+        .expect("generate digital id");
+
+        let opts = SigningOptions {
+            field_name: "CertDocSig".into(),
+            reason: "Certified Official Document (FR-13.3)".into(),
+            location: "Brussels, Belgium".into(),
+            contact_info: Some("admin@standards.org".into()),
+            rect: Some([100.0, 150.0, 300.0, 220.0]),
+            is_certification: true,
+            certification_permission: Some(DocMdpPermission::FormFilling),
+            embed_ltv: true,
+        };
+
+        let signed_bytes = sign_pdf_document_advanced(doc, 0, &did, &opts)
+            .expect("sign certified document with ltv");
+
+        assert!(!signed_bytes.is_empty());
+
+        let verified_doc = PdfDocument::load_from_bytes(&signed_bytes).expect("load certified doc");
+        let sigs = get_document_signatures(&verified_doc, Some(&signed_bytes)).expect("get sigs");
+        assert_eq!(sigs.len(), 1);
+
+        let s = &sigs[0];
+        assert_eq!(s.field_name, "CertDocSig");
+        assert_eq!(s.signer_name.as_deref(), Some("Chief Compliance Officer"));
+        assert!(s.is_certification);
+        assert_eq!(s.doc_mdp_permission, Some(DocMdpPermission::FormFilling));
+        assert!(s.has_ltv);
+        assert!(matches!(s.status, SignatureStatus::Valid(_)));
     }
 }

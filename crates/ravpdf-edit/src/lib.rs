@@ -14,10 +14,14 @@ pub mod labels;
 pub mod pages;
 
 pub use combine::{merge_documents, split_document};
-pub use content::{append_text_block, insert_image_file, insert_raw_image};
+pub use content::{
+    append_text_block, extract_page_text_spans, insert_formatted_text_block, insert_image_file,
+    insert_raw_image, replace_text_span_in_page, suggest_font_substitute,
+    FontSubstitute, FormattedTextBlockOptions, TextAlignment, TextSpan,
+};
 pub use create::{
-    create_pdf_from_images, create_pdf_from_raw_images, create_pdf_from_text,
-    ImagePdfOptions, TextPdfOptions,
+    create_pdf_from_images, create_pdf_from_markdown, create_pdf_from_raw_images,
+    create_pdf_from_text, ImagePdfOptions, MarkdownPdfOptions, TextPdfOptions,
 };
 pub use labels::{
     format_page_label, get_page_label, get_page_labels, set_page_labels, PageLabelRange,

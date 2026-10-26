@@ -5,8 +5,14 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser as ClapParser, Subcommand};
 use ravpdf_core::document::PdfDocument;
-use ravpdf_crypto::{decrypt_document, encrypt_document, DigitalId, Permissions, sign_pdf_document};
-use ravpdf_edit::{merge_documents, rotate_page, split_document};
+use ravpdf_crypto::{
+    decrypt_document, encrypt_document_with_algorithm, sign_pdf_document_advanced, DigitalId,
+    DocMdpPermission, EncryptionAlgorithm, Permissions, SigningOptions,
+};
+use ravpdf_edit::{
+    create_pdf_from_markdown, extract_page_text_spans, merge_documents,
+    replace_text_span_in_page, rotate_page, split_document, MarkdownPdfOptions,
+};
 use ravpdf_forms::{
     apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
     export_form_data, flatten_form, import_form_data, FormDataFormat, TabOrder,
@@ -183,6 +189,9 @@ enum Commands {
 
         #[arg(long, default_value = "", help = "Owner password (optional)")]
         owner_password: String,
+
+        #[arg(long, default_value = "aes256", help = "Encryption algorithm: aes128, aes256 (FR-14.4, FR-14.5)")]
+        algorithm: String,
     },
 
     #[command(about = "Decrypt a password-protected PDF")]
@@ -429,6 +438,15 @@ enum Commands {
 
         #[arg(long, help = "Render a visible signature box on the specified page")]
         visible: bool,
+
+        #[arg(long, help = "Author certification signature with DocMDP restrictions (FR-13.3)")]
+        certify: bool,
+
+        #[arg(long, default_value = "no-changes", help = "Certification permission: no-changes, form-filling, annotations")]
+        permission: String,
+
+        #[arg(long, help = "Embed Document Security Store (/DSS) for Long-Term Validation (LTV) (FR-13.8)")]
+        ltv: bool,
     },
 
     #[command(about = "Preflight standards validation (PDF/A, Print Prepress) and automated fixups (FR-22, FR-23)")]
@@ -462,6 +480,60 @@ enum Commands {
     Standards {
         #[command(subcommand)]
         action: StandardsCommands,
+    },
+
+    #[command(about = "Extract text spans with coordinates, font, size, and color on a page (FR-04.1, FR-04.3)")]
+    TextSpans {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, default_value_t = 1, help = "Page number (1-based)")]
+        page: usize,
+    },
+
+    #[command(about = "In-place text editing and font/color replacement on a page (FR-04.1, FR-04.3, FR-04.12)")]
+    EditText {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(short, long, default_value_t = 1, help = "Page number (1-based)")]
+        page: usize,
+
+        #[arg(long, required = true, help = "Target text to find")]
+        find: String,
+
+        #[arg(long, required = true, help = "Replacement text")]
+        replace: String,
+
+        #[arg(long, help = "New font name (e.g. Helvetica-Bold, Times-Roman, Courier)")]
+        font: Option<String>,
+
+        #[arg(long, help = "New font size in points")]
+        font_size: Option<f64>,
+
+        #[arg(long, help = "New color as comma-separated RGB (e.g. '0.2,0.4,0.8')")]
+        color: Option<String>,
+    },
+
+    #[command(about = "Create a multi-page PDF document from Markdown with headings, lists, quotes, and code blocks (FR-02.5, FR-02.6, FR-03.1.6)")]
+    FromMarkdown {
+        #[arg(help = "Input Markdown file path")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file path")]
+        output: PathBuf,
+
+        #[arg(long, help = "Document title header")]
+        title: Option<String>,
+
+        #[arg(long, default_value_t = 11.0, help = "Base font size in points")]
+        font_size: f64,
+
+        #[arg(long, default_value_t = 54.0, help = "Page margin in points")]
+        margin: f64,
     },
 }
 
@@ -1049,6 +1121,7 @@ fn main() -> Result<()> {
             output,
             password,
             owner_password,
+            algorithm,
         } => {
             let mut doc = PdfDocument::load_from_file(&input)?;
             let owner = if owner_password.is_empty() {
@@ -1056,9 +1129,13 @@ fn main() -> Result<()> {
             } else {
                 &owner_password
             };
-            encrypt_document(&mut doc, &password, owner, Permissions::all_permitted())?;
+            let algo = match algorithm.to_ascii_lowercase().as_str() {
+                "aes128" | "128" => EncryptionAlgorithm::Aes128,
+                _ => EncryptionAlgorithm::Aes256,
+            };
+            encrypt_document_with_algorithm(&mut doc, &password, owner, Permissions::all_permitted(), algo)?;
             doc.save_to_file(&output)?;
-            println!("Document encrypted with AES-128: {}", output.display());
+            println!("Document encrypted with {}: {}", algo.display_name(), output.display());
         }
 
         Commands::Decrypt {
@@ -2060,6 +2137,9 @@ fn main() -> Result<()> {
             location,
             page,
             visible,
+            certify,
+            permission,
+            ltv,
         } => {
             let doc = PdfDocument::load_from_file(&input)?;
             let curr_page = page.saturating_sub(1);
@@ -2069,14 +2149,29 @@ fn main() -> Result<()> {
                 None
             };
             let digital_id = DigitalId::generate(&signer, &org, &email, 365)?;
-            let signed_bytes = sign_pdf_document(
+
+            let doc_mdp_perm = match permission.to_ascii_lowercase().as_str() {
+                "form-filling" | "forms" => DocMdpPermission::FormFilling,
+                "annotations" | "annot" => DocMdpPermission::AnnotationsAndFormFilling,
+                _ => DocMdpPermission::NoChanges,
+            };
+
+            let opts = SigningOptions {
+                field_name: "Signature1".to_string(),
+                reason: reason.clone(),
+                location: location.clone(),
+                contact_info: Some(email.clone()),
+                rect,
+                is_certification: certify,
+                certification_permission: if certify { Some(doc_mdp_perm) } else { None },
+                embed_ltv: ltv,
+            };
+
+            let signed_bytes = sign_pdf_document_advanced(
                 doc,
                 curr_page,
-                "Signature1",
                 &digital_id,
-                &reason,
-                &location,
-                rect,
+                &opts,
             )?;
             fs::write(&output, &signed_bytes)?;
 
@@ -2090,6 +2185,9 @@ fn main() -> Result<()> {
                     "location": location,
                     "page": page,
                     "visible": visible,
+                    "is_certification": certify,
+                    "certification_permission": if certify { Some(doc_mdp_perm.description()) } else { None },
+                    "has_ltv": ltv,
                     "output": output.display().to_string(),
                 });
                 println!("{}", serde_json::to_string_pretty(&info)?);
@@ -2099,6 +2197,8 @@ fn main() -> Result<()> {
                 println!("  Organization: {}", org);
                 println!("  Reason: {}", reason);
                 println!("  Location: {}", location);
+                println!("  Certification (DocMDP): {}", if certify { doc_mdp_perm.description() } else { "None (Approval Signature)" });
+                println!("  Long-Term Validation (LTV /DSS): {}", if ltv { "Embedded" } else { "No" });
                 println!("  Standard: ISO 32000-1 Section 12.8 / PKCS#7 detached");
                 println!("  Saved signed PDF to '{}'", output.display());
             }
@@ -2448,6 +2548,135 @@ fn main() -> Result<()> {
                 }
             }
         },
+
+        Commands::TextSpans { input, page } => {
+            let doc = PdfDocument::load_from_file(&input)?;
+            let page_idx = page.saturating_sub(1);
+            let spans = extract_page_text_spans(&doc, page_idx)?;
+
+            if cli.json {
+                let json_spans: Vec<_> = spans
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "text": s.text,
+                            "x": s.x,
+                            "y": s.y,
+                            "font_name": s.font_name,
+                            "font_size": s.font_size,
+                            "color": [s.color.0, s.color.1, s.color.2],
+                            "char_spacing": s.char_spacing,
+                            "word_spacing": s.word_spacing,
+                        })
+                    })
+                    .collect();
+                let json = serde_json::json!({
+                    "path": input.to_string_lossy(),
+                    "page": page,
+                    "span_count": spans.len(),
+                    "spans": json_spans,
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("=== Extracted Text Spans (Page {}) ===", page);
+                println!("Found {} text spans:", spans.len());
+                for (i, span) in spans.iter().enumerate() {
+                    println!(
+                        "[{}] \"{}\" at ({:.1}, {:.1}) | Font: {} {:.1}pt | RGB: ({:.2}, {:.2}, {:.2})",
+                        i + 1, span.text, span.x, span.y, span.font_name, span.font_size, span.color.0, span.color.1, span.color.2
+                    );
+                }
+            }
+        }
+
+        Commands::EditText {
+            input,
+            output,
+            page,
+            find,
+            replace,
+            font,
+            font_size,
+            color,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let page_idx = page.saturating_sub(1);
+
+            let parsed_color = color.and_then(|c_str| {
+                let parts: Vec<&str> = c_str.split(',').collect();
+                if parts.len() == 3 {
+                    if let (Ok(r), Ok(g), Ok(b)) = (
+                        parts[0].trim().parse::<f32>(),
+                        parts[1].trim().parse::<f32>(),
+                        parts[2].trim().parse::<f32>(),
+                    ) {
+                        return Some((r, g, b));
+                    }
+                }
+                None
+            });
+
+            let count = replace_text_span_in_page(
+                &mut doc,
+                page_idx,
+                &find,
+                &replace,
+                font.as_deref(),
+                font_size,
+                parsed_color,
+            )?;
+
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "page": page,
+                    "find": find,
+                    "replace": replace,
+                    "font": font,
+                    "replacements_count": count,
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Replaced {} occurrence(s) of '{}' with '{}' on page {}.", count, find, replace, page);
+                println!("Saved updated document to: {}", output.display());
+            }
+        }
+
+        Commands::FromMarkdown {
+            input,
+            output,
+            title,
+            font_size,
+            margin,
+        } => {
+            let md_content = fs::read_to_string(&input)?;
+            let options = MarkdownPdfOptions {
+                page_size: ravpdf_core::document::paper_sizes::A4,
+                margin,
+                base_font_size: font_size,
+                line_spacing: font_size * 1.36,
+                title,
+                include_page_numbers: true,
+            };
+
+            let doc = create_pdf_from_markdown(&md_content, &options)?;
+            let count = doc.page_count();
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "page_count": count,
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Generated {} page(s) PDF document from Markdown: {}", count, output.display());
+            }
+        }
     }
 
     Ok(())

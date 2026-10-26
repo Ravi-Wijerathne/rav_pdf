@@ -29,14 +29,17 @@ use ravpdf_annot::{
 use ravpdf_core::document::{paper_sizes, PdfDocument};
 use ravpdf_core::outline::{add_bookmark, Bookmark};
 use ravpdf_edit::{
-    create_pdf_from_images, create_pdf_from_text, crop_page, delete_page, duplicate_page,
-    extract_pages, get_page_label, get_page_labels, insert_blank_page, insert_image_file,
-    merge_documents, reorder_pages, rotate_page, set_page_labels, split_document,
-    ImagePdfOptions, PageLabelRange, PageLabelStyle, TextPdfOptions,
+    create_pdf_from_images, create_pdf_from_markdown, create_pdf_from_text, crop_page,
+    delete_page, duplicate_page, extract_page_text_spans, extract_pages, get_page_label,
+    get_page_labels, insert_blank_page, insert_formatted_text_block, insert_image_file,
+    merge_documents, reorder_pages, replace_text_span_in_page, rotate_page, set_page_labels,
+    split_document, suggest_font_substitute, FormattedTextBlockOptions, ImagePdfOptions,
+    MarkdownPdfOptions, PageLabelRange, PageLabelStyle, TextAlignment, TextPdfOptions, TextSpan,
 };
 use ravpdf_crypto::{
-    create_signature_field, encrypt_document, get_document_signatures, DigitalId, Permissions,
-    SignatureStatus, sign_pdf_document,
+    create_signature_field, encrypt_document_with_algorithm, get_document_signatures,
+    sign_pdf_document_advanced, DigitalId, DocMdpPermission, EncryptionAlgorithm, Permissions,
+    SignatureStatus, SigningOptions,
 };
 use ravpdf_forms::{
     add_form_field, apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
@@ -196,6 +199,7 @@ struct RavPdfApp {
     encrypt_allow_print: bool,
     encrypt_allow_copy: bool,
     encrypt_allow_modify: bool,
+    encrypt_algorithm_idx: usize,
 
     // Optimization & Space Audit state (FR-25)
     show_optimize_dialog: bool,
@@ -268,6 +272,9 @@ struct RavPdfApp {
     sig_reason: String,
     sig_location: String,
     sig_is_visible: bool,
+    sig_is_certify: bool,
+    sig_cert_perm_idx: usize,
+    sig_embed_ltv: bool,
 
     // Page Labels state (FR-06.9)
     show_page_labels_dialog: bool,
@@ -423,6 +430,27 @@ struct RavPdfApp {
     standards_remove_enc: bool,
     standards_convert_cmyk: bool,
     standards_validation_report: Option<StandardValidationReport>,
+
+    // In-Place Text Editor dialog state (FR-04.1 - FR-04.5, FR-04.12)
+    show_text_editor_dialog: bool,
+    text_editor_spans: Vec<TextSpan>,
+    text_editor_selected_idx: Option<usize>,
+    text_editor_target_text: String,
+    text_editor_new_text: String,
+    text_editor_font_idx: usize,
+    text_editor_font_size: f64,
+    text_editor_block_mode: bool,
+    text_editor_align_idx: usize,
+    text_editor_underline: bool,
+    text_editor_strikethrough: bool,
+    text_editor_insert_text: String,
+
+    // Markdown Generation dialog state (FR-02.5, FR-02.6, FR-03.1.6)
+    show_markdown_dialog: bool,
+    markdown_input: String,
+    markdown_title: String,
+    markdown_font_size: f64,
+    markdown_margin: f64,
 }
 
 impl Default for RavPdfApp {
@@ -466,6 +494,9 @@ impl Default for RavPdfApp {
             sig_reason: "Document Approved".into(),
             sig_location: "Headquarters".into(),
             sig_is_visible: true,
+            sig_is_certify: false,
+            sig_cert_perm_idx: 0,
+            sig_embed_ltv: false,
 
             show_page_labels_dialog: false,
             page_labels_start_page: 1,
@@ -543,6 +574,7 @@ impl Default for RavPdfApp {
             encrypt_allow_print: true,
             encrypt_allow_copy: true,
             encrypt_allow_modify: false,
+            encrypt_algorithm_idx: 0,
 
             show_optimize_dialog: false,
             optimization_stats: None,
@@ -670,6 +702,25 @@ impl Default for RavPdfApp {
             standards_remove_enc: true,
             standards_convert_cmyk: false,
             standards_validation_report: None,
+
+            show_text_editor_dialog: false,
+            text_editor_spans: Vec::new(),
+            text_editor_selected_idx: None,
+            text_editor_target_text: String::new(),
+            text_editor_new_text: String::new(),
+            text_editor_font_idx: 0,
+            text_editor_font_size: 12.0,
+            text_editor_block_mode: false,
+            text_editor_align_idx: 0,
+            text_editor_underline: false,
+            text_editor_strikethrough: false,
+            text_editor_insert_text: String::new(),
+
+            show_markdown_dialog: false,
+            markdown_input: "# New Document\n\nEnter markdown content here...".to_string(),
+            markdown_title: "Document Title".to_string(),
+            markdown_font_size: 11.0,
+            markdown_margin: 54.0,
             plugin_registry: {
                 let mut reg = PluginRegistry::new();
                 let sample = Box::new(SampleWatermarkPlugin::new());
@@ -849,6 +900,26 @@ impl RavPdfApp {
                 }
                 Err(e) => {
                     self.status_message = format!("Failed to read text file: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Opens the in-place text editor dialog and extracts text spans from current page (FR-04.1 - FR-04.5, FR-04.12).
+    fn open_text_editor_dialog(&mut self) {
+        if let Some(tab) = self.active_tab() {
+            let curr = tab.current_page;
+            match extract_page_text_spans(&tab.doc, curr) {
+                Ok(spans) => {
+                    self.text_editor_spans = spans;
+                    self.text_editor_selected_idx = None;
+                    self.text_editor_target_text.clear();
+                    self.text_editor_new_text.clear();
+                    self.show_text_editor_dialog = true;
+                    self.status_message = format!("Extracted text spans from page {}", curr + 1);
+                }
+                Err(e) => {
+                    self.status_message = format!("Failed to extract page text: {}", e);
                 }
             }
         }
@@ -1240,6 +1311,10 @@ impl RavPdfApp {
                         self.create_pdf_from_text_dialog();
                         ui.close_menu();
                     }
+                    if ui.button("New PDF from Markdown... (FR-02.5, FR-02.6)").clicked() {
+                        self.show_markdown_dialog = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui.button("Open... (Ctrl+O)").clicked() {
                         self.open_file_dialog();
@@ -1363,7 +1438,13 @@ impl RavPdfApp {
                         self.search_replace_mode = true;
                         ui.close_menu();
                     }
-                    ui.separator();
+                    if ui
+                        .add_enabled(has_doc, Button::new("In-Place Text Editor... (FR-04.1 - FR-04.5)"))
+                        .clicked()
+                    {
+                        self.open_text_editor_dialog();
+                        ui.close_menu();
+                    }
                     if ui
                         .add_enabled(has_doc, Button::new("Insert Image File... (FR-05.1)"))
                         .clicked()
@@ -2706,6 +2787,14 @@ impl RavPdfApp {
                                             SignatureStatus::Indeterminate(msg) => {
                                                 ui.label(RichText::new(format!("Status: Unverified ({})", msg)).color(Color32::from_rgb(241, 196, 15)).size(11.0));
                                             }
+                                        }
+
+                                        if sig.is_certification {
+                                            let perm_desc = sig.doc_mdp_permission.map(|p| p.description()).unwrap_or("P=1: No changes allowed");
+                                            ui.label(RichText::new(format!("🔒 Certified Author Signature ({})", perm_desc)).color(Color32::from_rgb(52, 152, 219)).size(11.0));
+                                        }
+                                        if sig.has_ltv {
+                                            ui.label(RichText::new("🛡️ Long-Term Validation (LTV) Enabled (/DSS embedded)").color(Color32::from_rgb(39, 174, 96)).size(11.0));
                                         }
 
                                         if let Some(p_idx) = sig.page_index {
@@ -4319,8 +4408,22 @@ impl RavPdfApp {
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label("Encrypts the document using standard AES-128 security handler.");
+                    ui.label("Encrypts the document using standard security handler (ISO 32000-1 / ISO 32000-2).");
                     ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Algorithm:");
+                        egui::ComboBox::from_id_salt("enc_algo_select")
+                            .selected_text(match self.encrypt_algorithm_idx {
+                                0 => "AES-256 (PDF 2.0 / Revision 6 Standard)",
+                                _ => "AES-128 (PDF 1.6+ / Revision 4)",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.encrypt_algorithm_idx, 0, "AES-256 (PDF 2.0 / Revision 6 Standard)");
+                                ui.selectable_value(&mut self.encrypt_algorithm_idx, 1, "AES-128 (PDF 1.6+ / Revision 4)");
+                            });
+                    });
+                    ui.add_space(6.0);
 
                     egui::Grid::new("enc_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                         ui.label("User Password (to open):");
@@ -4358,12 +4461,17 @@ impl RavPdfApp {
                                     }
                                     let perms = Permissions::new(flags);
                                     let mut enc_doc = tab.doc.clone();
-                                    match encrypt_document(&mut enc_doc, &self.encrypt_user_pass, &self.encrypt_owner_pass, perms) {
+                                    let algo = if self.encrypt_algorithm_idx == 0 {
+                                        EncryptionAlgorithm::Aes256
+                                    } else {
+                                        EncryptionAlgorithm::Aes128
+                                    };
+                                    match encrypt_document_with_algorithm(&mut enc_doc, &self.encrypt_user_pass, &self.encrypt_owner_pass, perms, algo) {
                                         Ok(()) => {
                                             if let Err(e) = enc_doc.save_to_file(&path) {
                                                 self.status_message = format!("Save error: {}", e);
                                             } else {
-                                                self.status_message = format!("Encrypted PDF saved to '{}'", path.display());
+                                                self.status_message = format!("Encrypted PDF ({}) saved to '{}'", algo.display_name(), path.display());
                                                 close = true;
                                             }
                                         }
@@ -5014,6 +5122,25 @@ impl RavPdfApp {
                             ui.text_edit_singleline(&mut self.sig_location);
                         });
                         ui.checkbox(&mut self.sig_is_visible, "Render Visible Signature Appearance (FR-13.10)");
+                        ui.add_space(4.0);
+                        ui.checkbox(&mut self.sig_is_certify, "Author Certification Signature (DocMDP - FR-13.3)");
+                        if self.sig_is_certify {
+                            ui.horizontal(|ui| {
+                                ui.label("Permitted Actions:");
+                                egui::ComboBox::from_id_salt("sig_cert_perm")
+                                    .selected_text(match self.sig_cert_perm_idx {
+                                        0 => "No changes allowed (P=1)",
+                                        1 => "Form filling and signing only (P=2)",
+                                        _ => "Annotations, form filling, and signing allowed (P=3)",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.sig_cert_perm_idx, 0, "No changes allowed (P=1)");
+                                        ui.selectable_value(&mut self.sig_cert_perm_idx, 1, "Form filling and signing only (P=2)");
+                                        ui.selectable_value(&mut self.sig_cert_perm_idx, 2, "Annotations, form filling, and signing allowed (P=3)");
+                                    });
+                            });
+                        }
+                        ui.checkbox(&mut self.sig_embed_ltv, "Embed Document Security Store (/DSS) for Long-Term Validation (LTV) (FR-13.8)");
                     } else {
                         ui.label(RichText::new("Place an interactive form signature field to be signed later:").italics());
                         ui.horizontal(|ui| {
@@ -5062,6 +5189,9 @@ impl RavPdfApp {
                 let reason = self.sig_reason.clone();
                 let location = self.sig_location.clone();
                 let is_visible = self.sig_is_visible;
+                let is_certify = self.sig_is_certify;
+                let cert_perm_idx = self.sig_cert_perm_idx;
+                let embed_ltv = self.sig_embed_ltv;
                 let mut status = None;
 
                 if let Some(tab) = self.active_tab_mut() {
@@ -5075,7 +5205,22 @@ impl RavPdfApp {
                     if mode == 0 {
                         match DigitalId::generate(&signer, &org, &email, 365) {
                             Ok(digital_id) => {
-                                match sign_pdf_document(tab.doc.clone(), curr, &field_name, &digital_id, &reason, &location, rect) {
+                                let doc_mdp_perm = match cert_perm_idx {
+                                    1 => DocMdpPermission::FormFilling,
+                                    2 => DocMdpPermission::AnnotationsAndFormFilling,
+                                    _ => DocMdpPermission::NoChanges,
+                                };
+                                let opts = SigningOptions {
+                                    field_name: field_name.clone(),
+                                    reason: reason.clone(),
+                                    location: location.clone(),
+                                    contact_info: Some(email.clone()),
+                                    rect,
+                                    is_certification: is_certify,
+                                    certification_permission: if is_certify { Some(doc_mdp_perm) } else { None },
+                                    embed_ltv,
+                                };
+                                match sign_pdf_document_advanced(tab.doc.clone(), curr, &digital_id, &opts) {
                                     Ok(signed_bytes) => {
                                         match PdfDocument::load_from_bytes(&signed_bytes) {
                                             Ok(new_doc) => {
@@ -5083,8 +5228,14 @@ impl RavPdfApp {
                                                 tab.raw_file_bytes = Some(signed_bytes);
                                                 tab.is_modified = true;
                                                 tab.invalidate_render();
+                                                let cert_msg = if is_certify {
+                                                    format!(" [Certified: {}]", doc_mdp_perm.description())
+                                                } else {
+                                                    String::new()
+                                                };
+                                                let ltv_msg = if embed_ltv { " [LTV Enabled]" } else { "" };
                                                 status = Some((
-                                                    format!("Document digitally signed and verified by '{}' (ISO 32000-1 Clause 12.8)", signer),
+                                                    format!("Document digitally signed by '{}'{}{} (ISO 32000-1 Clause 12.8)", signer, cert_msg, ltv_msg),
                                                     true,
                                                 ));
                                             }
@@ -8169,6 +8320,348 @@ impl RavPdfApp {
 
             if close {
                 self.show_standards_dialog = false;
+            }
+        }
+
+        // In-Place Text Editor Dialog (FR-04.1 - FR-04.5, FR-04.12)
+        if self.show_text_editor_dialog {
+            let mut close = false;
+            let mut apply_replace = false;
+            let mut apply_insert = false;
+            let mut refresh_spans = false;
+
+            egui::Window::new("In-Place Text Editor (FR-04.1 - FR-04.5, FR-04.12)")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(540.0)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("Directly inspect, edit in-place, replace typography, or reflow paragraphs:").italics());
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.text_editor_block_mode, false, "✏️ In-Place Text Replace (FR-04.1)");
+                        ui.selectable_value(&mut self.text_editor_block_mode, true, "📐 Formatted Paragraph Reflow (FR-04.2, FR-04.4)");
+                        if ui.button("🔄 Refresh Spans").clicked() {
+                            refresh_spans = true;
+                        }
+                    });
+
+                    ui.separator();
+
+                    if !self.text_editor_block_mode {
+                        ui.label(RichText::new("Extracted Text Spans on Current Page:").strong());
+                        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                            if self.text_editor_spans.is_empty() {
+                                ui.label(RichText::new("(No text spans detected in content stream)").weak());
+                            } else {
+                                for (idx, span) in self.text_editor_spans.iter().enumerate() {
+                                    let is_selected = self.text_editor_selected_idx == Some(idx);
+                                    let row_text = format!("\"{}\" • {} ({:.1}pt) at ({:.0}, {:.0})", span.text, span.font_name, span.font_size, span.x, span.y);
+                                    if ui.selectable_label(is_selected, row_text).clicked() {
+                                        self.text_editor_selected_idx = Some(idx);
+                                        self.text_editor_target_text = span.text.clone();
+                                        self.text_editor_new_text = span.text.clone();
+                                        self.text_editor_font_size = span.font_size;
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Find Text:");
+                            ui.text_edit_singleline(&mut self.text_editor_target_text);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Replace Text:");
+                            ui.text_edit_singleline(&mut self.text_editor_new_text);
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Font Replacement:");
+                            egui::ComboBox::from_id_salt("text_editor_font_combo")
+                                .selected_text(match self.text_editor_font_idx {
+                                    1 => "Helvetica-Bold",
+                                    2 => "Helvetica-Oblique",
+                                    3 => "Times-Roman",
+                                    4 => "Times-Bold",
+                                    5 => "Courier",
+                                    6 => "Courier-Bold",
+                                    _ => "Keep Original / Helvetica",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.text_editor_font_idx, 0, "Keep Original / Helvetica");
+                                    ui.selectable_value(&mut self.text_editor_font_idx, 1, "Helvetica-Bold");
+                                    ui.selectable_value(&mut self.text_editor_font_idx, 2, "Helvetica-Oblique");
+                                    ui.selectable_value(&mut self.text_editor_font_idx, 3, "Times-Roman");
+                                    ui.selectable_value(&mut self.text_editor_font_idx, 4, "Times-Bold");
+                                    ui.selectable_value(&mut self.text_editor_font_idx, 5, "Courier");
+                                    ui.selectable_value(&mut self.text_editor_font_idx, 6, "Courier-Bold");
+                                });
+                            ui.label("Size:");
+                            ui.add(egui::DragValue::new(&mut self.text_editor_font_size).range(6.0..=72.0).speed(0.5));
+                        });
+
+                        let target_f_name = match self.text_editor_font_idx {
+                            1 => "Helvetica-Bold",
+                            2 => "Helvetica-Oblique",
+                            3 => "Times-Roman",
+                            4 => "Times-Bold",
+                            5 => "Courier",
+                            6 => "Courier-Bold",
+                            _ => "Helvetica",
+                        };
+                        let sub_info = suggest_font_substitute(target_f_name);
+                        ui.label(RichText::new(format!("Font mapping: {} ({})", sub_info.substitute_font, sub_info.note)).weak());
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("✓ Apply In-Place Replacement").clicked() {
+                                apply_replace = true;
+                                close = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    } else {
+                        ui.label(RichText::new("Insert or reflow a formatted paragraph with alignment and decorations:").italics());
+                        ui.add_space(4.0);
+                        ui.label("Paragraph Text:");
+                        ui.text_edit_multiline(&mut self.text_editor_insert_text);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Alignment:");
+                            egui::ComboBox::from_id_salt("text_editor_align_combo")
+                                .selected_text(match self.text_editor_align_idx {
+                                    1 => "Center",
+                                    2 => "Right",
+                                    3 => "Justify",
+                                    _ => "Left",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.text_editor_align_idx, 0, "Left");
+                                    ui.selectable_value(&mut self.text_editor_align_idx, 1, "Center");
+                                    ui.selectable_value(&mut self.text_editor_align_idx, 2, "Right");
+                                    ui.selectable_value(&mut self.text_editor_align_idx, 3, "Justify");
+                                });
+
+                            ui.checkbox(&mut self.text_editor_underline, "Underline");
+                            ui.checkbox(&mut self.text_editor_strikethrough, "Strikethrough");
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Font Size:");
+                            ui.add(egui::DragValue::new(&mut self.text_editor_font_size).range(8.0..=48.0));
+                        });
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("✓ Insert Formatted Paragraph").clicked() {
+                                apply_insert = true;
+                                close = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    }
+                });
+
+            if refresh_spans {
+                if let Some(tab) = self.active_tab() {
+                    let curr = tab.current_page;
+                    if let Ok(spans) = extract_page_text_spans(&tab.doc, curr) {
+                        self.text_editor_spans = spans;
+                    }
+                }
+            }
+
+            if apply_replace {
+                let target = self.text_editor_target_text.clone();
+                let replacement = self.text_editor_new_text.clone();
+                let font_name = match self.text_editor_font_idx {
+                    1 => Some("Helvetica-Bold"),
+                    2 => Some("Helvetica-Oblique"),
+                    3 => Some("Times-Roman"),
+                    4 => Some("Times-Bold"),
+                    5 => Some("Courier"),
+                    6 => Some("Courier-Bold"),
+                    _ => None,
+                };
+                let font_sz = Some(self.text_editor_font_size);
+
+                let mut replace_res = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    match replace_text_span_in_page(&mut tab.doc, curr, &target, &replacement, font_name, font_sz, None) {
+                        Ok(count) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            replace_res = Some(Ok((count, curr + 1)));
+                        }
+                        Err(e) => {
+                            replace_res = Some(Err(e.to_string()));
+                        }
+                    }
+                }
+                if let Some(res) = replace_res {
+                    match res {
+                        Ok((count, page_num)) => {
+                            self.status_message = format!("Replaced {} text occurrence(s) in-place on page {}", count, page_num);
+                        }
+                        Err(err) => {
+                            self.status_message = format!("Text replacement error: {}", err);
+                        }
+                    }
+                }
+            }
+
+            if apply_insert {
+                let text_to_insert = self.text_editor_insert_text.clone();
+                let font_name = match self.text_editor_font_idx {
+                    1 => "Helvetica-Bold",
+                    2 => "Helvetica-Oblique",
+                    3 => "Times-Roman",
+                    4 => "Times-Bold",
+                    5 => "Courier",
+                    6 => "Courier-Bold",
+                    _ => "Helvetica",
+                };
+                let alignment = match self.text_editor_align_idx {
+                    1 => TextAlignment::Center,
+                    2 => TextAlignment::Right,
+                    3 => TextAlignment::Justify,
+                    _ => TextAlignment::Left,
+                };
+
+                let opts = FormattedTextBlockOptions {
+                    rect: [72.0, 300.0, 468.0, 150.0],
+                    font_family: font_name.to_string(),
+                    font_size: self.text_editor_font_size,
+                    alignment,
+                    line_spacing: self.text_editor_font_size * 1.35,
+                    char_spacing: 0.0,
+                    color: (0.1, 0.1, 0.1),
+                    underline: self.text_editor_underline,
+                    strikethrough: self.text_editor_strikethrough,
+                };
+
+                let mut insert_res = None;
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    match insert_formatted_text_block(&mut tab.doc, curr, &text_to_insert, &opts) {
+                        Ok(_) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            insert_res = Some(Ok(curr + 1));
+                        }
+                        Err(e) => {
+                            insert_res = Some(Err(e.to_string()));
+                        }
+                    }
+                }
+                if let Some(res) = insert_res {
+                    match res {
+                        Ok(page_num) => {
+                            self.status_message = format!("Inserted formatted text block on page {}", page_num);
+                        }
+                        Err(err) => {
+                            self.status_message = format!("Insert text block error: {}", err);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_text_editor_dialog = false;
+            }
+        }
+
+        // Markdown Document Generation Dialog (FR-02.5, FR-02.6, FR-03.1.6)
+        if self.show_markdown_dialog {
+            let mut close = false;
+            let mut create_doc = false;
+
+            egui::Window::new("Create PDF from Markdown (FR-02.5, FR-02.6, FR-03.1.6)")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(560.0)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("Generate publication-quality multi-page PDF documents from Markdown:").italics());
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Document Title (Header):");
+                        ui.text_edit_singleline(&mut self.markdown_title);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Base Font Size:");
+                        ui.add(egui::DragValue::new(&mut self.markdown_font_size).range(9.0..=18.0));
+                        ui.label("Page Margins:");
+                        ui.add(egui::DragValue::new(&mut self.markdown_margin).range(18.0..=108.0));
+                    });
+
+                    ui.add_space(4.0);
+                    ui.label("Markdown Content (# Headings, - Lists, > Quotes, ``` Code):");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.markdown_input)
+                            .desired_rows(12)
+                            .desired_width(f32::INFINITY)
+                    );
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("📄 Generate & Open PDF").clicked() {
+                            create_doc = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if create_doc {
+                let md = self.markdown_input.clone();
+                let title = if self.markdown_title.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.markdown_title.trim().to_string())
+                };
+
+                let opts = MarkdownPdfOptions {
+                    page_size: paper_sizes::A4,
+                    margin: self.markdown_margin,
+                    base_font_size: self.markdown_font_size,
+                    line_spacing: self.markdown_font_size * 1.35,
+                    title,
+                    include_page_numbers: true,
+                };
+
+                match create_pdf_from_markdown(&md, &opts) {
+                    Ok(new_doc) => {
+                        let page_cnt = new_doc.page_count();
+                        let id = self.next_tab_id;
+                        self.next_tab_id += 1;
+                        let title = format!("Markdown-Doc-{}.pdf", id);
+                        let mut tab = DocumentTab::new(id, title, new_doc, None);
+                        tab.is_modified = true;
+                        self.tabs.push(tab);
+                        self.active_tab_idx = Some(self.tabs.len() - 1);
+                        self.status_message = format!("Generated new {} page(s) PDF document from Markdown", page_cnt);
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Markdown PDF generation failed: {}", e);
+                    }
+                }
+            }
+
+            if close {
+                self.show_markdown_dialog = false;
             }
         }
     }
