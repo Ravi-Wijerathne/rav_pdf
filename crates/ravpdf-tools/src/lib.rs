@@ -59,7 +59,7 @@ pub use comments::{
     compare_reviewer_comments, export_comments_to_csv, get_document_comments,
     merge_reviewer_annotations, AnnotationDiff, ReviewComment,
 };
-pub use compare::{compare_documents, ComparisonReport, PageDiff};
+pub use compare::{compare_documents, generate_comparison_pdf_report, ComparisonReport, PageDiff};
 pub use export::{
     export_page_to_image, export_to_html, export_to_plain_text, ExportImageFormat,
 };

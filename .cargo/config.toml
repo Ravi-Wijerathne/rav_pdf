@@ -1,0 +1,4 @@
+# Windows default stack is 1MB, which is easily exhausted by large Clap macro trees in debug mode.
+# Configure 8MB stack (matching Linux/macOS defaults).
+[target.'cfg(target_os = "windows")']
+rustflags = ["-C", "link-arg=/STACK:8388608"]

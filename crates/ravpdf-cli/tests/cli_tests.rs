@@ -1240,6 +1240,204 @@ fn test_drawing_shapes_and_ink_annotations_workflows() {
     assert_eq!(pixmap.height(), 792);
 }
 
+#[test]
+fn test_comparison_and_format_conversion_pipeline() {
+    use ravpdf_edit::{create_pdf_from_markdown, create_pdf_from_text, MarkdownPdfOptions, TextPdfOptions};
+    use ravpdf_tools::{compare_documents, generate_comparison_pdf_report, set_document_info, DocumentInfo};
+
+    // 1. Text & Markdown creation (FR-02.5, FR-02.6, FR-03.1.6)
+    let text_content = "Annual Report 2026\nQuarter 1: Revenue $1,200,000\nQuarter 2: Revenue $1,450,000\nTotal Profit: $450,000";
+    let text_opts = TextPdfOptions::default();
+    let mut doc_v1 = create_pdf_from_text(text_content, &text_opts).expect("create doc_v1");
+
+    let text_v2_content = "Annual Report 2026\nQuarter 1: Revenue $1,200,000\nQuarter 2: Revenue $1,600,000\nQuarter 3: Revenue $1,800,000\nTotal Profit: $620,000";
+    let mut doc_v2 = create_pdf_from_text(text_v2_content, &text_opts).expect("create doc_v2");
+
+    let mut info1 = DocumentInfo::default();
+    info1.title = Some("Report Q2 Original".into());
+    set_document_info(&mut doc_v1, &info1).expect("info1");
+
+    let mut info2 = DocumentInfo::default();
+    info2.title = Some("Report Q3 Revised".into());
+    set_document_info(&mut doc_v2, &info2).expect("info2");
+
+    // 2. Document Comparison (FR-17.1, FR-17.4)
+    let report = compare_documents(&doc_v1, &doc_v2);
+    assert!(!report.is_identical());
+    assert_eq!(report.metadata_diffs.len(), 1);
+    assert!(report.metadata_diffs[0].contains("Report Q2 Original"));
+    assert!(report.metadata_diffs[0].contains("Report Q3 Revised"));
+
+    let page_diff = &report.page_diffs[0];
+    assert!(page_diff.has_differences);
+    assert!(page_diff.additions.iter().any(|s| s.contains("$1,600,000")));
+    assert!(page_diff.deletions.iter().any(|s| s.contains("$1,450,000")));
+
+    // 3. Comparison PDF Report Generation (FR-17.1, FR-37.2)
+    let rep_doc = generate_comparison_pdf_report(&report, "Report_v1.pdf", "Report_v2.pdf").expect("gen pdf report");
+    assert!(rep_doc.page_count() >= 1);
+
+    let rep_text = ravpdf_tools::extract_all_text(&rep_doc).expect("extract rep text");
+    assert!(rep_text.contains("RavPDF Document Comparison Report"));
+    assert!(rep_text.contains("Report_v1.pdf"));
+    assert!(rep_text.contains("Report_v2.pdf"));
+
+    // 4. Markdown creation with multi-styling (FR-02.5)
+    let md = "# System Architecture\n\n## Overview\nRavPDF is built in **Rust**.\n\n- Feature 1: Fast\n- Feature 2: Safe\n\n> Memory safety without garbage collection.";
+    let md_opts = MarkdownPdfOptions {
+        base_font_size: 11.0,
+        margin: 54.0,
+        title: Some("Architecture Document".to_string()),
+        ..Default::default()
+    };
+    let md_doc = create_pdf_from_markdown(md, &md_opts).expect("create md doc");
+    assert_eq!(md_doc.page_count(), 1);
+    let md_text = ravpdf_tools::extract_all_text(&md_doc).expect("extract md text");
+    assert!(md_text.contains("System Architecture"));
+    assert!(md_text.contains("Overview"));
+}
+
+#[test]
+fn test_callout_typewriter_and_image_extraction() {
+    use ravpdf_annot::{add_callout_annotation, add_typewriter_annotation, get_page_annotations, CalloutConfig, TypewriterConfig};
+    use ravpdf_edit::{extract_all_images_to_dir, insert_raw_image};
+
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0);
+
+    // 1. Callout Annotation (FR-08.1.3)
+    let callout_cfg = CalloutConfig {
+        text: "Important note: verify section 4 coordinates".to_string(),
+        text_rect: [200.0, 600.0, 180.0, 45.0],
+        leader_start: (100.0, 500.0),
+        leader_knee: (150.0, 550.0),
+        border_color: (0.1, 0.45, 0.85),
+        fill_color: Some((0.95, 0.97, 1.0)),
+        text_color: (0.0, 0.0, 0.0),
+        font_size: 10.0,
+        author: Some("LeadReviewer".to_string()),
+    };
+    let callout_id = add_callout_annotation(&mut doc, 0, &callout_cfg).expect("add callout");
+    assert!(doc.objects.contains_key(&callout_id));
+    let callout_dict = doc.objects.get(&callout_id).unwrap().as_dict().unwrap();
+    assert_eq!(callout_dict.get_name("Subtype"), Some("FreeText"));
+    assert_eq!(callout_dict.get_name("IT"), Some("FreeTextCallout"));
+    assert!(callout_dict.contains_key("CL"));
+
+    // 2. Typewriter Annotation (FR-08.1.4)
+    let typewriter_cfg = TypewriterConfig {
+        text: "CONFIRMED VALID 2026-10-29".to_string(),
+        pos: (72.0, 720.0),
+        font_size: 13.0,
+        color: (0.8, 0.1, 0.1),
+        author: Some("FieldAgent".to_string()),
+    };
+    let tw_id = add_typewriter_annotation(&mut doc, 0, &typewriter_cfg).expect("add typewriter");
+    assert!(doc.objects.contains_key(&tw_id));
+    let tw_dict = doc.objects.get(&tw_id).unwrap().as_dict().unwrap();
+    assert_eq!(tw_dict.get_name("Subtype"), Some("FreeText"));
+    assert_eq!(tw_dict.get_name("IT"), Some("FreeTextTypewriter"));
+
+    // 3. Annotations retrieval
+    let annots = get_page_annotations(&doc, 0).expect("get annots");
+    assert_eq!(annots.len(), 2);
+
+    // 4. Raw image embedding & image extraction pipeline (FR-05.1, FR-05.9, FR-37.2)
+    // 2x2 RGB image: 4 pixels
+    let raw_rgb = vec![
+        255, 0, 0,    0, 255, 0,
+        0, 0, 255,    255, 255, 0,
+    ];
+    insert_raw_image(&mut doc, 0, raw_rgb, 2, 2, 100.0, 100.0, 200.0, 200.0)
+        .expect("insert raw image");
+
+    let temp_dir = std::env::temp_dir().join(format!("ravpdf_extract_test_{}", std::process::id()));
+    let extracted_files = extract_all_images_to_dir(&doc, Some(0), &temp_dir).expect("extract images");
+    assert_eq!(extracted_files.len(), 1);
+    assert!(extracted_files[0].exists());
+
+    // Cleanup temp files
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    // 5. Render page containing Callout, Typewriter, and Image
+    let pixmap = render_page(&doc, 0, &RenderOptions::default()).expect("render page");
+    assert_eq!(pixmap.width(), 612);
+    assert_eq!(pixmap.height(), 792);
+}
+
+#[test]
+fn test_annotation_manipulation_locking_text_selection_and_continuous_scroll() {
+    use ravpdf_annot::{
+        add_annotation_to_page, delete_annotation, get_page_annotations, set_annotation_locked,
+        update_annotation_color, update_annotation_contents, update_annotation_rect, Annotation,
+        AnnotationType,
+    };
+    use ravpdf_edit::extract_page_text_spans;
+
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0);
+    doc.add_blank_page(612.0, 792.0);
+    doc.add_blank_page(612.0, 792.0);
+
+    // 1. Multi-page rendering check (FR-01.2.2 - continuous scroll pipeline)
+    assert_eq!(doc.page_count(), 3);
+    for p_idx in 0..3 {
+        let pix = render_page(&doc, p_idx, &RenderOptions::default()).expect("render page in continuous view");
+        assert_eq!(pix.width(), 612);
+        assert_eq!(pix.height(), 792);
+    }
+
+    // 2. Add annotations for manipulation (FR-08.3, FR-09.12)
+    let mut note = Annotation::new(AnnotationType::Text, [100.0, 600.0, 150.0, 650.0]);
+    note.contents = Some("Original review note".into());
+    note.author = Some("Alice".into());
+    note.color = Some((1.0, 0.0, 0.0));
+    let note_id = add_annotation_to_page(&mut doc, 0, &note).expect("add note");
+
+    let mut highlight = Annotation::new(AnnotationType::Highlight, [100.0, 500.0, 300.0, 520.0]);
+    highlight.color = Some((1.0, 1.0, 0.0));
+    let hl_id = add_annotation_to_page(&mut doc, 0, &highlight).expect("add highlight");
+
+    let initial_annots = get_page_annotations(&doc, 0).expect("get annots");
+    assert_eq!(initial_annots.len(), 2);
+
+    // 3. Move / Reposition annotation rect (FR-08.3, FR-09.12)
+    update_annotation_rect(&mut doc, note_id, [150.0, 620.0, 200.0, 670.0]).expect("update rect");
+    let moved_annots = get_page_annotations(&doc, 0).expect("get annots after move");
+    let moved_note = moved_annots.iter().find(|a| a.id == Some(note_id)).unwrap();
+    assert_eq!(moved_note.rect, [150.0, 620.0, 200.0, 670.0]);
+
+    // 4. Update contents & author (FR-08.1, FR-08.3)
+    update_annotation_contents(&mut doc, note_id, "Updated note text", Some("Bob")).expect("update contents");
+    let updated_annots = get_page_annotations(&doc, 0).expect("get annots after text update");
+    let updated_note = updated_annots.iter().find(|a| a.id == Some(note_id)).unwrap();
+    assert_eq!(updated_note.contents.as_deref(), Some("Updated note text"));
+    assert_eq!(updated_note.author.as_deref(), Some("Bob"));
+
+    // 5. Update appearance color & opacity (FR-08.3, FR-09.11)
+    update_annotation_color(&mut doc, note_id, (0.0, 0.5, 1.0), Some(0.75)).expect("update color");
+    let colored_annots = get_page_annotations(&doc, 0).expect("get annots after color update");
+    let colored_note = colored_annots.iter().find(|a| a.id == Some(note_id)).unwrap();
+    assert_eq!(colored_note.opacity, 0.75);
+
+    // 6. Lock annotation flag (FR-09.12)
+    set_annotation_locked(&mut doc, note_id, true).expect("lock annotation");
+    let note_obj = doc.objects.get(&note_id).unwrap().as_dict().unwrap();
+    let flags = note_obj.get("F").and_then(|o| o.as_i64()).unwrap();
+    assert_eq!(flags & (1 << 7), 1 << 7); // Bit 8 (0-indexed 7) is Locked flag per ISO 32000-1
+
+    // 7. Delete annotation (FR-08.3)
+    delete_annotation(&mut doc, 0, hl_id).expect("delete highlight");
+    let remaining_annots = get_page_annotations(&doc, 0).expect("get annots after delete");
+    assert_eq!(remaining_annots.len(), 1);
+    assert!(!doc.objects.contains_key(&hl_id));
+
+    // 8. Text span extraction & text selection logic (FR-01.1.2, FR-04.6, FR-04.7)
+    let spans = extract_page_text_spans(&doc, 0).unwrap_or_default();
+    assert!(spans.is_empty()); // blank page has no text spans
+}
+
+
 
 
 

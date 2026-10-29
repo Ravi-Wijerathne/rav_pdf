@@ -31,6 +31,7 @@ pub struct DocumentTab {
     pub bookmarks: Vec<Bookmark>,
     pub page_texture: Option<egui::TextureHandle>,
     pub thumbnail_textures: std::collections::HashMap<usize, egui::TextureHandle>,
+    pub continuous_page_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     pub cached_page_index: Option<usize>,
     pub cached_zoom: Option<f32>,
     pub cached_rotation: Option<i64>,
@@ -59,6 +60,7 @@ impl DocumentTab {
             bookmarks,
             page_texture: None,
             thumbnail_textures: std::collections::HashMap::new(),
+            continuous_page_textures: std::collections::HashMap::new(),
             cached_page_index: None,
             cached_zoom: None,
             cached_rotation: None,
@@ -72,6 +74,52 @@ impl DocumentTab {
     pub fn invalidate_render(&mut self) {
         self.page_texture = None;
         self.thumbnail_textures.clear();
+        self.continuous_page_textures.clear();
+    }
+
+    /// Retrieves an existing page texture or rasterizes it on demand for continuous scrolling (FR-01.2.2).
+    pub fn get_or_render_continuous_page(
+        &mut self,
+        ctx: &egui::Context,
+        page_idx: usize,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(tex) = self.continuous_page_textures.get(&page_idx) {
+            return Some(tex.clone());
+        }
+        if page_idx >= self.doc.page_count() {
+            return None;
+        }
+
+        let options = RenderOptions {
+            zoom: self.zoom,
+            rotation: self.rotation,
+            background_color: Color::WHITE,
+        };
+
+        if let Ok(pixmap) = render_page(&self.doc, page_idx, &options) {
+            let width = pixmap.width() as usize;
+            let height = pixmap.height() as usize;
+            let pixels: Vec<Color32> = pixmap
+                .data()
+                .chunks_exact(4)
+                .map(|rgba| Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]))
+                .collect();
+
+            let color_image = egui::ColorImage {
+                size: [width, height],
+                pixels,
+            };
+
+            let tex = ctx.load_texture(
+                format!("cont_tab_{}_{}_z{:.2}_r{}", self.id, page_idx, self.zoom, self.rotation),
+                color_image,
+                TextureOptions::LINEAR,
+            );
+            self.continuous_page_textures.insert(page_idx, tex.clone());
+            Some(tex)
+        } else {
+            None
+        }
     }
 
     /// Retrieves an existing thumbnail texture or rasterizes it on demand (FR-01.2.3).
