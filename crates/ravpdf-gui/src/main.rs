@@ -24,10 +24,11 @@ use eframe::egui::{
     Stroke, Vec2,
 };
 use ravpdf_annot::{
-    add_annotation_to_page, add_ink_annotation, add_shape_annotation, add_stamp_annotation,
-    erase_ink_strokes, get_page_annotations, Annotation, AnnotationType, BorderEffect,
-    BorderStyle, InkAnnotationConfig, LineEndingStyle, LinkAction, ShapeAnnotationConfig,
-    ShapeType, StampConfig, StandardStamp,
+    add_annotation_to_page, add_callout_annotation, add_ink_annotation, add_shape_annotation,
+    add_stamp_annotation, add_typewriter_annotation, erase_ink_strokes, get_page_annotations,
+    Annotation, AnnotationType, BorderEffect, BorderStyle, CalloutConfig, InkAnnotationConfig,
+    LineEndingStyle, LinkAction, ShapeAnnotationConfig, ShapeType, StampConfig, StandardStamp,
+    TypewriterConfig,
 };
 use ravpdf_core::document::{paper_sizes, PdfDocument};
 use ravpdf_core::outline::{add_bookmark, Bookmark};
@@ -141,8 +142,16 @@ enum ActiveTool {
     Hand,
     StickyNote,
     Highlight,
+    Underline,
+    StrikeOut,
     Rectangle,
+    Circle,
+    Line,
+    Pencil,
+    Eraser,
     Text,
+    Typewriter,
+    Callout,
     Link,
     Redact,
     MeasureDistance,
@@ -523,6 +532,30 @@ struct RavPdfApp {
     drawing_eraser_x: f64,
     drawing_eraser_y: f64,
     drawing_eraser_radius: f64,
+
+    // Active freehand pencil drawing on canvas (FR-09.1)
+    active_pencil_points: Vec<Pos2>,
+
+    // Callout text annotation modal state (FR-08.1.3)
+    show_callout_dialog: bool,
+    callout_text_input: String,
+    callout_box_x: f64,
+    callout_box_y: f64,
+    callout_box_w: f64,
+    callout_box_h: f64,
+    callout_leader_x: f64,
+    callout_leader_y: f64,
+    callout_knee_x: f64,
+    callout_knee_y: f64,
+    callout_border_color: [f32; 3],
+
+    // Typewriter annotation modal state (FR-08.1.4)
+    show_typewriter_dialog: bool,
+    typewriter_text_input: String,
+    typewriter_pos_x: f64,
+    typewriter_pos_y: f64,
+    typewriter_font_size: f64,
+    typewriter_color: [f32; 3],
 }
 
 impl Default for RavPdfApp {
@@ -856,6 +889,28 @@ impl Default for RavPdfApp {
             drawing_eraser_x: 150.0,
             drawing_eraser_y: 130.0,
             drawing_eraser_radius: 20.0,
+
+            active_pencil_points: Vec::new(),
+
+            show_callout_dialog: false,
+            callout_text_input: "Note: Check area details".to_string(),
+            callout_box_x: 200.0,
+            callout_box_y: 600.0,
+            callout_box_w: 160.0,
+            callout_box_h: 40.0,
+            callout_leader_x: 120.0,
+            callout_leader_y: 520.0,
+            callout_knee_x: 160.0,
+            callout_knee_y: 560.0,
+            callout_border_color: [0.1, 0.45, 0.85],
+
+            show_typewriter_dialog: false,
+            typewriter_text_input: "Sample Typewriter Text".to_string(),
+            typewriter_pos_x: 72.0,
+            typewriter_pos_y: 700.0,
+            typewriter_font_size: 12.0,
+            typewriter_color: [0.0, 0.0, 0.0],
+
             plugin_registry: {
                 let mut reg = PluginRegistry::new();
                 let sample = Box::new(SampleWatermarkPlugin::new());
@@ -2225,16 +2280,28 @@ impl RavPdfApp {
 
                 ui.separator();
 
-                // Tool Selector Buttons (FR-08, FR-09, FR-20)
+                // Tool Selector Buttons (FR-08, FR-09, FR-20, FR-26)
                 ui.add_enabled_ui(has_doc, |ui| {
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Select, "Select");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Hand, "Pan");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::StickyNote, "Note");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Highlight, "Highlight");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Rectangle, "Shape");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Text, "Text");
+                    ui.separator();
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::StickyNote, "💬 Note");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Highlight, "🖍 Highlight");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Underline, "U̲ Underline");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::StrikeOut, "S̶ Strike");
+                    ui.separator();
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Rectangle, "▭ Rect");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Circle, "◯ Circle");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Line, "➔ Line");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Pencil, "✏ Pencil");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Eraser, "🧹 Eraser");
+                    ui.separator();
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Text, "T Text");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Typewriter, "⌨ Typewriter");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Callout, "🗨 Callout");
+                    ui.separator();
                     ui.selectable_value(&mut self.active_tool, ActiveTool::Link, "🔗 Link");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Redact, "Redact");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Redact, "█ Redact");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::MeasureDistance, "📏 Distance");
                     ui.selectable_value(&mut self.active_tool, ActiveTool::MeasureArea, "📐 Area");
 
@@ -3727,12 +3794,34 @@ impl RavPdfApp {
                         if let Some(pos) = response.interact_pointer_pos() {
                             self.drag_start_pos = Some(pos);
                             self.drag_current_pos = Some(pos);
+                            if self.active_tool == ActiveTool::Pencil {
+                                self.active_pencil_points.clear();
+                                self.active_pencil_points.push(pos);
+                            }
                         }
                     }
 
                     if response.dragged() {
                         if let Some(pos) = response.interact_pointer_pos() {
                             self.drag_current_pos = Some(pos);
+                            if self.active_tool == ActiveTool::Pencil {
+                                self.active_pencil_points.push(pos);
+                            }
+                        }
+                    }
+
+                    // Live preview for Pencil (Freehand Ink)
+                    if self.active_tool == ActiveTool::Pencil && self.active_pencil_points.len() >= 2 {
+                        let ink_color = Color32::from_rgb(30, 100, 220);
+                        for window in self.active_pencil_points.windows(2) {
+                            ui.painter().line_segment([window[0], window[1]], Stroke::new(2.5_f32, ink_color));
+                        }
+                    }
+
+                    // Live preview for Eraser
+                    if self.active_tool == ActiveTool::Eraser {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            ui.painter().circle_stroke(pos, 15.0, Stroke::new(1.5_f32, Color32::from_rgb(239, 68, 68)));
                         }
                     }
 
@@ -3752,12 +3841,61 @@ impl RavPdfApp {
                                     Stroke::new(1.0_f32, Color32::from_rgb(200, 180, 0)),
                                 );
                             }
+                            ActiveTool::Underline => {
+                                ui.painter().rect_filled(
+                                    drag_rect,
+                                    0.0,
+                                    Color32::from_rgba_unmultiplied(0, 120, 230, 30),
+                                );
+                                ui.painter().line_segment(
+                                    [Pos2::new(drag_rect.min.x, drag_rect.max.y), Pos2::new(drag_rect.max.x, drag_rect.max.y)],
+                                    Stroke::new(2.0_f32, Color32::from_rgb(0, 120, 230)),
+                                );
+                            }
+                            ActiveTool::StrikeOut => {
+                                ui.painter().rect_filled(
+                                    drag_rect,
+                                    0.0,
+                                    Color32::from_rgba_unmultiplied(220, 38, 38, 30),
+                                );
+                                let mid_y = (drag_rect.min.y + drag_rect.max.y) * 0.5;
+                                ui.painter().line_segment(
+                                    [Pos2::new(drag_rect.min.x, mid_y), Pos2::new(drag_rect.max.x, mid_y)],
+                                    Stroke::new(2.0_f32, Color32::from_rgb(220, 38, 38)),
+                                );
+                            }
                             ActiveTool::Rectangle => {
                                 ui.painter().rect_stroke(
                                     drag_rect,
                                     0.0,
                                     Stroke::new(2.0_f32, Color32::from_rgb(220, 38, 38)),
                                 );
+                            }
+                            ActiveTool::Circle => {
+                                ui.painter().rect_stroke(
+                                    drag_rect,
+                                    drag_rect.width().min(drag_rect.height()) * 0.5,
+                                    Stroke::new(2.0_f32, Color32::from_rgb(220, 38, 38)),
+                                );
+                            }
+                            ActiveTool::Line => {
+                                let stroke_color = Color32::from_rgb(220, 38, 38);
+                                ui.painter().line_segment([start, curr], Stroke::new(2.0_f32, stroke_color));
+                                let dx = curr.x - start.x;
+                                let dy = curr.y - start.y;
+                                let len = (dx * dx + dy * dy).sqrt();
+                                if len > 5.0 {
+                                    let ux = dx / len;
+                                    let uy = dy / len;
+                                    let p1 = Pos2::new(curr.x - ux * 10.0 - uy * 5.0, curr.y - uy * 10.0 + ux * 5.0);
+                                    let p2 = Pos2::new(curr.x - ux * 10.0 + uy * 5.0, curr.y - uy * 10.0 - ux * 5.0);
+                                    ui.painter().line_segment([curr, p1], Stroke::new(2.0_f32, stroke_color));
+                                    ui.painter().line_segment([curr, p2], Stroke::new(2.0_f32, stroke_color));
+                                }
+                            }
+                            ActiveTool::Callout => {
+                                ui.painter().rect_stroke(drag_rect, 2.0, Stroke::new(1.5_f32, Color32::from_rgb(0, 102, 204)));
+                                ui.painter().line_segment([start, drag_rect.left_top()], Stroke::new(1.5_f32, Color32::from_rgb(0, 102, 204)));
                             }
                             ActiveTool::Redact => {
                                 ui.painter().rect_filled(
@@ -3862,6 +4000,28 @@ impl RavPdfApp {
                                             self.status_message = "Added highlight annotation".into();
                                         }
                                     }
+                                    ActiveTool::Underline => {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let mut annot = Annotation::new(AnnotationType::Underline, pdf_rect);
+                                            annot.color = Some((0.0, 0.45, 0.85));
+                                            let curr_page = tab.current_page;
+                                            let _ = add_annotation_to_page(&mut tab.doc, curr_page, &annot);
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = "Added underline annotation".into();
+                                        }
+                                    }
+                                    ActiveTool::StrikeOut => {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let mut annot = Annotation::new(AnnotationType::StrikeOut, pdf_rect);
+                                            annot.color = Some((0.85, 0.15, 0.15));
+                                            let curr_page = tab.current_page;
+                                            let _ = add_annotation_to_page(&mut tab.doc, curr_page, &annot);
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = "Added strikeout annotation".into();
+                                        }
+                                    }
                                     ActiveTool::Rectangle => {
                                         if let Some(tab) = self.active_tab_mut() {
                                             let mut annot = Annotation::new(AnnotationType::Square, pdf_rect);
@@ -3872,6 +4032,65 @@ impl RavPdfApp {
                                             tab.invalidate_render();
                                             self.status_message = "Added rectangle shape".into();
                                         }
+                                    }
+                                    ActiveTool::Circle => {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let mut annot = Annotation::new(AnnotationType::Circle, pdf_rect);
+                                            annot.color = Some((0.85, 0.15, 0.15));
+                                            let curr_page = tab.current_page;
+                                            let _ = add_annotation_to_page(&mut tab.doc, curr_page, &annot);
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = "Added circle shape".into();
+                                        }
+                                    }
+                                    ActiveTool::Line => {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let local_start_x = ((start.x - rect.min.x) / zoom) as f64;
+                                            let local_start_y = ((rect.max.y - start.y) / zoom) as f64;
+                                            let local_end_x = ((curr.x - rect.min.x) / zoom) as f64;
+                                            let local_end_y = ((rect.max.y - curr.y) / zoom) as f64;
+
+                                            let config = ShapeAnnotationConfig {
+                                                shape_type: ShapeType::Line {
+                                                    start: [local_start_x, local_start_y],
+                                                    end: [local_end_x, local_end_y],
+                                                    start_style: LineEndingStyle::None,
+                                                    end_style: LineEndingStyle::OpenArrow,
+                                                },
+                                                rect: [local_start_x.min(local_end_x), local_start_y.min(local_end_y), local_start_x.max(local_end_x), local_start_y.max(local_end_y)],
+                                                stroke_color: Some((0.85, 0.15, 0.15)),
+                                                fill_color: None,
+                                                stroke_width: 2.0,
+                                                border_style: BorderStyle::Solid,
+                                                border_effect: BorderEffect::None,
+                                                opacity: 1.0,
+                                                author: Some("User".into()),
+                                                locked: false,
+                                                popup_note: None,
+                                            };
+                                            let curr_page = tab.current_page;
+                                            let _ = add_shape_annotation(&mut tab.doc, curr_page, &config);
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = "Added arrow line".into();
+                                        }
+                                    }
+                                    ActiveTool::Callout => {
+                                        let local_start_x = ((start.x - rect.min.x) / zoom) as f64;
+                                        let local_start_y = ((rect.max.y - start.y) / zoom) as f64;
+                                        let local_end_x = ((curr.x - rect.min.x) / zoom) as f64;
+                                        let local_end_y = ((rect.max.y - curr.y) / zoom) as f64;
+
+                                        self.callout_leader_x = local_start_x;
+                                        self.callout_leader_y = local_start_y;
+                                        self.callout_knee_x = (local_start_x + local_end_x) * 0.5;
+                                        self.callout_knee_y = (local_start_y + local_end_y) * 0.5;
+                                        self.callout_box_x = local_end_x;
+                                        self.callout_box_y = local_end_y;
+                                        self.callout_box_w = 160.0;
+                                        self.callout_box_h = 40.0;
+                                        self.show_callout_dialog = true;
                                     }
                                     ActiveTool::Link => {
                                         self.link_rect = pdf_rect;
@@ -3936,6 +4155,60 @@ impl RavPdfApp {
                         }
                     }
 
+                    if response.drag_stopped() && self.active_tool == ActiveTool::Pencil {
+                        if self.active_pencil_points.len() >= 2 {
+                            let pts: Vec<[f64; 2]> = self.active_pencil_points.drain(..)
+                                .map(|p| [((p.x - rect.min.x) / zoom) as f64, ((rect.max.y - p.y) / zoom) as f64])
+                                .collect();
+                            if let Some(tab) = self.active_tab_mut() {
+                                let curr_page = tab.current_page;
+                                let config = InkAnnotationConfig {
+                                    strokes: vec![pts],
+                                    stroke_width: 2.5,
+                                    color: (0.1, 0.4, 0.9),
+                                    opacity: 1.0,
+                                    smooth: true,
+                                    author: Some("User".into()),
+                                    locked: false,
+                                    popup_note: None,
+                                };
+                                let _ = add_ink_annotation(&mut tab.doc, curr_page, &config);
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                self.status_message = "Added freehand pencil drawing".into();
+                            }
+                        } else {
+                            self.active_pencil_points.clear();
+                        }
+                    }
+
+                    if (response.dragged() || response.clicked()) && self.active_tool == ActiveTool::Eraser {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let ex = ((pos.x - rect.min.x) / zoom) as f64;
+                            let ey = ((rect.max.y - pos.y) / zoom) as f64;
+                            if let Some(tab) = self.active_tab_mut() {
+                                let curr_page = tab.current_page;
+                                if let Ok(annots) = get_page_annotations(&tab.doc, curr_page) {
+                                    let mut erased = false;
+                                    for a in annots {
+                                        if matches!(a.annot_type, AnnotationType::Ink) {
+                                            if let Some(id) = a.id {
+                                                if let Ok(true) = erase_ink_strokes(&mut tab.doc, curr_page, id, [ex, ey], 20.0) {
+                                                    erased = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if erased {
+                                        tab.is_modified = true;
+                                        tab.invalidate_render();
+                                        self.status_message = "Erased ink stroke".into();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Click handlers for point-based tools
                     if response.clicked() {
                         if let Some(pos) = response.interact_pointer_pos() {
@@ -3960,6 +4233,22 @@ impl RavPdfApp {
                                     self.free_text_coords = Some([local_x, local_y, local_x + 120.0, local_y + 24.0]);
                                     self.free_text_content.clear();
                                     self.show_free_text_dialog = true;
+                                }
+                                ActiveTool::Typewriter => {
+                                    self.typewriter_pos_x = local_x;
+                                    self.typewriter_pos_y = local_y;
+                                    self.show_typewriter_dialog = true;
+                                }
+                                ActiveTool::Callout => {
+                                    self.callout_box_x = local_x;
+                                    self.callout_box_y = local_y;
+                                    self.callout_box_w = 160.0;
+                                    self.callout_box_h = 40.0;
+                                    self.callout_leader_x = local_x - 50.0;
+                                    self.callout_leader_y = local_y - 40.0;
+                                    self.callout_knee_x = local_x - 15.0;
+                                    self.callout_knee_y = local_y - 10.0;
+                                    self.show_callout_dialog = true;
                                 }
                                 _ => {}
                             }
@@ -9839,6 +10128,177 @@ impl RavPdfApp {
 
             if close {
                 self.show_drawing_dialog = false;
+            }
+        }
+
+        // Callout Text Annotation Dialog (FR-08.1.3)
+        if self.show_callout_dialog {
+            let mut close = false;
+            let mut apply_callout = false;
+
+            egui::Window::new("🗨️ Callout Annotation (FR-08.1.3)")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(420.0)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("Configure text callout with leader arrow pointing to page feature:").small());
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Callout Text:");
+                    });
+                    ui.text_edit_multiline(&mut self.callout_text_input);
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        ui.label("Box Position X:");
+                        ui.add(egui::DragValue::new(&mut self.callout_box_x));
+                        ui.label("Y:");
+                        ui.add(egui::DragValue::new(&mut self.callout_box_y));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Width:");
+                        ui.add(egui::DragValue::new(&mut self.callout_box_w).range(40.0..=600.0));
+                        ui.label("Height:");
+                        ui.add(egui::DragValue::new(&mut self.callout_box_h).range(20.0..=300.0));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Arrow Target X:");
+                        ui.add(egui::DragValue::new(&mut self.callout_leader_x));
+                        ui.label("Y:");
+                        ui.add(egui::DragValue::new(&mut self.callout_leader_y));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Elbow / Knee X:");
+                        ui.add(egui::DragValue::new(&mut self.callout_knee_x));
+                        ui.label("Y:");
+                        ui.add(egui::DragValue::new(&mut self.callout_knee_y));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Border & Line Color:");
+                        ui.color_edit_button_rgb(&mut self.callout_border_color);
+                    });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("🗨️ Insert Callout").clicked() {
+                            apply_callout = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if apply_callout {
+                let config = CalloutConfig {
+                    text: self.callout_text_input.clone(),
+                    text_rect: [self.callout_box_x, self.callout_box_y, self.callout_box_w, self.callout_box_h],
+                    leader_start: (self.callout_leader_x, self.callout_leader_y),
+                    leader_knee: (self.callout_knee_x, self.callout_knee_y),
+                    border_color: (self.callout_border_color[0], self.callout_border_color[1], self.callout_border_color[2]),
+                    fill_color: None,
+                    text_color: (0.0, 0.0, 0.0),
+                    font_size: 10.0,
+                    author: Some("User".into()),
+                };
+
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    match add_callout_annotation(&mut tab.doc, curr, &config) {
+                        Ok(_) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Added callout annotation on page {}", curr + 1);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed to add callout: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_callout_dialog = false;
+            }
+        }
+
+        // Typewriter Annotation Dialog (FR-08.1.4)
+        if self.show_typewriter_dialog {
+            let mut close = false;
+            let mut apply_typewriter = false;
+
+            egui::Window::new("⌨️ Typewriter Annotation (FR-08.1.4)")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(380.0)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("Place text directly onto page at coordinates:").small());
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Text:");
+                        ui.text_edit_singleline(&mut self.typewriter_text_input);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Position X:");
+                        ui.add(egui::DragValue::new(&mut self.typewriter_pos_x));
+                        ui.label("Y:");
+                        ui.add(egui::DragValue::new(&mut self.typewriter_pos_y));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Font Size:");
+                        ui.add(egui::DragValue::new(&mut self.typewriter_font_size).range(6.0..=72.0).suffix(" pt"));
+                        ui.label("Color:");
+                        ui.color_edit_button_rgb(&mut self.typewriter_color);
+                    });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("⌨️ Add Typewritten Text").clicked() {
+                            apply_typewriter = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if apply_typewriter {
+                let config = TypewriterConfig {
+                    text: self.typewriter_text_input.clone(),
+                    pos: (self.typewriter_pos_x, self.typewriter_pos_y),
+                    font_size: self.typewriter_font_size,
+                    color: (self.typewriter_color[0], self.typewriter_color[1], self.typewriter_color[2]),
+                    author: Some("User".into()),
+                };
+
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    match add_typewriter_annotation(&mut tab.doc, curr, &config) {
+                        Ok(_) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Added typewriter text on page {}", curr + 1);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed to add typewriter text: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_typewriter_dialog = false;
             }
         }
     }

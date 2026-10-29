@@ -18,7 +18,7 @@ use ravpdf_core::document::PdfDocument;
 use ravpdf_core::error::{PdfError, Result};
 use ravpdf_core::lexer::{Lexer, Token};
 use ravpdf_core::object::{Object, ObjectId, PdfDictionary, PdfName};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn token_as_f64(tok: &Token) -> Option<f64> {
     match tok {
@@ -385,6 +385,115 @@ pub fn replace_page_image_from_file(
         h,
         "DeviceRGB",
     )
+}
+
+/// Extracts the image data for an indirect image XObject and saves it to a file.
+///
+/// Conforms to ISO 32000-1 Clause 8.9. Traceability: FR-05.9, FR-37.2.
+pub fn extract_image_to_file(
+    doc: &PdfDocument,
+    obj_id: ObjectId,
+    output_path: &Path,
+) -> Result<PathBuf> {
+    let stream = doc
+        .objects
+        .get(&obj_id)
+        .and_then(Object::as_stream)
+        .ok_or_else(|| {
+            PdfError::InvalidStructure(format!("Image object {:?} is not a stream", obj_id))
+        })?;
+
+    let filter = stream.dict.get_name("Filter");
+    let width = stream.dict.get_i64("Width").unwrap_or(0) as u32;
+    let height = stream.dict.get_i64("Height").unwrap_or(0) as u32;
+    let color_space = stream.dict.get_name("ColorSpace").unwrap_or("DeviceRGB");
+
+    if filter == Some("DCTDecode") {
+        // Raw stream data is JPEG
+        let data = &stream.raw_data;
+        std::fs::write(output_path, data)
+            .map_err(PdfError::Io)?;
+        return Ok(output_path.to_path_buf());
+    }
+
+    let decoded = stream.decode()?;
+
+    if width > 0 && height > 0 {
+        if color_space == "DeviceRGB" && decoded.len() >= (width * height * 3) as usize {
+            if let Some(img) = image::RgbImage::from_raw(width, height, decoded[..(width * height * 3) as usize].to_vec()) {
+                img.save(output_path).map_err(|e| PdfError::InvalidStructure(format!("Save image failed: {}", e)))?;
+                return Ok(output_path.to_path_buf());
+            }
+        } else if color_space == "DeviceGray" && decoded.len() >= (width * height) as usize {
+            if let Some(img) = image::GrayImage::from_raw(width, height, decoded[..(width * height) as usize].to_vec()) {
+                img.save(output_path).map_err(|e| PdfError::InvalidStructure(format!("Save image failed: {}", e)))?;
+                return Ok(output_path.to_path_buf());
+            }
+        } else if color_space == "DeviceCMYK" && decoded.len() >= (width * height * 4) as usize {
+            // Convert CMYK to RGB
+            let mut rgb_bytes = Vec::with_capacity((width * height * 3) as usize);
+            for chunk in decoded.chunks_exact(4) {
+                let c = chunk[0] as f32 / 255.0;
+                let m = chunk[1] as f32 / 255.0;
+                let y = chunk[2] as f32 / 255.0;
+                let k = chunk[3] as f32 / 255.0;
+                let r = ((1.0 - c) * (1.0 - k) * 255.0).clamp(0.0, 255.0) as u8;
+                let g = ((1.0 - m) * (1.0 - k) * 255.0).clamp(0.0, 255.0) as u8;
+                let b = ((1.0 - y) * (1.0 - k) * 255.0).clamp(0.0, 255.0) as u8;
+                rgb_bytes.push(r);
+                rgb_bytes.push(g);
+                rgb_bytes.push(b);
+            }
+            if let Some(img) = image::RgbImage::from_raw(width, height, rgb_bytes) {
+                img.save(output_path).map_err(|e| PdfError::InvalidStructure(format!("Save image failed: {}", e)))?;
+                return Ok(output_path.to_path_buf());
+            }
+        }
+    }
+
+    // Fallback: write decoded raw bytes
+    std::fs::write(output_path, &decoded)
+        .map_err(PdfError::Io)?;
+    Ok(output_path.to_path_buf())
+}
+
+/// Extracts all image XObjects across specified page (or whole document) and writes them to an output directory.
+///
+/// Conforms to ISO 32000-1 Clause 8.9. Traceability: FR-05.9, FR-37.2.
+pub fn extract_all_images_to_dir(
+    doc: &PdfDocument,
+    page_index: Option<usize>,
+    output_dir: &Path,
+) -> Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(output_dir)
+        .map_err(PdfError::Io)?;
+
+    let pages: Vec<usize> = if let Some(p) = page_index {
+        vec![p]
+    } else {
+        (0..doc.page_count()).collect()
+    };
+
+    let mut saved_paths = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    for p in pages {
+        if let Ok(images) = extract_page_images(doc, p) {
+            for (idx, im) in images.iter().enumerate() {
+                if seen_ids.insert(im.obj_id) {
+                    let ext = if im.filter.as_deref() == Some("DCTDecode") { "jpg" } else { "png" };
+                    let clean_name = im.name.trim_start_matches('/').replace('/', "_");
+                    let filename = format!("page_{}_img_{}_{}.{}", p + 1, idx + 1, clean_name, ext);
+                    let out_path = output_dir.join(filename);
+                    if let Ok(path) = extract_image_to_file(doc, im.obj_id, &out_path) {
+                        saved_paths.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(saved_paths)
 }
 
 /// Deletes an image invocation from the page's content stream and optionally removes it from `/Resources`.

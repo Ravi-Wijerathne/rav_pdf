@@ -9,12 +9,19 @@ use ravpdf_crypto::{
     decrypt_document, encrypt_document_with_algorithm, sign_pdf_document_advanced, DigitalId,
     DocMdpPermission, EncryptionAlgorithm, Permissions, SigningOptions,
 };
-use ravpdf_annot::{add_stamp_annotation, StampConfig, StandardStamp};
+use ravpdf_annot::{
+    add_annotation_to_page, add_callout_annotation, add_ink_annotation, add_shape_annotation,
+    add_stamp_annotation, add_typewriter_annotation, erase_ink_strokes, Annotation, AnnotationType,
+    BorderEffect, BorderStyle, CalloutConfig, InkAnnotationConfig, LineEndingStyle,
+    ShapeAnnotationConfig, ShapeType, StampConfig, StandardStamp, TypewriterConfig,
+};
 use ravpdf_edit::{
-    create_pdf_from_markdown, crop_page_image, delete_page_image, extract_page_images,
+    create_pdf_from_images, create_pdf_from_markdown, create_pdf_from_text, crop_page_image,
+    delete_page_image, extract_all_images_to_dir, extract_page_images,
     extract_page_text_spans, merge_documents, reorder_page_image, replace_page_image_from_file,
     replace_text_span_in_page, rotate_page, set_page_image_opacity, split_document,
-    transform_page_image, ImageTransformOptions, MarkdownPdfOptions, ZOrderAction,
+    transform_page_image, ImagePdfOptions, ImageTransformOptions, MarkdownPdfOptions,
+    TextPdfOptions, ZOrderAction,
 };
 use ravpdf_forms::{
     apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
@@ -28,16 +35,17 @@ use ravpdf_tools::{
     TrapPreset,
     add_3d_annotation, add_measurement_line_annotation, add_rich_media_annotation,
     apply_bates_numbering, apply_text_watermark, audit_accessibility, batch_scan_to_pdf,
-    calculate_distance, convert_document_colors, create_portfolio, embed_output_intent,
-    execute_all_field_calculations, execute_batch_cancellable, execute_preflight_fixup,
-    execute_script, export_comments_to_csv, export_page_to_image, export_to_html,
-    export_to_plain_text, extract_3d_stream, extract_all_text, extract_portfolio_item,
-    extract_rich_media_content, generate_postscript, get_3d_annotations, get_document_comments,
-    get_document_info, get_document_javascript, get_output_intents, get_portfolio,
-    get_rich_media_annotations, linearize_document, optimize_document, perform_ocr_document,
-    redact_pattern, remediate_all_automatic, run_preflight, AccessibilityStatus, ActionSequence,
-    BatchJob, BookletBinding, ExportImageFormat, JsExecutionContext, LinearUnit, MediaContent,
-    NUpCount, NUpOrder, OcrConfig, OcrOutputMode, PluginPermission, PluginRegistry, PortfolioItem,
+    calculate_distance, compare_documents, convert_document_colors, create_portfolio,
+    embed_output_intent, execute_all_field_calculations, execute_batch_cancellable,
+    execute_preflight_fixup, execute_script, export_comments_to_csv, export_page_to_image,
+    export_to_html, export_to_plain_text, extract_3d_stream, extract_all_text,
+    extract_portfolio_item, extract_rich_media_content, generate_comparison_pdf_report,
+    generate_postscript, get_3d_annotations, get_document_comments, get_document_info,
+    get_document_javascript, get_output_intents, get_portfolio, get_rich_media_annotations,
+    linearize_document, optimize_document, perform_ocr_document, redact_pattern,
+    remediate_all_automatic, run_preflight, AccessibilityStatus, ActionSequence, BatchJob,
+    BookletBinding, ExportImageFormat, JsExecutionContext, LinearUnit, MediaContent, NUpCount,
+    NUpOrder, OcrConfig, OcrOutputMode, PluginPermission, PluginRegistry, PortfolioItem,
     PortfolioLayout, PreflightFixup, PreflightProfile, PrintJobConfig, PrintLayoutMode,
     RichMediaActivation, RichMediaConfig, RichMediaDeactivation, SampleWatermarkPlugin, ScaleRatio,
     ScannerJobConfig, StandardIccProfile, ThreeDConfig, ThreeDFormat, ThreeDLighting,
@@ -627,6 +635,222 @@ enum Commands {
 
         #[arg(long, help = "Optional pop-up note comment (FR-10.7)")]
         note: Option<String>,
+    },
+
+    #[command(about = "Compare two PDF documents and generate a difference report (FR-17, FR-37.2)")]
+    Compare {
+        #[arg(help = "Path to original / reference PDF document")]
+        original: PathBuf,
+
+        #[arg(help = "Path to modified / revised PDF document")]
+        modified: PathBuf,
+
+        #[arg(short, long, help = "Output path for difference report (.pdf or .json)")]
+        output: Option<PathBuf>,
+    },
+
+    #[command(about = "Extract embedded image XObjects from a PDF into an output directory (FR-05.9, FR-37.2)")]
+    ExtractImages {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output directory for extracted images")]
+        output: PathBuf,
+
+        #[arg(long, help = "1-based page number to extract from (extracts all pages if omitted)")]
+        page: Option<usize>,
+    },
+
+    #[command(about = "Convert an external document or image (TXT, MD, HTML, PNG, JPG, BMP) to PDF (FR-02.2, FR-03.1, FR-37.2)")]
+    Convert {
+        #[arg(help = "Input file to convert (.txt, .md, .html, .png, .jpg, etc.)")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file path")]
+        output: PathBuf,
+
+        #[arg(long, help = "Document title header")]
+        title: Option<String>,
+    },
+
+    #[command(about = "Validate document against ISO standard profile (pdfa-1b, pdfa-2b, pdfx-1a, pdfx-4, pdfe-1, etc.) (FR-22.4, FR-37.2)")]
+    Validate {
+        #[arg(help = "Input PDF file to validate")]
+        input: PathBuf,
+
+        #[arg(long, default_value = "pdfa-1b", help = "ISO Standard: pdfa-1b, pdfa-2b, pdfa-3b, pdfx-1a, pdfx-3, pdfx-4, pdfe-1")]
+        standard: String,
+    },
+
+    #[command(about = "Add vector shapes (Rectangle, Circle, Line, Arrow, Polygon, Polyline) to a page (FR-09, FR-37.2)")]
+    Shape {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, default_value = "rect", help = "Shape type: rect, circle, line, arrow, polygon, polyline")]
+        shape: String,
+
+        #[arg(long, default_value = "72,600,200,700", help = "Bounding box: 'x1,y1,x2,y2' (or line start/end: 'x1,y1,x2,y2')")]
+        rect: String,
+
+        #[arg(long, help = "Polygon/polyline vertices: 'x1,y1;x2,y2;x3,y3'")]
+        vertices: Option<String>,
+
+        #[arg(long, default_value = "0.8,0.1,0.1", help = "Stroke RGB color: 'r,g,b'")]
+        color: String,
+
+        #[arg(long, help = "Fill RGB color: 'r,g,b'")]
+        fill: Option<String>,
+
+        #[arg(long, default_value_t = 2.0, help = "Stroke width in points")]
+        stroke_width: f64,
+
+        #[arg(long, default_value_t = 1.0, help = "Opacity (0.0 to 1.0)")]
+        opacity: f32,
+
+        #[arg(long, help = "Cloudy / scalloped border effect with intensity")]
+        cloudy: Option<f64>,
+
+        #[arg(long, help = "Lock annotation from editing")]
+        locked: bool,
+    },
+
+    #[command(about = "Add freehand ink drawing annotations to a page (FR-09.1, FR-37.2)")]
+    Ink {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, required = true, help = "Strokes coordinates: 'x1,y1;x2,y2;... | x3,y3;x4,y4'")]
+        strokes: String,
+
+        #[arg(long, default_value = "0.1,0.3,0.8", help = "Ink RGB color: 'r,g,b'")]
+        color: String,
+
+        #[arg(long, default_value_t = 2.0, help = "Stroke width in points")]
+        stroke_width: f64,
+
+        #[arg(long, default_value_t = 1.0, help = "Opacity (0.0 to 1.0)")]
+        opacity: f32,
+
+        #[arg(long, help = "Apply Catmull-Rom smoothing to ink points")]
+        smooth: bool,
+
+        #[arg(long, help = "Author name")]
+        author: Option<String>,
+    },
+
+    #[command(about = "Erase intersecting freehand ink strokes at coordinates (FR-09.2, FR-37.2)")]
+    EraseInk {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, required = true, help = "Eraser X coordinate")]
+        x: f64,
+
+        #[arg(long, required = true, help = "Eraser Y coordinate")]
+        y: f64,
+
+        #[arg(long, default_value_t = 15.0, help = "Eraser radius in points")]
+        radius: f64,
+    },
+
+    #[command(about = "Add a callout annotation with text box and leader line pointing to an area (FR-08.1.3, FR-37.2)")]
+    Callout {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, required = true, help = "Callout text content")]
+        text: String,
+
+        #[arg(long, default_value = "200,600,160,40", help = "Text box rectangle: 'x,y,w,h'")]
+        rect: String,
+
+        #[arg(long, default_value = "100,500", help = "Leader line target point: 'x,y'")]
+        leader: String,
+
+        #[arg(long, help = "Leader line knee point: 'x,y' (optional intermediate bend)")]
+        knee: Option<String>,
+
+        #[arg(long, default_value = "0.2,0.5,0.8", help = "Border & line RGB color: 'r,g,b'")]
+        color: String,
+    },
+
+    #[command(about = "Add a typewriter text annotation directly onto a page (FR-08.1.4, FR-37.2)")]
+    Typewriter {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, required = true, help = "Typewriter text string")]
+        text: String,
+
+        #[arg(long, default_value = "72,700", help = "Placement position: 'x,y'")]
+        pos: String,
+
+        #[arg(long, default_value_t = 12.0, help = "Font size in points")]
+        font_size: f64,
+
+        #[arg(long, default_value = "0.0,0.0,0.0", help = "Text RGB color: 'r,g,b'")]
+        color: String,
+    },
+
+    #[command(about = "Add standard text annotations and markups (Note, Highlight, Underline, StrikeOut, Square, Circle) (FR-08, FR-09, FR-37.2)")]
+    Annot {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, default_value = "highlight", help = "Annotation subtype: note, highlight, underline, strikeout, square, circle")]
+        annot_type: String,
+
+        #[arg(long, default_value = "72,700,200,720", help = "Annotation rectangle: 'x1,y1,x2,y2'")]
+        rect: String,
+
+        #[arg(long, help = "Text content / comment string")]
+        contents: Option<String>,
+
+        #[arg(long, help = "Author / reviewer name")]
+        author: Option<String>,
+
+        #[arg(long, help = "Annotation color as RGB: 'r,g,b'")]
+        color: Option<String>,
+
+        #[arg(long, default_value_t = 1.0, help = "Opacity (0.0 to 1.0)")]
+        opacity: f32,
     },
 }
 
@@ -2989,6 +3213,476 @@ fn main() -> Result<()> {
                 );
             }
         }
+
+        Commands::Compare {
+            original,
+            modified,
+            output,
+        } => {
+            let doc_a = PdfDocument::load_from_file(&original)?;
+            let doc_b = PdfDocument::load_from_file(&modified)?;
+            let report = compare_documents(&doc_a, &doc_b);
+
+            if let Some(out_path) = &output {
+                if out_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
+                    let name_a = original.file_name().unwrap_or_default().to_string_lossy();
+                    let name_b = modified.file_name().unwrap_or_default().to_string_lossy();
+                    let rep_doc = generate_comparison_pdf_report(&report, &name_a, &name_b)?;
+                    rep_doc.save_to_file(out_path)?;
+                    if !cli.json {
+                        println!("Comparison report PDF generated: {}", out_path.display());
+                    }
+                } else if out_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+                    let json = serde_json::to_string_pretty(&report)?;
+                    fs::write(out_path, json)?;
+                    if !cli.json {
+                        println!("Comparison report JSON saved: {}", out_path.display());
+                    }
+                }
+            }
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if output.as_ref().map_or(true, |p| !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))) {
+                println!("=== RavPDF Document Comparison ===");
+                println!("Original: {}", original.display());
+                println!("Modified: {}", modified.display());
+                println!("Total Differences: {}", report.total_differences);
+                println!("Status: {}", if report.is_identical() { "Identical" } else { "Differences Found" });
+                for m in &report.metadata_diffs {
+                    println!("Metadata: {}", m);
+                }
+                for p in &report.page_diffs {
+                    if p.has_differences {
+                        println!("Page {}: {}", p.page_number, p.summary);
+                    }
+                }
+            }
+        }
+
+        Commands::ExtractImages {
+            input,
+            output,
+            page,
+        } => {
+            let doc = PdfDocument::load_from_file(&input)?;
+            let page_idx = page.map(|p| p.saturating_sub(1));
+            let saved = extract_all_images_to_dir(&doc, page_idx, &output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output_dir": output.to_string_lossy(),
+                    "images_extracted": saved.len(),
+                    "files": saved.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Extracted {} images into '{}'", saved.len(), output.display());
+            }
+        }
+
+        Commands::Convert {
+            input,
+            output,
+            title,
+        } => {
+            let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let doc = match ext.as_str() {
+                "png" | "jpg" | "jpeg" | "bmp" | "webp" | "gif" | "tiff" => {
+                    create_pdf_from_images(&[input.clone()], &ImagePdfOptions::default())?
+                }
+                "md" | "markdown" => {
+                    let content = fs::read_to_string(&input)?;
+                    let opts = MarkdownPdfOptions {
+                        title: title.clone(),
+                        ..Default::default()
+                    };
+                    create_pdf_from_markdown(&content, &opts)?
+                }
+                _ => {
+                    let content = fs::read_to_string(&input)?;
+                    let opts = TextPdfOptions::default();
+                    create_pdf_from_text(&content, &opts)?
+                }
+            };
+
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "pages": doc.page_count(),
+                    "status": "success",
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Converted '{}' -> '{}' ({} pages)", input.display(), output.display(), doc.page_count());
+            }
+        }
+
+        Commands::Validate { input, standard } => {
+            let doc = PdfDocument::load_from_file(&input)?;
+            let std_enum = match standard.to_lowercase().replace('-', "").as_str() {
+                "pdfa1b" | "a1b" => StandardFormat::PdfA1b,
+                "pdfa2b" | "a2b" => StandardFormat::PdfA2b,
+                "pdfa3b" | "a3b" => StandardFormat::PdfA3b,
+                "pdfx1a" | "x1a" => StandardFormat::PdfX1a,
+                "pdfx3" | "x3" => StandardFormat::PdfX3,
+                "pdfx4" | "x4" => StandardFormat::PdfX4,
+                "pdfe1" | "e1" => StandardFormat::PdfE1,
+                _ => StandardFormat::PdfA1b,
+            };
+            let rep = validate_standard_compliance(&doc, std_enum);
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+            } else {
+                let status = if rep.is_compliant { "COMPLIANT" } else { "NON-COMPLIANT" };
+                println!("=== ISO Standard Validation ({}) ===", std_enum.display_name());
+                println!("File: {}", input.display());
+                println!("Status: {}", status);
+                for c in &rep.checks {
+                    println!("[{}] {} (Passed: {})", c.code, c.description, c.passed);
+                }
+            }
+        }
+
+        Commands::Shape {
+            input,
+            output,
+            page,
+            shape,
+            rect,
+            vertices,
+            color,
+            fill,
+            stroke_width,
+            opacity,
+            cloudy,
+            locked,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let total_pages = doc.page_count();
+            if page == 0 || page > total_pages {
+                return Err(anyhow!("Page {} out of range (1..={})", page, total_pages));
+            }
+            let page_idx = page - 1;
+
+            let parsed_rect = parse_rect(&rect).unwrap_or([72.0, 600.0, 200.0, 700.0]);
+            let stroke_col = parse_rgb(&color).unwrap_or((0.8, 0.1, 0.1));
+            let fill_col = fill.as_deref().and_then(parse_rgb);
+
+            let border_effect = if let Some(intensity) = cloudy {
+                BorderEffect::Cloudy { intensity }
+            } else {
+                BorderEffect::None
+            };
+
+            let shape_type = match shape.to_lowercase().as_str() {
+                "circle" | "oval" | "ellipse" => ShapeType::Circle,
+                "line" => ShapeType::Line {
+                    start: [parsed_rect[0], parsed_rect[1]],
+                    end: [parsed_rect[2], parsed_rect[3]],
+                    start_style: LineEndingStyle::None,
+                    end_style: LineEndingStyle::None,
+                },
+                "arrow" => ShapeType::Line {
+                    start: [parsed_rect[0], parsed_rect[1]],
+                    end: [parsed_rect[2], parsed_rect[3]],
+                    start_style: LineEndingStyle::None,
+                    end_style: LineEndingStyle::OpenArrow,
+                },
+                "polygon" => {
+                    let verts = vertices.as_deref().map(parse_vertices).unwrap_or_else(|| {
+                        vec![[parsed_rect[0], parsed_rect[1]], [(parsed_rect[0] + parsed_rect[2]) * 0.5, parsed_rect[3]], [parsed_rect[2], parsed_rect[1]]]
+                    });
+                    ShapeType::Polygon { vertices: verts }
+                }
+                "polyline" => {
+                    let verts = vertices.as_deref().map(parse_vertices).unwrap_or_else(|| {
+                        vec![[parsed_rect[0], parsed_rect[1]], [parsed_rect[2], parsed_rect[3]]]
+                    });
+                    ShapeType::PolyLine {
+                        vertices: verts,
+                        start_style: LineEndingStyle::None,
+                        end_style: LineEndingStyle::None,
+                    }
+                }
+                _ => ShapeType::Rectangle,
+            };
+
+            let config = ShapeAnnotationConfig {
+                shape_type,
+                rect: parsed_rect,
+                stroke_color: Some(stroke_col),
+                fill_color: fill_col,
+                stroke_width,
+                border_style: BorderStyle::Solid,
+                border_effect,
+                opacity,
+                author: Some("CLI".into()),
+                locked,
+                popup_note: None,
+            };
+
+            let obj_id = add_shape_annotation(&mut doc, page_idx, &config)?;
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "page": page,
+                    "shape": shape,
+                    "object_id": format!("{} {} R", obj_id.number, obj_id.generation),
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Added shape '{}' on page {} -> {}", shape, page, output.display());
+            }
+        }
+
+        Commands::Ink {
+            input,
+            output,
+            page,
+            strokes,
+            color,
+            stroke_width,
+            opacity,
+            smooth,
+            author,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let total_pages = doc.page_count();
+            if page == 0 || page > total_pages {
+                return Err(anyhow!("Page {} out of range (1..={})", page, total_pages));
+            }
+            let page_idx = page - 1;
+
+            let parsed_strokes = parse_strokes(&strokes);
+            if parsed_strokes.is_empty() {
+                return Err(anyhow!("No valid stroke coordinates parsed from: {}", strokes));
+            }
+
+            let ink_col = parse_rgb(&color).unwrap_or((0.1, 0.3, 0.8));
+
+            let config = InkAnnotationConfig {
+                strokes: parsed_strokes,
+                stroke_width,
+                color: ink_col,
+                opacity,
+                smooth,
+                author: author.or(Some("CLI".into())),
+                locked: false,
+                popup_note: None,
+            };
+
+            let obj_id = add_ink_annotation(&mut doc, page_idx, &config)?;
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "page": page,
+                    "object_id": format!("{} {} R", obj_id.number, obj_id.generation),
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Added freehand ink on page {} -> {}", page, output.display());
+            }
+        }
+
+        Commands::EraseInk {
+            input,
+            output,
+            page,
+            x,
+            y,
+            radius,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let total_pages = doc.page_count();
+            if page == 0 || page > total_pages {
+                return Err(anyhow!("Page {} out of range (1..={})", page, total_pages));
+            }
+            let page_idx = page - 1;
+
+            let annots = ravpdf_annot::get_page_annotations(&doc, page_idx)?;
+            let mut erased_any = false;
+            for a in annots {
+                if matches!(a.annot_type, AnnotationType::Ink) {
+                    if let Some(id) = a.id {
+                        if erase_ink_strokes(&mut doc, page_idx, id, [x, y], radius)? {
+                            erased_any = true;
+                        }
+                    }
+                }
+            }
+
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "page": page,
+                    "erased": erased_any,
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Erased ink strokes at ({}, {}) on page {} (modified: {}) -> {}", x, y, page, erased_any, output.display());
+            }
+        }
+
+        Commands::Callout {
+            input,
+            output,
+            page,
+            text,
+            rect,
+            leader,
+            knee,
+            color,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let total_pages = doc.page_count();
+            if page == 0 || page > total_pages {
+                return Err(anyhow!("Page {} out of range (1..={})", page, total_pages));
+            }
+            let page_idx = page - 1;
+
+            let parsed_rect = parse_rect(&rect).unwrap_or([200.0, 600.0, 160.0, 40.0]);
+            let leader_pt = parse_point(&leader).unwrap_or((100.0, 500.0));
+            let knee_pt = knee.as_deref().and_then(parse_point).unwrap_or(leader_pt);
+            let col = parse_rgb(&color).unwrap_or((0.2, 0.5, 0.8));
+
+            let config = CalloutConfig {
+                text: text.clone(),
+                text_rect: parsed_rect,
+                leader_start: leader_pt,
+                leader_knee: knee_pt,
+                border_color: col,
+                fill_color: None,
+                text_color: (0.0, 0.0, 0.0),
+                font_size: 10.0,
+                author: Some("CLI".into()),
+            };
+
+            let obj_id = add_callout_annotation(&mut doc, page_idx, &config)?;
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "page": page,
+                    "object_id": format!("{} {} R", obj_id.number, obj_id.generation),
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Added callout '{}' on page {} -> {}", text, page, output.display());
+            }
+        }
+
+        Commands::Typewriter {
+            input,
+            output,
+            page,
+            text,
+            pos,
+            font_size,
+            color,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let total_pages = doc.page_count();
+            if page == 0 || page > total_pages {
+                return Err(anyhow!("Page {} out of range (1..={})", page, total_pages));
+            }
+            let page_idx = page - 1;
+
+            let parsed_pos = parse_point(&pos).unwrap_or((72.0, 700.0));
+            let col = parse_rgb(&color).unwrap_or((0.0, 0.0, 0.0));
+
+            let config = TypewriterConfig {
+                text: text.clone(),
+                pos: parsed_pos,
+                font_size,
+                color: col,
+                author: Some("CLI".into()),
+            };
+
+            let obj_id = add_typewriter_annotation(&mut doc, page_idx, &config)?;
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "page": page,
+                    "object_id": format!("{} {} R", obj_id.number, obj_id.generation),
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Added typewriter text '{}' on page {} -> {}", text, page, output.display());
+            }
+        }
+
+        Commands::Annot {
+            input,
+            output,
+            page,
+            annot_type,
+            rect,
+            contents,
+            author,
+            color,
+            opacity,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let total_pages = doc.page_count();
+            if page == 0 || page > total_pages {
+                return Err(anyhow!("Page {} out of range (1..={})", page, total_pages));
+            }
+            let page_idx = page - 1;
+
+            let parsed_rect = parse_rect(&rect).unwrap_or([72.0, 700.0, 200.0, 720.0]);
+            let parsed_col = color.as_deref().and_then(parse_rgb);
+
+            let at = match annot_type.to_lowercase().as_str() {
+                "highlight" => AnnotationType::Highlight,
+                "underline" => AnnotationType::Underline,
+                "strikeout" | "strike" => AnnotationType::StrikeOut,
+                "square" | "rect" => AnnotationType::Square,
+                "circle" | "oval" => AnnotationType::Circle,
+                _ => AnnotationType::Text,
+            };
+
+            let mut annot = Annotation::new(at, parsed_rect);
+            annot.contents = contents;
+            annot.author = author;
+            annot.color = parsed_col;
+            annot.opacity = opacity;
+
+            let obj_id = add_annotation_to_page(&mut doc, page_idx, &annot)?;
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "page": page,
+                    "annot_type": annot_type,
+                    "object_id": format!("{} {} R", obj_id.number, obj_id.generation),
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Added '{}' annotation on page {} -> {}", annot_type, page, output.display());
+            }
+        }
     }
 
     Ok(())
@@ -3056,4 +3750,49 @@ fn parse_lighting(s: &str) -> ThreeDLighting {
         "none" => ThreeDLighting::None,
         _ => ThreeDLighting::Day,
     }
+}
+
+fn parse_point(s: &str) -> Option<(f64, f64)> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() == 2 {
+        if let (Ok(x), Ok(y)) = (parts[0].trim().parse::<f64>(), parts[1].trim().parse::<f64>()) {
+            return Some((x, y));
+        }
+    }
+    None
+}
+
+fn parse_rgb(s: &str) -> Option<(f32, f32, f32)> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() == 3 {
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            parts[0].trim().parse::<f32>(),
+            parts[1].trim().parse::<f32>(),
+            parts[2].trim().parse::<f32>(),
+        ) {
+            return Some((r, g, b));
+        }
+    }
+    None
+}
+
+fn parse_vertices(s: &str) -> Vec<[f64; 2]> {
+    s.split(';')
+        .filter_map(|pair| {
+            let p: Vec<&str> = pair.split(',').map(str::trim).collect();
+            if p.len() == 2 {
+                if let (Ok(x), Ok(y)) = (p[0].parse::<f64>(), p[1].parse::<f64>()) {
+                    return Some([x, y]);
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+fn parse_strokes(s: &str) -> Vec<Vec<[f64; 2]>> {
+    s.split('|')
+        .map(parse_vertices)
+        .filter(|stroke| !stroke.is_empty())
+        .collect()
 }

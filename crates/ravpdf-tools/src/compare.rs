@@ -159,6 +159,68 @@ pub fn compare_documents(doc_a: &PdfDocument, doc_b: &PdfDocument) -> Comparison
     report
 }
 
+/// Generates an ISO 32000-compliant PDF comparison report document from a `ComparisonReport`.
+///
+/// Conforms to ISO 32000-1 and SRS FR-17.1, FR-17.4, FR-37.2.
+pub fn generate_comparison_pdf_report(
+    report: &ComparisonReport,
+    name_a: &str,
+    name_b: &str,
+) -> Result<PdfDocument, ravpdf_core::error::PdfError> {
+    use ravpdf_edit::{create_pdf_from_markdown, MarkdownPdfOptions};
+
+    let mut md = String::new();
+    md.push_str("# RavPDF Document Comparison Report\n\n");
+    md.push_str(&format!("**Original Document:** {}\n\n", name_a));
+    md.push_str(&format!("**Modified Document:** {}\n\n", name_b));
+    md.push_str(&format!("- Original Page Count: {}\n", report.doc_a_pages));
+    md.push_str(&format!("- Modified Page Count: {}\n", report.doc_b_pages));
+    md.push_str(&format!("- Total Differences Identified: {}\n", report.total_differences));
+    let status_str = if report.is_identical() {
+        "**Status:** IDENTICAL (No differences found)"
+    } else {
+        "**Status:** DIFFERENCES DETECTED"
+    };
+    md.push_str(&format!("- {}\n\n", status_str));
+
+    md.push_str("## Metadata Differences\n\n");
+    if report.metadata_diffs.is_empty() {
+        md.push_str("None. Document information dictionary entries match.\n\n");
+    } else {
+        for m in &report.metadata_diffs {
+            md.push_str(&format!("- {}\n", m));
+        }
+        md.push_str("\n");
+    }
+
+    md.push_str("## Detailed Page Changes\n\n");
+    if report.page_diffs.iter().all(|p| !p.has_differences) {
+        md.push_str("All pages have matching text content.\n\n");
+    } else {
+        for p in &report.page_diffs {
+            if p.has_differences {
+                md.push_str(&format!("### Page {} — {}\n\n", p.page_number, p.summary));
+                for add in &p.additions {
+                    md.push_str(&format!("- **[ADD]** `{}`\n", add));
+                }
+                for del in &p.deletions {
+                    md.push_str(&format!("- **[DEL]** `{}`\n", del));
+                }
+                md.push_str("\n");
+            }
+        }
+    }
+
+    let opts = MarkdownPdfOptions {
+        base_font_size: 10.5,
+        margin: 54.0,
+        title: Some("Document Comparison Report".to_string()),
+        ..Default::default()
+    };
+
+    create_pdf_from_markdown(&md, &opts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,10 +25,10 @@ pub use create::{
     create_pdf_from_text, ImagePdfOptions, MarkdownPdfOptions, TextPdfOptions,
 };
 pub use image_edit::{
-    crop_page_image, delete_page_image, extract_page_images, reorder_page_image,
-    replace_page_image, replace_page_image_from_file, set_page_image_opacity,
-    snap_to_alignment_guides, transform_page_image, ImageTransformOptions, PageImage,
-    SnapGuide, SnapGuideOrientation, SnappedPosition, ZOrderAction,
+    crop_page_image, delete_page_image, extract_all_images_to_dir, extract_image_to_file,
+    extract_page_images, reorder_page_image, replace_page_image, replace_page_image_from_file,
+    set_page_image_opacity, snap_to_alignment_guides, transform_page_image, ImageTransformOptions,
+    PageImage, SnapGuide, SnapGuideOrientation, SnappedPosition, ZOrderAction,
 };
 pub use labels::{
     format_page_label, get_page_label, get_page_labels, set_page_labels, PageLabelRange,
