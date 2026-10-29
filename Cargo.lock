@@ -2505,6 +2505,7 @@ name = "ravpdf-annot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "ravpdf-core",
  "regex",
  "thiserror 2.0.21",
@@ -2516,6 +2517,7 @@ name = "ravpdf-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "image",
  "ravpdf-annot",
@@ -2588,6 +2590,7 @@ name = "ravpdf-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "eframe",
  "image",
  "ravpdf-annot",

@@ -9,9 +9,12 @@ use ravpdf_crypto::{
     decrypt_document, encrypt_document_with_algorithm, sign_pdf_document_advanced, DigitalId,
     DocMdpPermission, EncryptionAlgorithm, Permissions, SigningOptions,
 };
+use ravpdf_annot::{add_stamp_annotation, StampConfig, StandardStamp};
 use ravpdf_edit::{
-    create_pdf_from_markdown, extract_page_text_spans, merge_documents,
-    replace_text_span_in_page, rotate_page, split_document, MarkdownPdfOptions,
+    create_pdf_from_markdown, crop_page_image, delete_page_image, extract_page_images,
+    extract_page_text_spans, merge_documents, reorder_page_image, replace_page_image_from_file,
+    replace_text_span_in_page, rotate_page, set_page_image_opacity, split_document,
+    transform_page_image, ImageTransformOptions, MarkdownPdfOptions, ZOrderAction,
 };
 use ravpdf_forms::{
     apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
@@ -534,6 +537,96 @@ enum Commands {
 
         #[arg(long, default_value_t = 54.0, help = "Page margin in points")]
         margin: f64,
+    },
+
+    #[command(about = "Inspect and list image XObjects on a page or document (FR-05.1 - FR-05.12)")]
+    Images {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, help = "Page number (1-based, or all pages if omitted)")]
+        page: Option<usize>,
+    },
+
+    #[command(about = "Edit, transform, replace, crop, or delete images on a page (FR-05.2 - FR-05.11)")]
+    EditImage {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, required = true, help = "Image XObject name (e.g. Im1)")]
+        name: String,
+
+        #[arg(long, help = "Replace image with new image file (FR-05.2)")]
+        replace: Option<PathBuf>,
+
+        #[arg(long, help = "Delete the image from the page (FR-05.3)")]
+        delete: bool,
+
+        #[arg(long, help = "Translate to new coordinates: 'x,y' (FR-05.8)")]
+        position: Option<String>,
+
+        #[arg(long, help = "Resize to new width and height: 'w,h' (FR-05.4)")]
+        size: Option<String>,
+
+        #[arg(long, help = "Rotation angle in degrees (0-360) (FR-05.5)")]
+        rotate: Option<f64>,
+
+        #[arg(long, help = "Flip image horizontally (FR-05.7)")]
+        flip_h: bool,
+
+        #[arg(long, help = "Flip image vertically (FR-05.7)")]
+        flip_v: bool,
+
+        #[arg(long, help = "Vector crop frame: 'x,y,w,h' (FR-05.6)")]
+        crop: Option<String>,
+
+        #[arg(long, help = "Opacity from 0.0 to 1.0 (FR-05.10)")]
+        opacity: Option<f32>,
+
+        #[arg(long, help = "Z-order adjustment: front, back, forward, backward (FR-05.11)")]
+        z_order: Option<String>,
+    },
+
+    #[command(about = "Apply a standard, dynamic, or sign-here rubber stamp (FR-10.1 - FR-10.7)")]
+    Stamp {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, default_value = "Approved", help = "Stamp type: Approved, Draft, Confidential, Void, SignHere, etc.")]
+        stamp_type: String,
+
+        #[arg(long, help = "Author / reviewer identity name")]
+        author: Option<String>,
+
+        #[arg(long, help = "Embed dynamic current date and timestamp (FR-10.3)")]
+        dynamic: bool,
+
+        #[arg(long, help = "Custom stamp text override")]
+        text: Option<String>,
+
+        #[arg(long, default_value = "72,650,180,56", help = "Stamp rectangle: 'x,y,w,h'")]
+        rect: String,
+
+        #[arg(long, default_value_t = -8.0, help = "Tilt rotation in degrees (e.g. -8.0)")]
+        tilt: f64,
+
+        #[arg(long, default_value_t = 0.92, help = "Alpha opacity (0.0 - 1.0)")]
+        opacity: f32,
+
+        #[arg(long, help = "Optional pop-up note comment (FR-10.7)")]
+        note: Option<String>,
     },
 }
 
@@ -2675,6 +2768,225 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
                 println!("Generated {} page(s) PDF document from Markdown: {}", count, output.display());
+            }
+        }
+
+        Commands::Images { input, page } => {
+            let doc = PdfDocument::load_from_file(&input)?;
+            let total_pages = doc.page_count();
+            let pages_to_scan: Vec<usize> = match page {
+                Some(p) if p >= 1 && p <= total_pages => vec![p - 1],
+                Some(p) => return Err(anyhow!("Page {} out of range (1..={})", p, total_pages)),
+                None => (0..total_pages).collect(),
+            };
+
+            let mut all_page_images = Vec::new();
+            for p_idx in pages_to_scan {
+                let images = extract_page_images(&doc, p_idx)?;
+                for im in images {
+                    all_page_images.push((p_idx + 1, im));
+                }
+            }
+
+            if cli.json {
+                let json_items: Vec<_> = all_page_images
+                    .iter()
+                    .map(|(p, im)| {
+                        serde_json::json!({
+                            "page": p,
+                            "name": im.name,
+                            "object_id": format!("{} {} R", im.obj_id.number, im.obj_id.generation),
+                            "pixel_width": im.pixel_width,
+                            "pixel_height": im.pixel_height,
+                            "color_space": im.color_space,
+                            "bits_per_component": im.bits_per_component,
+                            "filter": im.filter,
+                            "display": {
+                                "x": im.display_x,
+                                "y": im.display_y,
+                                "width": im.display_width,
+                                "height": im.display_height,
+                                "rotation_deg": im.rotation_deg,
+                                "flipped_h": im.flipped_h,
+                                "flipped_v": im.flipped_v,
+                                "opacity": im.opacity,
+                                "clip_rect": im.clip_rect,
+                            }
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&json_items)?);
+            } else {
+                println!("=== RavPDF Page Images ({}) ===", all_page_images.len());
+                for (p, im) in &all_page_images {
+                    println!(
+                        "Page {}: /{:<6} | Pixels: {}x{} | Bounds: ({:.1}, {:.1}, {:.1}x{:.1} pt) | Color: {} ({}bpc) | Rot: {:.1}° | Opacity: {:.2}",
+                        p, im.name, im.pixel_width, im.pixel_height, im.display_x, im.display_y, im.display_width, im.display_height, im.color_space, im.bits_per_component, im.rotation_deg, im.opacity
+                    );
+                }
+            }
+        }
+
+        Commands::EditImage {
+            input,
+            output,
+            page,
+            name,
+            replace,
+            delete,
+            position,
+            size,
+            rotate,
+            flip_h,
+            flip_v,
+            crop,
+            opacity,
+            z_order,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let total_pages = doc.page_count();
+            if page == 0 || page > total_pages {
+                return Err(anyhow!("Page {} out of range (1..={})", page, total_pages));
+            }
+            let page_idx = page - 1;
+
+            if delete {
+                delete_page_image(&mut doc, page_idx, &name)?;
+            } else {
+                if let Some(ref rep_path) = replace {
+                    replace_page_image_from_file(&mut doc, page_idx, &name, rep_path)?;
+                }
+
+                let parsed_pos = position.as_deref().and_then(|s| {
+                    s.split_once(',').and_then(|(x, y)| {
+                        if let (Ok(px), Ok(py)) = (x.trim().parse::<f64>(), y.trim().parse::<f64>()) {
+                            Some((px, py))
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+                let parsed_size = size.as_deref().and_then(|s| {
+                    s.split_once(',').and_then(|(w, h)| {
+                        if let (Ok(pw), Ok(ph)) = (w.trim().parse::<f64>(), h.trim().parse::<f64>()) {
+                            Some((pw, ph))
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+                if parsed_pos.is_some() || parsed_size.is_some() || rotate.is_some() || flip_h || flip_v {
+                    let transform_opts = ImageTransformOptions {
+                        position: parsed_pos,
+                        size: parsed_size,
+                        rotation_deg: rotate,
+                        flip_h,
+                        flip_v,
+                        lock_aspect_ratio: false,
+                    };
+                    transform_page_image(&mut doc, page_idx, &name, &transform_opts)?;
+                }
+
+                if let Some(ref crop_str) = crop {
+                    if let Some(cr) = parse_rect(crop_str) {
+                        crop_page_image(&mut doc, page_idx, &name, cr)?;
+                    }
+                }
+
+                if let Some(op) = opacity {
+                    set_page_image_opacity(&mut doc, page_idx, &name, op)?;
+                }
+
+                if let Some(ref zo) = z_order {
+                    let action = match zo.to_lowercase().as_str() {
+                        "front" | "bringtofront" => ZOrderAction::BringToFront,
+                        "back" | "sendtoback" => ZOrderAction::SendToBack,
+                        "forward" | "moveforward" => ZOrderAction::MoveForward,
+                        "backward" | "movebackward" => ZOrderAction::MoveBackward,
+                        _ => ZOrderAction::BringToFront,
+                    };
+                    reorder_page_image(&mut doc, page_idx, &name, action)?;
+                }
+            }
+
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "page": page,
+                    "image": name,
+                    "deleted": delete,
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!(
+                    "Successfully updated image '/{}' on page {} -> {}",
+                    name,
+                    page,
+                    output.display()
+                );
+            }
+        }
+
+        Commands::Stamp {
+            input,
+            output,
+            page,
+            stamp_type,
+            author,
+            dynamic,
+            text,
+            rect,
+            tilt,
+            opacity,
+            note,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let total_pages = doc.page_count();
+            if page == 0 || page > total_pages {
+                return Err(anyhow!("Page {} out of range (1..={})", page, total_pages));
+            }
+            let page_idx = page - 1;
+
+            let parsed_rect = parse_rect(&rect).unwrap_or([72.0, 650.0, 180.0, 56.0]);
+            let s_type = StandardStamp::from_str_loose(&stamp_type);
+
+            let config = StampConfig {
+                stamp_type: s_type.clone(),
+                rect: parsed_rect,
+                author,
+                dynamic_date: if dynamic { Some(chrono::Utc::now()) } else { None },
+                custom_text: text,
+                color: None,
+                opacity,
+                rotation_deg: tilt,
+                popup_note: note,
+            };
+
+            let stamp_id = add_stamp_annotation(&mut doc, page_idx, &config)?;
+            doc.save_to_file(&output)?;
+
+            if cli.json {
+                let json = serde_json::json!({
+                    "input": input.to_string_lossy(),
+                    "output": output.to_string_lossy(),
+                    "page": page,
+                    "stamp_type": s_type.pdf_name(),
+                    "stamp_label": s_type.label(),
+                    "object_id": format!("{} {} R", stamp_id.number, stamp_id.generation),
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!(
+                    "Applied '{}' stamp on page {} -> {}",
+                    s_type.label(),
+                    page,
+                    output.display()
+                );
             }
         }
     }

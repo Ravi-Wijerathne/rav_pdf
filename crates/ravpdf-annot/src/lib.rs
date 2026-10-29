@@ -6,10 +6,21 @@
 //! - FR-10 (Stamps: rubber stamps, approval marks)
 
 pub mod annotation;
+pub mod drawing;
+pub mod stamps;
 
 pub use annotation::{
     add_annotation_to_page, detect_urls_in_text, get_page_annotations, Annotation, AnnotationType,
     LinkAction, LinkHighlight,
+};
+pub use drawing::{
+    add_ink_annotation, add_shape_annotation, erase_ink_strokes, set_annotation_locked,
+    snap_angle_orthogonal, snap_node_to_points, BorderEffect, BorderStyle, InkAnnotationConfig,
+    LineEndingStyle, ShapeAnnotationConfig, ShapeType,
+};
+pub use stamps::{
+    add_callout_annotation, add_stamp_annotation, add_typewriter_annotation, CalloutConfig,
+    StampConfig, StandardStamp, TypewriterConfig,
 };
 
 #[cfg(test)]

@@ -941,6 +941,307 @@ Section continued with detailed specifications.
     assert!(times_sub.is_exact_match);
 }
 
+#[test]
+fn test_image_editing_and_stamping_workflows() {
+    use ravpdf_annot::{
+        add_callout_annotation, add_stamp_annotation, add_typewriter_annotation, CalloutConfig,
+        StampConfig, StandardStamp, TypewriterConfig,
+    };
+    use ravpdf_edit::{
+        crop_page_image, delete_page_image, extract_page_images, insert_raw_image,
+        reorder_page_image, set_page_image_opacity, transform_page_image, ImageTransformOptions,
+        ZOrderAction,
+    };
+    use ravpdf_render::{render_page, RenderOptions};
+
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0);
+
+    // 1. Insert Image XObject (FR-05.1)
+    let raw_rgb = vec![
+        255, 0, 0, 0, 255, 0,
+        0, 0, 255, 255, 255, 0,
+    ];
+    insert_raw_image(&mut doc, 0, raw_rgb, 2, 2, 80.0, 500.0, 200.0, 100.0)
+        .expect("insert image");
+
+    // 2. Extract and inspect page images (FR-05.1 - FR-05.12)
+    let images = extract_page_images(&doc, 0).expect("extract images");
+    assert_eq!(images.len(), 1);
+    let im_name = images[0].name.clone();
+    assert_eq!(images[0].display_x, 80.0);
+    assert_eq!(images[0].display_y, 500.0);
+    assert_eq!(images[0].display_width, 200.0);
+    assert_eq!(images[0].display_height, 100.0);
+    assert_eq!(images[0].rotation_deg, 0.0);
+
+    // 3. Transform image: translate, scale, rotate, flip (FR-05.4, FR-05.5, FR-05.7, FR-05.8)
+    let transform_opts = ImageTransformOptions {
+        position: Some((100.0, 520.0)),
+        size: Some((150.0, 75.0)),
+        rotation_deg: Some(45.0),
+        flip_h: true,
+        flip_v: false,
+        lock_aspect_ratio: false,
+    };
+    transform_page_image(&mut doc, 0, &im_name, &transform_opts).expect("transform image");
+
+    let updated_images = extract_page_images(&doc, 0).expect("extract updated");
+    assert_eq!(updated_images.len(), 1);
+    assert_eq!(updated_images[0].display_x, 100.0);
+    assert_eq!(updated_images[0].display_y, 520.0);
+    assert!((updated_images[0].display_width - 150.0).abs() < 1.0);
+    assert!((updated_images[0].rotation_deg - 45.0).abs() < 1.0);
+
+    // 4. Crop image and set opacity (FR-05.6, FR-05.10)
+    crop_page_image(&mut doc, 0, &im_name, [90.0, 510.0, 160.0, 90.0]).expect("crop image");
+    set_page_image_opacity(&mut doc, 0, &im_name, 0.85).expect("set opacity");
+
+    let with_effects = extract_page_images(&doc, 0).expect("extract with effects");
+    assert!((with_effects[0].opacity - 0.85).abs() < 0.05);
+    assert_eq!(with_effects[0].clip_rect, Some([90.0, 510.0, 160.0, 90.0]));
+
+    // 5. Z-order management (FR-05.11)
+    reorder_page_image(&mut doc, 0, &im_name, ZOrderAction::BringToFront).expect("bring to front");
+    reorder_page_image(&mut doc, 0, &im_name, ZOrderAction::SendToBack).expect("send to back");
+
+    // 6. Apply Standard & Dynamic Rubber Stamps (FR-10.1 - FR-10.7)
+    let stamp_cfg = StampConfig {
+        stamp_type: StandardStamp::Approved,
+        rect: [72.0, 680.0, 180.0, 56.0],
+        author: Some("ChiefArchitect".to_string()),
+        dynamic_date: Some(chrono::Utc::now()),
+        custom_text: None,
+        color: None,
+        opacity: 0.95,
+        rotation_deg: -10.0,
+        popup_note: Some("Architectural design signoff".to_string()),
+    };
+    let stamp_id = add_stamp_annotation(&mut doc, 0, &stamp_cfg).expect("add stamp");
+    assert!(doc.objects.contains_key(&stamp_id));
+
+    // Sign Here Stamp (FR-10.2)
+    let sign_cfg = StampConfig {
+        stamp_type: StandardStamp::SignHere,
+        rect: [350.0, 680.0, 140.0, 42.0],
+        author: None,
+        dynamic_date: None,
+        custom_text: None,
+        color: None,
+        opacity: 1.0,
+        rotation_deg: 0.0,
+        popup_note: None,
+    };
+    let sign_id = add_stamp_annotation(&mut doc, 0, &sign_cfg).expect("add sign here stamp");
+    assert!(doc.objects.contains_key(&sign_id));
+
+    // 7. Callout annotation (FR-08.1.3)
+    let callout_cfg = CalloutConfig {
+        text_rect: [250.0, 300.0, 180.0, 44.0],
+        text: "Verify security protocol".to_string(),
+        leader_start: (120.0, 400.0),
+        leader_knee: (180.0, 340.0),
+        border_color: (0.1, 0.45, 0.85),
+        fill_color: Some((0.95, 0.97, 1.0)),
+        text_color: (0.1, 0.1, 0.1),
+        font_size: 10.0,
+        author: Some("SecurityAudit".to_string()),
+    };
+    let callout_id = add_callout_annotation(&mut doc, 0, &callout_cfg).expect("add callout");
+    assert!(doc.objects.contains_key(&callout_id));
+
+    // 8. Typewriter annotation (FR-08.1.4)
+    let tw_cfg = TypewriterConfig {
+        pos: (72.0, 200.0),
+        text: "APPROVED FOR PRODUCTION RELEASE".to_string(),
+        font_size: 12.0,
+        color: (0.0, 0.5, 0.0),
+        author: Some("QA Lead".to_string()),
+    };
+    let tw_id = add_typewriter_annotation(&mut doc, 0, &tw_cfg).expect("add typewriter");
+    assert!(doc.objects.contains_key(&tw_id));
+
+    // 9. Full page rendering verification (FR-01.1.1, FR-08, FR-10)
+    let render_opts = RenderOptions::default();
+    let pixmap = render_page(&doc, 0, &render_opts).expect("render stamped page");
+    assert_eq!(pixmap.width(), 612);
+    assert_eq!(pixmap.height(), 792);
+
+    // 10. Delete image verification (FR-05.3)
+    delete_page_image(&mut doc, 0, &im_name).expect("delete image");
+    let after_delete = extract_page_images(&doc, 0).expect("extract after delete");
+    assert_eq!(after_delete.len(), 0);
+}
+
+#[test]
+fn test_drawing_shapes_and_ink_annotations_workflows() {
+    use ravpdf_annot::{
+        add_ink_annotation, add_shape_annotation, erase_ink_strokes, set_annotation_locked,
+        snap_angle_orthogonal, snap_node_to_points, BorderEffect, BorderStyle, InkAnnotationConfig,
+        LineEndingStyle, ShapeAnnotationConfig, ShapeType,
+    };
+    use ravpdf_render::{render_page, RenderOptions};
+
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0);
+
+    // 1. Freehand Ink Annotation with Catmull-Rom smoothing (FR-09.1, FR-09.11, FR-09.12)
+    let stroke_a = vec![
+        [100.0, 600.0],
+        [120.0, 640.0],
+        [150.0, 660.0],
+        [190.0, 630.0],
+    ];
+    let stroke_b = vec![
+        [250.0, 600.0],
+        [270.0, 630.0],
+        [300.0, 610.0],
+    ];
+    let ink_cfg = InkAnnotationConfig {
+        strokes: vec![stroke_a, stroke_b],
+        stroke_width: 2.5,
+        color: (0.1, 0.4, 0.9),
+        opacity: 0.85,
+        smooth: true,
+        author: Some("LeadDraftsman".to_string()),
+        locked: true,
+        popup_note: Some("Architectural elevation note".to_string()),
+    };
+    let ink_id = add_ink_annotation(&mut doc, 0, &ink_cfg).expect("add ink annotation");
+    assert!(doc.objects.contains_key(&ink_id));
+
+    let ink_obj = doc.objects.get(&ink_id).unwrap().as_dict().unwrap();
+    assert_eq!(ink_obj.get_name("Subtype"), Some("Ink"));
+    assert_eq!(ink_obj.get_i64("F"), Some(132)); // 4 (Print) + 128 (Locked)
+    assert!(ink_obj.contains_key("AP"));
+
+    // 2. Eraser Tool removing ink stroke A (FR-09.2)
+    let erased = erase_ink_strokes(&mut doc, 0, ink_id, [122.0, 638.0], 12.0).expect("erase stroke");
+    assert!(erased);
+    assert!(doc.objects.contains_key(&ink_id));
+    let updated_ink = doc.objects.get(&ink_id).unwrap().as_dict().unwrap();
+    let updated_strokes = updated_ink.get_array("InkList").unwrap();
+    assert_eq!(updated_strokes.len(), 1);
+
+    // 3. Rectangle with Fill & Cloudy Border (FR-09.5, FR-09.9)
+    let cloud_rect_cfg = ShapeAnnotationConfig {
+        shape_type: ShapeType::Rectangle,
+        rect: [50.0, 400.0, 250.0, 520.0],
+        stroke_color: Some((0.8, 0.2, 0.2)),
+        fill_color: Some((1.0, 0.95, 0.95)),
+        stroke_width: 2.0,
+        border_style: BorderStyle::Solid,
+        border_effect: BorderEffect::Cloudy { intensity: 1.5 },
+        opacity: 0.9,
+        author: Some("StructuralInspector".to_string()),
+        locked: false,
+        popup_note: Some("Revision Cloud 1".to_string()),
+    };
+    let rect_id = add_shape_annotation(&mut doc, 0, &cloud_rect_cfg).expect("add cloud rect");
+    assert!(doc.objects.contains_key(&rect_id));
+    let rect_dict = doc.objects.get(&rect_id).unwrap().as_dict().unwrap();
+    assert_eq!(rect_dict.get_name("Subtype"), Some("Square"));
+    assert!(rect_dict.contains_key("BE"));
+
+    // 4. Circle / Ellipse with Fill & Dashed Border (FR-09.6, FR-09.3)
+    let circle_cfg = ShapeAnnotationConfig {
+        shape_type: ShapeType::Circle,
+        rect: [300.0, 400.0, 450.0, 520.0],
+        stroke_color: Some((0.1, 0.7, 0.3)),
+        fill_color: Some((0.9, 1.0, 0.9)),
+        stroke_width: 1.5,
+        border_style: BorderStyle::Dashed(vec![4.0, 4.0]),
+        border_effect: BorderEffect::None,
+        opacity: 0.95,
+        author: None,
+        locked: false,
+        popup_note: None,
+    };
+    let circle_id = add_shape_annotation(&mut doc, 0, &circle_cfg).expect("add circle");
+    assert!(doc.objects.contains_key(&circle_id));
+    let circle_dict = doc.objects.get(&circle_id).unwrap().as_dict().unwrap();
+    assert_eq!(circle_dict.get_name("Subtype"), Some("Circle"));
+
+    // 5. Line and Double-Headed Arrow with Custom Endings (FR-09.3, FR-09.4)
+    let arrow_cfg = ShapeAnnotationConfig {
+        shape_type: ShapeType::Line {
+            start: [100.0, 320.0],
+            end: [400.0, 320.0],
+            start_style: LineEndingStyle::OpenArrow,
+            end_style: LineEndingStyle::ClosedArrow,
+        },
+        rect: [100.0, 320.0, 400.0, 320.0],
+        stroke_color: Some((0.9, 0.5, 0.0)),
+        fill_color: Some((0.9, 0.5, 0.0)),
+        stroke_width: 3.0,
+        border_style: BorderStyle::Solid,
+        border_effect: BorderEffect::None,
+        opacity: 1.0,
+        author: None,
+        locked: false,
+        popup_note: None,
+    };
+    let arrow_id = add_shape_annotation(&mut doc, 0, &arrow_cfg).expect("add arrow");
+    assert!(doc.objects.contains_key(&arrow_id));
+    let arrow_dict = doc.objects.get(&arrow_id).unwrap().as_dict().unwrap();
+    assert_eq!(arrow_dict.get_name("Subtype"), Some("Line"));
+    let le = arrow_dict.get_array("LE").unwrap();
+    assert_eq!(le[0].as_name(), Some("OpenArrow"));
+    assert_eq!(le[1].as_name(), Some("ClosedArrow"));
+
+    // 6. Polygon & Polyline (FR-09.7, FR-09.8)
+    let poly_cfg = ShapeAnnotationConfig {
+        shape_type: ShapeType::Polygon {
+            vertices: vec![
+                [100.0, 150.0],
+                [200.0, 250.0],
+                [300.0, 150.0],
+            ],
+        },
+        rect: [100.0, 150.0, 300.0, 250.0],
+        stroke_color: Some((0.5, 0.1, 0.8)),
+        fill_color: Some((0.9, 0.85, 1.0)),
+        stroke_width: 2.0,
+        border_style: BorderStyle::Solid,
+        border_effect: BorderEffect::None,
+        opacity: 0.8,
+        author: None,
+        locked: false,
+        popup_note: None,
+    };
+    let poly_id = add_shape_annotation(&mut doc, 0, &poly_cfg).expect("add polygon");
+    assert!(doc.objects.contains_key(&poly_id));
+    let poly_dict = doc.objects.get(&poly_id).unwrap().as_dict().unwrap();
+    assert_eq!(poly_dict.get_name("Subtype"), Some("Polygon"));
+    assert!(poly_dict.contains_key("Vertices"));
+
+    // 7. Node Snapping & Angle Snapping (FR-09.10)
+    let key_points = vec![[100.0, 150.0], [200.0, 250.0], [300.0, 150.0]];
+    let (snapped, did_snap) = snap_node_to_points([103.0, 149.0], &key_points, 6.0);
+    assert!(did_snap);
+    assert_eq!(snapped, [100.0, 150.0]);
+
+    let ortho = snap_angle_orthogonal([0.0, 0.0], [150.0, 3.0], 5.0);
+    assert!(ortho[1].abs() < 1e-3);
+
+    // 8. Lock Toggle Verification (FR-09.12)
+    set_annotation_locked(&mut doc, rect_id, true).expect("lock rect");
+    let locked_rect = doc.objects.get(&rect_id).unwrap().as_dict().unwrap();
+    assert_eq!(locked_rect.get_i64("F").unwrap() & 128, 128);
+
+    set_annotation_locked(&mut doc, rect_id, false).expect("unlock rect");
+    let unlocked_rect = doc.objects.get(&rect_id).unwrap().as_dict().unwrap();
+    assert_eq!(unlocked_rect.get_i64("F").unwrap() & 128, 0);
+
+    // 9. Full page rasterization verifying all vector shape appearances (FR-01.1.1)
+    let render_opts = RenderOptions::default();
+    let pixmap = render_page(&doc, 0, &render_opts).expect("render drawn shapes page");
+    assert_eq!(pixmap.width(), 612);
+    assert_eq!(pixmap.height(), 792);
+}
+
+
+
 
 
 
