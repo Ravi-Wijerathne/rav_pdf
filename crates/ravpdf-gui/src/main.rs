@@ -24,17 +24,23 @@ use eframe::egui::{
     Stroke, Vec2,
 };
 use ravpdf_annot::{
-    add_annotation_to_page, get_page_annotations, Annotation, AnnotationType, LinkAction,
+    add_annotation_to_page, add_ink_annotation, add_shape_annotation, add_stamp_annotation,
+    erase_ink_strokes, get_page_annotations, Annotation, AnnotationType, BorderEffect,
+    BorderStyle, InkAnnotationConfig, LineEndingStyle, LinkAction, ShapeAnnotationConfig,
+    ShapeType, StampConfig, StandardStamp,
 };
 use ravpdf_core::document::{paper_sizes, PdfDocument};
 use ravpdf_core::outline::{add_bookmark, Bookmark};
 use ravpdf_edit::{
     create_pdf_from_images, create_pdf_from_markdown, create_pdf_from_text, crop_page,
-    delete_page, duplicate_page, extract_page_text_spans, extract_pages, get_page_label,
-    get_page_labels, insert_blank_page, insert_formatted_text_block, insert_image_file,
-    merge_documents, reorder_pages, replace_text_span_in_page, rotate_page, set_page_labels,
-    split_document, suggest_font_substitute, FormattedTextBlockOptions, ImagePdfOptions,
-    MarkdownPdfOptions, PageLabelRange, PageLabelStyle, TextAlignment, TextPdfOptions, TextSpan,
+    crop_page_image, delete_page, delete_page_image, duplicate_page, extract_page_images,
+    extract_page_text_spans, extract_pages, get_page_label, get_page_labels, insert_blank_page,
+    insert_formatted_text_block, insert_image_file, merge_documents, reorder_page_image,
+    reorder_pages, replace_page_image_from_file, replace_text_span_in_page, rotate_page,
+    set_page_image_opacity, set_page_labels, snap_to_alignment_guides, split_document,
+    suggest_font_substitute, transform_page_image, FormattedTextBlockOptions, ImagePdfOptions,
+    ImageTransformOptions, MarkdownPdfOptions, PageImage, PageLabelRange, PageLabelStyle,
+    SnapGuide, TextAlignment, TextPdfOptions, TextSpan, ZOrderAction,
 };
 use ravpdf_crypto::{
     create_signature_field, encrypt_document_with_algorithm, get_document_signatures,
@@ -451,6 +457,72 @@ struct RavPdfApp {
     markdown_title: String,
     markdown_font_size: f64,
     markdown_margin: f64,
+
+    // Image Editor & Transform state (FR-05.1 - FR-05.12)
+    show_image_editor_dialog: bool,
+    image_editor_list: Vec<PageImage>,
+    image_editor_selected_idx: Option<usize>,
+    image_editor_pos_x: f64,
+    image_editor_pos_y: f64,
+    image_editor_width: f64,
+    image_editor_height: f64,
+    image_editor_rotation: f64,
+    image_editor_opacity: f32,
+    image_editor_lock_aspect: bool,
+    image_editor_flip_h: bool,
+    image_editor_flip_v: bool,
+    image_editor_crop_x: f64,
+    image_editor_crop_y: f64,
+    image_editor_crop_w: f64,
+    image_editor_crop_h: f64,
+    image_editor_snapping_enabled: bool,
+    image_editor_active_guides: Vec<SnapGuide>,
+
+    // Rubber Stamps state (FR-10.1 - FR-10.7)
+    show_stamp_dialog: bool,
+    stamp_type_idx: usize,
+    stamp_category_idx: usize,
+    stamp_author_input: String,
+    stamp_include_dynamic_date: bool,
+    stamp_custom_label: String,
+    stamp_pos_x: f64,
+    stamp_pos_y: f64,
+    stamp_width: f64,
+    stamp_height: f64,
+    stamp_tilt_deg: f64,
+    stamp_opacity: f32,
+    stamp_note_input: String,
+
+    // Drawing & Shape Tools state (FR-09)
+    show_drawing_dialog: bool,
+    drawing_category_idx: usize,
+    drawing_shape_idx: usize,
+    drawing_pos_x: f64,
+    drawing_pos_y: f64,
+    drawing_width: f64,
+    drawing_height: f64,
+    drawing_line_start_x: f64,
+    drawing_line_start_y: f64,
+    drawing_line_end_x: f64,
+    drawing_line_end_y: f64,
+    drawing_line_start_style_idx: usize,
+    drawing_line_end_style_idx: usize,
+    drawing_stroke_color: [f32; 3],
+    drawing_has_fill: bool,
+    drawing_fill_color: [f32; 3],
+    drawing_stroke_width: f64,
+    drawing_border_dash_idx: usize,
+    drawing_is_cloudy: bool,
+    drawing_cloudy_intensity: f64,
+    drawing_opacity: f32,
+    drawing_locked: bool,
+    drawing_note_input: String,
+    drawing_polygon_vertices_input: String,
+    drawing_ink_strokes_input: String,
+    drawing_ink_smooth: bool,
+    drawing_eraser_x: f64,
+    drawing_eraser_y: f64,
+    drawing_eraser_radius: f64,
 }
 
 impl Default for RavPdfApp {
@@ -721,6 +793,69 @@ impl Default for RavPdfApp {
             markdown_title: "Document Title".to_string(),
             markdown_font_size: 11.0,
             markdown_margin: 54.0,
+
+            show_image_editor_dialog: false,
+            image_editor_list: Vec::new(),
+            image_editor_selected_idx: None,
+            image_editor_pos_x: 72.0,
+            image_editor_pos_y: 500.0,
+            image_editor_width: 200.0,
+            image_editor_height: 150.0,
+            image_editor_rotation: 0.0,
+            image_editor_opacity: 1.0,
+            image_editor_lock_aspect: true,
+            image_editor_flip_h: false,
+            image_editor_flip_v: false,
+            image_editor_crop_x: 0.0,
+            image_editor_crop_y: 0.0,
+            image_editor_crop_w: 200.0,
+            image_editor_crop_h: 150.0,
+            image_editor_snapping_enabled: true,
+            image_editor_active_guides: Vec::new(),
+
+            show_stamp_dialog: false,
+            stamp_type_idx: 0,
+            stamp_category_idx: 0,
+            stamp_author_input: "Reviewer".to_string(),
+            stamp_include_dynamic_date: true,
+            stamp_custom_label: "CONFIDENTIAL".to_string(),
+            stamp_pos_x: 72.0,
+            stamp_pos_y: 650.0,
+            stamp_width: 180.0,
+            stamp_height: 56.0,
+            stamp_tilt_deg: -8.0,
+            stamp_opacity: 0.92,
+            stamp_note_input: String::new(),
+
+            show_drawing_dialog: false,
+            drawing_category_idx: 0,
+            drawing_shape_idx: 0,
+            drawing_pos_x: 100.0,
+            drawing_pos_y: 500.0,
+            drawing_width: 200.0,
+            drawing_height: 120.0,
+            drawing_line_start_x: 100.0,
+            drawing_line_start_y: 400.0,
+            drawing_line_end_x: 350.0,
+            drawing_line_end_y: 400.0,
+            drawing_line_start_style_idx: 0,
+            drawing_line_end_style_idx: 4, // OpenArrow
+            drawing_stroke_color: [0.85, 0.15, 0.15],
+            drawing_has_fill: false,
+            drawing_fill_color: [0.95, 0.95, 0.95],
+            drawing_stroke_width: 2.0,
+            drawing_border_dash_idx: 0,
+            drawing_is_cloudy: false,
+            drawing_cloudy_intensity: 1.0,
+            drawing_opacity: 1.0,
+            drawing_locked: false,
+            drawing_note_input: String::new(),
+            drawing_polygon_vertices_input: "100,100; 250,180; 300,80; 180,40".to_string(),
+            drawing_ink_strokes_input: "100,100; 120,130; 160,150; 200,120".to_string(),
+            drawing_ink_smooth: true,
+            drawing_eraser_x: 150.0,
+            drawing_eraser_y: 130.0,
+            drawing_eraser_radius: 20.0,
             plugin_registry: {
                 let mut reg = PluginRegistry::new();
                 let sample = Box::new(SampleWatermarkPlugin::new());
@@ -922,6 +1057,62 @@ impl RavPdfApp {
                     self.status_message = format!("Failed to extract page text: {}", e);
                 }
             }
+        }
+    }
+
+    /// Opens the image editor dialog and inspects all image XObjects on the active page (FR-05.1 - FR-05.12).
+    fn open_image_editor_dialog(&mut self) {
+        if let Some(tab) = self.active_tab() {
+            let curr = tab.current_page;
+            match extract_page_images(&tab.doc, curr) {
+                Ok(imgs) => {
+                    self.image_editor_list = imgs;
+                    if !self.image_editor_list.is_empty() {
+                        self.image_editor_selected_idx = Some(0);
+                        let first = &self.image_editor_list[0];
+                        self.image_editor_pos_x = first.display_x;
+                        self.image_editor_pos_y = first.display_y;
+                        self.image_editor_width = first.display_width;
+                        self.image_editor_height = first.display_height;
+                        self.image_editor_rotation = first.rotation_deg;
+                        self.image_editor_opacity = first.opacity;
+                        self.image_editor_flip_h = first.flipped_h;
+                        self.image_editor_flip_v = first.flipped_v;
+                        if let Some(c) = first.clip_rect {
+                            self.image_editor_crop_x = c[0];
+                            self.image_editor_crop_y = c[1];
+                            self.image_editor_crop_w = c[2];
+                            self.image_editor_crop_h = c[3];
+                        } else {
+                            self.image_editor_crop_x = first.display_x;
+                            self.image_editor_crop_y = first.display_y;
+                            self.image_editor_crop_w = first.display_width;
+                            self.image_editor_crop_h = first.display_height;
+                        }
+                    } else {
+                        self.image_editor_selected_idx = None;
+                    }
+                    self.show_image_editor_dialog = true;
+                    self.status_message = format!("Loaded {} image(s) from page {}", self.image_editor_list.len(), curr + 1);
+                }
+                Err(e) => {
+                    self.status_message = format!("Failed to extract page images: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Opens the Rubber Stamps modal dialog (FR-10.1 - FR-10.7).
+    fn open_stamp_dialog(&mut self) {
+        if let Some(tab) = self.active_tab() {
+            let curr = tab.current_page;
+            if let Some(page) = tab.doc.get_page(curr) {
+                let w = (page.crop_box[2] - page.crop_box[0]).abs();
+                let h = (page.crop_box[3] - page.crop_box[1]).abs();
+                self.stamp_pos_x = ((w - self.stamp_width).max(36.0)) / 2.0;
+                self.stamp_pos_y = h * 0.75;
+            }
+            self.show_stamp_dialog = true;
         }
     }
 
@@ -1450,6 +1641,27 @@ impl RavPdfApp {
                         .clicked()
                     {
                         self.insert_image_dialog();
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("🖼️ Edit & Transform Images... (FR-05)"))
+                        .clicked()
+                    {
+                        self.open_image_editor_dialog();
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("🏷️ Rubber Stamps & Sign Here... (FR-10)"))
+                        .clicked()
+                    {
+                        self.open_stamp_dialog();
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("📐 Drawing & Shape Tools... (FR-09)"))
+                        .clicked()
+                    {
+                        self.show_drawing_dialog = true;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -8662,6 +8874,971 @@ impl RavPdfApp {
 
             if close {
                 self.show_markdown_dialog = false;
+            }
+        }
+
+        // Image Editor & Transform Pipeline Dialog (FR-05.1 - FR-05.12)
+        if self.show_image_editor_dialog {
+            let mut close = false;
+            let mut apply_transform = false;
+            let mut replace_file = false;
+            let mut delete_img = false;
+            let mut apply_crop = false;
+            let mut z_order_action: Option<ZOrderAction> = None;
+
+            egui::Window::new("🖼️ Edit & Transform Images (FR-05)")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(580.0)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    if self.image_editor_list.is_empty() {
+                        ui.label(RichText::new("No image XObjects found on the current page.").italics());
+                        ui.add_space(8.0);
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                        return;
+                    }
+
+                    ui.label(RichText::new("Select an image to inspect, reposition, resize, rotate, crop, or adjust opacity:").small());
+                    ui.add_space(4.0);
+
+                    // Image selector combo / radio list
+                    ui.horizontal(|ui| {
+                        ui.label("Active Image:");
+                        let cur_sel = self.image_editor_selected_idx.unwrap_or(0);
+                        let cur_name = self.image_editor_list.get(cur_sel).map(|im| im.name.clone()).unwrap_or_default();
+                        egui::ComboBox::from_id_salt("image_editor_selector")
+                            .selected_text(format!("/{}", cur_name))
+                            .show_ui(ui, |ui| {
+                                for (i, im) in self.image_editor_list.iter().enumerate() {
+                                    if ui.selectable_label(self.image_editor_selected_idx == Some(i), format!("/{} ({}x{} px)", im.name, im.pixel_width, im.pixel_height)).clicked() {
+                                        self.image_editor_selected_idx = Some(i);
+                                        self.image_editor_pos_x = im.display_x;
+                                        self.image_editor_pos_y = im.display_y;
+                                        self.image_editor_width = im.display_width;
+                                        self.image_editor_height = im.display_height;
+                                        self.image_editor_rotation = im.rotation_deg;
+                                        self.image_editor_opacity = im.opacity;
+                                        self.image_editor_flip_h = im.flipped_h;
+                                        self.image_editor_flip_v = im.flipped_v;
+                                    }
+                                }
+                            });
+                    });
+
+                    if let Some(sel_idx) = self.image_editor_selected_idx {
+                        if let Some(im) = self.image_editor_list.get(sel_idx).cloned() {
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("Pixel Dimensions: {}x{} px", im.pixel_width, im.pixel_height)).monospace());
+                                ui.separator();
+                                ui.label(RichText::new(format!("ColorSpace: {}", im.color_space)).monospace());
+                                ui.separator();
+                                ui.label(RichText::new(format!("Filter: {}", im.filter.as_deref().unwrap_or("Raw"))).monospace());
+                            });
+                            ui.separator();
+
+                            // Position & Snapping
+                            ui.horizontal(|ui| {
+                                ui.label("Position X:");
+                                ui.add(egui::DragValue::new(&mut self.image_editor_pos_x).speed(1.0).range(0.0..=2000.0));
+                                ui.label("Y:");
+                                ui.add(egui::DragValue::new(&mut self.image_editor_pos_y).speed(1.0).range(0.0..=2000.0));
+                                ui.checkbox(&mut self.image_editor_snapping_enabled, "Magnetic Snap (FR-05.9)");
+                            });
+
+                            // Alignment Guide Snapping Calculation (FR-05.9)
+                            if self.image_editor_snapping_enabled {
+                                let (page_w, page_h) = if let Some(tab) = self.active_tab() {
+                                    if let Some(p) = tab.doc.get_page(tab.current_page) {
+                                        ((p.crop_box[2] - p.crop_box[0]).abs(), (p.crop_box[3] - p.crop_box[1]).abs())
+                                    } else {
+                                        (612.0, 792.0)
+                                    }
+                                } else {
+                                    (612.0, 792.0)
+                                };
+
+                                let other_boxes: Vec<[f64; 4]> = self.image_editor_list
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(i, _)| *i != sel_idx)
+                                    .map(|(_, o)| [o.display_x, o.display_y, o.display_width, o.display_height])
+                                    .collect();
+
+                                let snapped = snap_to_alignment_guides(
+                                    (self.image_editor_pos_x, self.image_editor_pos_y),
+                                    (self.image_editor_width, self.image_editor_height),
+                                    [0.0, 0.0, page_w, page_h],
+                                    &other_boxes,
+                                    6.0,
+                                );
+
+                                if !snapped.active_guides.is_empty() {
+                                    self.image_editor_pos_x = snapped.snapped_x;
+                                    self.image_editor_pos_y = snapped.snapped_y;
+                                    self.image_editor_active_guides = snapped.active_guides.clone();
+
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("Snapping Guides:").color(Color32::from_rgb(56, 161, 105)));
+                                        for g in &snapped.active_guides {
+                                            ui.label(RichText::new(format!("[{} @ {:.1} pt]", g.label, g.coordinate)).small());
+                                        }
+                                    });
+                                }
+                            }
+
+                            // Size & Aspect Ratio Lock (FR-05.4)
+                            ui.horizontal(|ui| {
+                                ui.label("Width (pt):");
+                                let orig_w = self.image_editor_width;
+                                if ui.add(egui::DragValue::new(&mut self.image_editor_width).speed(1.0).range(5.0..=2000.0)).changed() && self.image_editor_lock_aspect && orig_w > 0.0 {
+                                    let ratio = im.display_height / im.display_width;
+                                    self.image_editor_height = self.image_editor_width * ratio;
+                                }
+                                ui.label("Height (pt):");
+                                if ui.add(egui::DragValue::new(&mut self.image_editor_height).speed(1.0).range(5.0..=2000.0)).changed() && self.image_editor_lock_aspect && im.display_height > 0.0 {
+                                    let ratio = im.display_width / im.display_height;
+                                    self.image_editor_width = self.image_editor_height * ratio;
+                                }
+                                ui.checkbox(&mut self.image_editor_lock_aspect, "Lock Aspect Ratio");
+                            });
+
+                            // Rotation (FR-05.5) & Flip (FR-05.7)
+                            ui.horizontal(|ui| {
+                                ui.label("Rotation (deg):");
+                                ui.add(egui::Slider::new(&mut self.image_editor_rotation, 0.0..=360.0).step_by(0.1).suffix("°"));
+                                if ui.button("0°").clicked() { self.image_editor_rotation = 0.0; }
+                                if ui.button("90°").clicked() { self.image_editor_rotation = 90.0; }
+                                if ui.button("180°").clicked() { self.image_editor_rotation = 180.0; }
+                                if ui.button("270°").clicked() { self.image_editor_rotation = 270.0; }
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.image_editor_flip_h, "Flip Horizontal (FR-05.7)");
+                                ui.checkbox(&mut self.image_editor_flip_v, "Flip Vertical (FR-05.7)");
+                            });
+
+                            // Opacity (FR-05.10)
+                            ui.horizontal(|ui| {
+                                ui.label("Opacity / Transparency (FR-05.10):");
+                                ui.add(egui::Slider::new(&mut self.image_editor_opacity, 0.05..=1.0).text("Alpha"));
+                            });
+
+                            // Vector Cropping (FR-05.6)
+                            ui.collapsing("Vector Cropping Frame (FR-05.6)", |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Crop X:");
+                                    ui.add(egui::DragValue::new(&mut self.image_editor_crop_x));
+                                    ui.label("Y:");
+                                    ui.add(egui::DragValue::new(&mut self.image_editor_crop_y));
+                                    ui.label("W:");
+                                    ui.add(egui::DragValue::new(&mut self.image_editor_crop_w));
+                                    ui.label("H:");
+                                    ui.add(egui::DragValue::new(&mut self.image_editor_crop_h));
+                                });
+                                if ui.button("✂ Apply Vector Crop").clicked() {
+                                    apply_crop = true;
+                                }
+                            });
+
+                            // Z-Order Management (FR-05.11)
+                            ui.horizontal(|ui| {
+                                ui.label("Z-Order (Layering):");
+                                if ui.button("⬆ Bring to Front").clicked() { z_order_action = Some(ZOrderAction::BringToFront); }
+                                if ui.button("⬇ Send to Back").clicked() { z_order_action = Some(ZOrderAction::SendToBack); }
+                                if ui.button("Move Forward").clicked() { z_order_action = Some(ZOrderAction::MoveForward); }
+                                if ui.button("Move Backward").clicked() { z_order_action = Some(ZOrderAction::MoveBackward); }
+                            });
+
+                            ui.separator();
+
+                            // Action buttons
+                            ui.horizontal(|ui| {
+                                if ui.button("💾 Apply Transforms").clicked() {
+                                    apply_transform = true;
+                                }
+                                if ui.button("🔄 Replace with New Image File... (FR-05.2)").clicked() {
+                                    replace_file = true;
+                                }
+                                if ui.button("🗑️ Delete Image (FR-05.3)").clicked() {
+                                    delete_img = true;
+                                }
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.button("Close").clicked() {
+                                        close = true;
+                                    }
+                                });
+                            });
+                        }
+                    }
+                });
+
+            // Handle actions
+            if let Some(sel_idx) = self.image_editor_selected_idx {
+                if let Some(im) = self.image_editor_list.get(sel_idx).cloned() {
+                    if apply_transform {
+                        let opts = ImageTransformOptions {
+                            position: Some((self.image_editor_pos_x, self.image_editor_pos_y)),
+                            size: Some((self.image_editor_width, self.image_editor_height)),
+                            rotation_deg: Some(self.image_editor_rotation),
+                            flip_h: self.image_editor_flip_h,
+                            flip_v: self.image_editor_flip_v,
+                            lock_aspect_ratio: self.image_editor_lock_aspect,
+                        };
+
+                        let opacity = self.image_editor_opacity;
+                        if let Some(tab) = self.active_tab_mut() {
+                            let curr = tab.current_page;
+                            let _ = transform_page_image(&mut tab.doc, curr, &im.name, &opts);
+                            let _ = set_page_image_opacity(&mut tab.doc, curr, &im.name, opacity);
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Transformed image '/{}' on page {}", im.name, curr + 1);
+                        }
+                        self.open_image_editor_dialog();
+                    }
+
+                    if apply_crop {
+                        let cr = [
+                            self.image_editor_crop_x,
+                            self.image_editor_crop_y,
+                            self.image_editor_crop_w,
+                            self.image_editor_crop_h,
+                        ];
+                        if let Some(tab) = self.active_tab_mut() {
+                            let curr = tab.current_page;
+                            let _ = crop_page_image(&mut tab.doc, curr, &im.name, cr);
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Applied vector crop to image '/{}' on page {}", im.name, curr + 1);
+                        }
+                        self.open_image_editor_dialog();
+                    }
+
+                    if let Some(action) = z_order_action {
+                        if let Some(tab) = self.active_tab_mut() {
+                            let curr = tab.current_page;
+                            let _ = reorder_page_image(&mut tab.doc, curr, &im.name, action);
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Updated Z-order for image '/{}' on page {}", im.name, curr + 1);
+                        }
+                        self.open_image_editor_dialog();
+                    }
+
+                    if replace_file {
+                        if let Some(new_file) = rfd::FileDialog::new()
+                            .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tiff", "webp", "gif"])
+                            .pick_file()
+                        {
+                            if let Some(tab) = self.active_tab_mut() {
+                                let curr = tab.current_page;
+                                match replace_page_image_from_file(&mut tab.doc, curr, &im.name, &new_file) {
+                                    Ok(_) => {
+                                        tab.is_modified = true;
+                                        tab.invalidate_render();
+                                        self.status_message = format!("Replaced image '/{}' with '{}'", im.name, new_file.display());
+                                    }
+                                    Err(e) => {
+                                        self.status_message = format!("Failed to replace image: {}", e);
+                                    }
+                                }
+                            }
+                            self.open_image_editor_dialog();
+                        }
+                    }
+
+                    if delete_img {
+                        if let Some(tab) = self.active_tab_mut() {
+                            let curr = tab.current_page;
+                            let _ = delete_page_image(&mut tab.doc, curr, &im.name);
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Deleted image '/{}' from page {}", im.name, curr + 1);
+                        }
+                        self.open_image_editor_dialog();
+                    }
+                }
+            }
+
+            if close {
+                self.show_image_editor_dialog = false;
+            }
+        }
+
+        // Rubber Stamps & Sign Here Dialog (FR-10.1 - FR-10.7)
+        if self.show_stamp_dialog {
+            let mut close = false;
+            let mut apply_stamp = false;
+
+            egui::Window::new("🏷️ Rubber Stamps & Sign Here (FR-10)")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(520.0)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("Insert ISO 32000-compliant vector rubber stamps and sign-here marks:").small());
+                    ui.add_space(4.0);
+
+                    // Category tabs
+                    ui.horizontal(|ui| {
+                        let categories = ["Standard Business", "Sign Here", "Dynamic Stamps", "Custom"];
+                        for (idx, cat) in categories.iter().enumerate() {
+                            if ui.selectable_label(self.stamp_category_idx == idx, *cat).clicked() {
+                                self.stamp_category_idx = idx;
+                            }
+                        }
+                    });
+                    ui.separator();
+
+                    let stamp_presets: &[StandardStamp] = match self.stamp_category_idx {
+                        0 => &[
+                            StandardStamp::Approved,
+                            StandardStamp::NotApproved,
+                            StandardStamp::Draft,
+                            StandardStamp::Final,
+                            StandardStamp::Confidential,
+                            StandardStamp::ForPublicRelease,
+                            StandardStamp::Void,
+                            StandardStamp::PreliminaryResults,
+                            StandardStamp::InformationOnly,
+                            StandardStamp::ForComment,
+                            StandardStamp::Expired,
+                        ],
+                        1 => &[
+                            StandardStamp::SignHere,
+                            StandardStamp::InitialHere,
+                            StandardStamp::Witness,
+                            StandardStamp::Accepted,
+                        ],
+                        2 => &[
+                            StandardStamp::Approved,
+                            StandardStamp::Confidential,
+                            StandardStamp::Accepted,
+                            StandardStamp::Draft,
+                        ],
+                        _ => &[
+                            StandardStamp::Custom(self.stamp_custom_label.clone()),
+                        ],
+                    };
+
+                    // Grid palette of stamp buttons
+                    ui.label("Select Stamp Preset:");
+                    ui.horizontal_wrapped(|ui| {
+                        for (idx, s) in stamp_presets.iter().enumerate() {
+                            let col = s.default_color();
+                            let is_selected = self.stamp_type_idx == idx;
+                            let btn_text = RichText::new(s.label())
+                                .color(Color32::from_rgb((col.0 * 255.0) as u8, (col.1 * 255.0) as u8, (col.2 * 255.0) as u8))
+                                .strong();
+
+                            if ui.selectable_label(is_selected, btn_text).clicked() {
+                                self.stamp_type_idx = idx;
+                                let (def_w, def_h) = s.default_dimensions();
+                                self.stamp_width = def_w;
+                                self.stamp_height = def_h;
+                            }
+                        }
+                    });
+
+                    if self.stamp_category_idx == 3 {
+                        ui.horizontal(|ui| {
+                            ui.label("Custom Stamp Text:");
+                            ui.text_edit_singleline(&mut self.stamp_custom_label);
+                        });
+                    }
+
+                    ui.separator();
+
+                    // Dynamic Stamp Options (FR-10.3)
+                    ui.checkbox(&mut self.stamp_include_dynamic_date, "Embed Dynamic User & Timestamp (FR-10.3)");
+                    if self.stamp_include_dynamic_date {
+                        ui.horizontal(|ui| {
+                            ui.label("Author / Reviewer Name:");
+                            ui.text_edit_singleline(&mut self.stamp_author_input);
+                        });
+                        let now_str = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
+                        ui.label(RichText::new(format!("Preview: By: {} | {}", self.stamp_author_input, now_str)).small().italics());
+                    }
+
+                    ui.separator();
+
+                    // Position, Dimensions, Tilt, Opacity
+                    ui.horizontal(|ui| {
+                        ui.label("Position X:");
+                        ui.add(egui::DragValue::new(&mut self.stamp_pos_x));
+                        ui.label("Y:");
+                        ui.add(egui::DragValue::new(&mut self.stamp_pos_y));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Width:");
+                        ui.add(egui::DragValue::new(&mut self.stamp_width).range(40.0..=600.0));
+                        ui.label("Height:");
+                        ui.add(egui::DragValue::new(&mut self.stamp_height).range(20.0..=300.0));
+                        ui.label("Tilt Angle:");
+                        ui.add(egui::DragValue::new(&mut self.stamp_tilt_deg).range(-45.0..=45.0).suffix("°"));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Opacity:");
+                        ui.add(egui::Slider::new(&mut self.stamp_opacity, 0.2..=1.0));
+                    });
+
+                    // Pop-up Note (FR-10.7)
+                    ui.horizontal(|ui| {
+                        ui.label("Pop-up Note (FR-10.7):");
+                        ui.text_edit_singleline(&mut self.stamp_note_input);
+                    });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("🏷️ Stamp Current Page").clicked() {
+                            apply_stamp = true;
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+
+            if apply_stamp {
+                let chosen_stamp = match self.stamp_category_idx {
+                    0 => match self.stamp_type_idx {
+                        0 => StandardStamp::Approved,
+                        1 => StandardStamp::NotApproved,
+                        2 => StandardStamp::Draft,
+                        3 => StandardStamp::Final,
+                        4 => StandardStamp::Confidential,
+                        5 => StandardStamp::ForPublicRelease,
+                        6 => StandardStamp::Void,
+                        7 => StandardStamp::PreliminaryResults,
+                        8 => StandardStamp::InformationOnly,
+                        9 => StandardStamp::ForComment,
+                        _ => StandardStamp::Expired,
+                    },
+                    1 => match self.stamp_type_idx {
+                        0 => StandardStamp::SignHere,
+                        1 => StandardStamp::InitialHere,
+                        2 => StandardStamp::Witness,
+                        _ => StandardStamp::Accepted,
+                    },
+                    2 => match self.stamp_type_idx {
+                        0 => StandardStamp::Approved,
+                        1 => StandardStamp::Confidential,
+                        2 => StandardStamp::Accepted,
+                        _ => StandardStamp::Draft,
+                    },
+                    _ => StandardStamp::Custom(self.stamp_custom_label.clone()),
+                };
+
+                let config = StampConfig {
+                    stamp_type: chosen_stamp.clone(),
+                    rect: [self.stamp_pos_x, self.stamp_pos_y, self.stamp_width, self.stamp_height],
+                    author: if self.stamp_author_input.trim().is_empty() { None } else { Some(self.stamp_author_input.trim().to_string()) },
+                    dynamic_date: if self.stamp_include_dynamic_date { Some(chrono::Utc::now()) } else { None },
+                    custom_text: if self.stamp_category_idx == 3 && !self.stamp_custom_label.trim().is_empty() {
+                        Some(self.stamp_custom_label.trim().to_string())
+                    } else {
+                        None
+                    },
+                    color: None,
+                    opacity: self.stamp_opacity,
+                    rotation_deg: self.stamp_tilt_deg,
+                    popup_note: if self.stamp_note_input.trim().is_empty() { None } else { Some(self.stamp_note_input.trim().to_string()) },
+                };
+
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    match add_stamp_annotation(&mut tab.doc, curr, &config) {
+                        Ok(_) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Applied '{}' stamp on page {}", chosen_stamp.label(), curr + 1);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed to apply stamp: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if close {
+                self.show_stamp_dialog = false;
+            }
+        }
+
+        // Drawing & Shape Tools Dialog (FR-09.1 - FR-09.12)
+        if self.show_drawing_dialog {
+            let mut close = false;
+            let mut apply_shape = false;
+            let mut apply_ink = false;
+            let mut apply_erase = false;
+
+            egui::Window::new("📐 Drawing & Shape Tools (FR-09)")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(560.0)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("Insert ISO 32000-compliant vector shapes, cloudy borders, ink drawings, and line endings:").small());
+                    ui.add_space(4.0);
+
+                    // Category Tabs
+                    ui.horizontal(|ui| {
+                        let categories = [
+                            "Shapes (FR-09.3-6)",
+                            "Polygons (FR-09.7-8)",
+                            "Freehand Ink (FR-09.1)",
+                            "Eraser Tool (FR-09.2)",
+                        ];
+                        for (idx, cat) in categories.iter().enumerate() {
+                            if ui.selectable_label(self.drawing_category_idx == idx, *cat).clicked() {
+                                self.drawing_category_idx = idx;
+                            }
+                        }
+                    });
+                    ui.separator();
+
+                    match self.drawing_category_idx {
+                        0 => {
+                            // Geometric Shapes
+                            ui.horizontal(|ui| {
+                                ui.label("Shape Type:");
+                                let shapes = ["Rectangle", "Circle / Ellipse", "Line", "Single Arrow", "Double Arrow"];
+                                for (idx, s) in shapes.iter().enumerate() {
+                                    if ui.selectable_label(self.drawing_shape_idx == idx, *s).clicked() {
+                                        self.drawing_shape_idx = idx;
+                                    }
+                                }
+                            });
+                            ui.separator();
+
+                            if self.drawing_shape_idx < 2 {
+                                // Rectangle or Circle
+                                ui.horizontal(|ui| {
+                                    ui.label("Pos X:");
+                                    ui.add(egui::DragValue::new(&mut self.drawing_pos_x));
+                                    ui.label("Y:");
+                                    ui.add(egui::DragValue::new(&mut self.drawing_pos_y));
+                                    ui.label("Width:");
+                                    ui.add(egui::DragValue::new(&mut self.drawing_width).range(10.0..=1000.0));
+                                    ui.label("Height:");
+                                    ui.add(egui::DragValue::new(&mut self.drawing_height).range(10.0..=1000.0));
+                                });
+                            } else {
+                                // Line or Arrow
+                                ui.horizontal(|ui| {
+                                    ui.label("Start X:");
+                                    ui.add(egui::DragValue::new(&mut self.drawing_line_start_x));
+                                    ui.label("Y:");
+                                    ui.add(egui::DragValue::new(&mut self.drawing_line_start_y));
+                                    ui.label("End X:");
+                                    ui.add(egui::DragValue::new(&mut self.drawing_line_end_x));
+                                    ui.label("Y:");
+                                    ui.add(egui::DragValue::new(&mut self.drawing_line_end_y));
+                                });
+
+                                ui.horizontal(|ui| {
+                                    let endings = ["None", "OpenArrow", "ClosedArrow", "Circle", "Diamond", "Square", "Butt", "Slash"];
+                                    ui.label("Start Ending:");
+                                    egui::ComboBox::from_id_salt("line_start_style")
+                                        .selected_text(endings[self.drawing_line_start_style_idx.min(endings.len() - 1)])
+                                        .show_ui(ui, |ui| {
+                                            for (idx, name) in endings.iter().enumerate() {
+                                                ui.selectable_value(&mut self.drawing_line_start_style_idx, idx, *name);
+                                            }
+                                        });
+
+                                    ui.label("End Ending:");
+                                    egui::ComboBox::from_id_salt("line_end_style")
+                                        .selected_text(endings[self.drawing_line_end_style_idx.min(endings.len() - 1)])
+                                        .show_ui(ui, |ui| {
+                                            for (idx, name) in endings.iter().enumerate() {
+                                                ui.selectable_value(&mut self.drawing_line_end_style_idx, idx, *name);
+                                            }
+                                        });
+                                });
+                            }
+
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label("Stroke Width:");
+                                ui.add(egui::DragValue::new(&mut self.drawing_stroke_width).range(0.5..=30.0).suffix(" pt"));
+                                ui.label("Stroke Color:");
+                                ui.color_edit_button_rgb(&mut self.drawing_stroke_color);
+                            });
+
+                            if self.drawing_shape_idx < 2 {
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut self.drawing_has_fill, "Fill Interior (/IC)");
+                                    if self.drawing_has_fill {
+                                        ui.color_edit_button_rgb(&mut self.drawing_fill_color);
+                                    }
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut self.drawing_is_cloudy, "☁️ Cloudy / Scalloped Border (FR-09.9)");
+                                    if self.drawing_is_cloudy {
+                                        ui.label("Intensity:");
+                                        ui.add(egui::Slider::new(&mut self.drawing_cloudy_intensity, 0.5..=3.0));
+                                    }
+                                });
+                            }
+
+                            ui.horizontal(|ui| {
+                                ui.label("Border Dash:");
+                                let dashes = ["Solid", "Dashed [4 4]", "Dotted [2 2]", "Dash-Dot [6 3 2 3]"];
+                                for (idx, d) in dashes.iter().enumerate() {
+                                    if ui.selectable_label(self.drawing_border_dash_idx == idx, *d).clicked() {
+                                        self.drawing_border_dash_idx = idx;
+                                    }
+                                }
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Opacity (FR-09.11):");
+                                ui.add(egui::Slider::new(&mut self.drawing_opacity, 0.1..=1.0));
+                                ui.checkbox(&mut self.drawing_locked, "🔒 Lock Annotation (FR-09.12)");
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Pop-up Note:");
+                                ui.text_edit_singleline(&mut self.drawing_note_input);
+                            });
+
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("📐 Insert Shape onto Current Page").clicked() {
+                                    apply_shape = true;
+                                    close = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    close = true;
+                                }
+                            });
+                        }
+                        1 => {
+                            // Polygons & Polylines
+                            ui.label("Closed Polygon (FR-09.7) or Open Polyline (FR-09.8):");
+                            ui.horizontal(|ui| {
+                                ui.label("Vertices Coordinates (x1,y1; x2,y2; ...):");
+                            });
+                            ui.text_edit_singleline(&mut self.drawing_polygon_vertices_input);
+
+                            ui.horizontal(|ui| {
+                                ui.label("Presets:");
+                                if ui.small_button("Triangle").clicked() {
+                                    self.drawing_polygon_vertices_input = "100,100; 200,250; 300,100".to_string();
+                                }
+                                if ui.small_button("Pentagon").clicked() {
+                                    self.drawing_polygon_vertices_input = "200,300; 280,240; 250,150; 150,150; 120,240".to_string();
+                                }
+                                if ui.small_button("Star").clicked() {
+                                    self.drawing_polygon_vertices_input = "200,320; 225,250; 300,250; 240,205; 260,135; 200,175; 140,135; 160,205; 100,250; 175,250".to_string();
+                                }
+                                if ui.small_button("Zigzag Polyline").clicked() {
+                                    self.drawing_polygon_vertices_input = "80,200; 140,260; 200,200; 260,260; 320,200".to_string();
+                                }
+                            });
+                            ui.separator();
+
+                            ui.horizontal(|ui| {
+                                ui.label("Stroke Width:");
+                                ui.add(egui::DragValue::new(&mut self.drawing_stroke_width).range(0.5..=30.0).suffix(" pt"));
+                                ui.label("Stroke Color:");
+                                ui.color_edit_button_rgb(&mut self.drawing_stroke_color);
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.drawing_has_fill, "Fill Polygon Interior");
+                                if self.drawing_has_fill {
+                                    ui.color_edit_button_rgb(&mut self.drawing_fill_color);
+                                }
+                                ui.checkbox(&mut self.drawing_is_cloudy, "☁️ Cloudy Perimeter (FR-09.9)");
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Opacity:");
+                                ui.add(egui::Slider::new(&mut self.drawing_opacity, 0.1..=1.0));
+                                ui.checkbox(&mut self.drawing_locked, "🔒 Lock");
+                            });
+
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("🔷 Insert Polygon / Polyline").clicked() {
+                                    apply_shape = true;
+                                    close = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    close = true;
+                                }
+                            });
+                        }
+                        2 => {
+                            // Freehand Ink Tool
+                            ui.label("Freehand Ink Drawing (FR-09.1):");
+                            ui.label(RichText::new("Sequence of point coordinates: x1,y1; x2,y2; ... (separate multiple strokes with '|')").small());
+                            ui.text_edit_multiline(&mut self.drawing_ink_strokes_input);
+
+                            ui.horizontal(|ui| {
+                                ui.label("Ink Presets:");
+                                if ui.small_button("Checkmark").clicked() {
+                                    self.drawing_ink_strokes_input = "100,150; 120,130; 160,180".to_string();
+                                }
+                                if ui.small_button("Underline Wave").clicked() {
+                                    self.drawing_ink_strokes_input = "72,200; 120,205; 170,195; 220,205; 270,195; 320,200".to_string();
+                                }
+                                if ui.small_button("Circle Loop").clicked() {
+                                    self.drawing_ink_strokes_input = "150,200; 170,230; 210,240; 240,210; 230,170; 190,160; 160,180".to_string();
+                                }
+                            });
+                            ui.separator();
+
+                            ui.horizontal(|ui| {
+                                ui.label("Stroke Width:");
+                                ui.add(egui::DragValue::new(&mut self.drawing_stroke_width).range(0.5..=30.0).suffix(" pt"));
+                                ui.label("Ink Color:");
+                                ui.color_edit_button_rgb(&mut self.drawing_stroke_color);
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.drawing_ink_smooth, "✨ Apply Catmull-Rom Smoothing (FR-09.1)");
+                                ui.label("Opacity:");
+                                ui.add(egui::Slider::new(&mut self.drawing_opacity, 0.1..=1.0));
+                                ui.checkbox(&mut self.drawing_locked, "🔒 Lock");
+                            });
+
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("✒️ Add Ink Drawing").clicked() {
+                                    apply_ink = true;
+                                    close = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    close = true;
+                                }
+                            });
+                        }
+                        _ => {
+                            // Eraser Tool
+                            ui.label("Stroke & Point Eraser (FR-09.2):");
+                            ui.label(RichText::new("Removes intersecting freehand ink strokes at the specified page coordinates.").small());
+                            ui.separator();
+
+                            ui.horizontal(|ui| {
+                                ui.label("Eraser X:");
+                                ui.add(egui::DragValue::new(&mut self.drawing_eraser_x));
+                                ui.label("Y:");
+                                ui.add(egui::DragValue::new(&mut self.drawing_eraser_y));
+                                ui.label("Radius:");
+                                ui.add(egui::Slider::new(&mut self.drawing_eraser_radius, 5.0..=100.0).suffix(" pt"));
+                            });
+
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("🧹 Erase Ink Strokes at Coordinates").clicked() {
+                                    apply_erase = true;
+                                    close = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    close = true;
+                                }
+                            });
+                        }
+                    }
+                });
+
+            if apply_shape {
+                let dash = match self.drawing_border_dash_idx {
+                    1 => BorderStyle::Dashed(vec![4.0, 4.0]),
+                    2 => BorderStyle::Dashed(vec![2.0, 2.0]),
+                    3 => BorderStyle::Dashed(vec![6.0, 3.0, 2.0, 3.0]),
+                    _ => BorderStyle::Solid,
+                };
+                let be = if self.drawing_is_cloudy {
+                    BorderEffect::Cloudy { intensity: self.drawing_cloudy_intensity }
+                } else {
+                    BorderEffect::None
+                };
+
+                let shape_type = if self.drawing_category_idx == 1 {
+                    let pts: Vec<[f64; 2]> = self.drawing_polygon_vertices_input
+                        .split(';')
+                        .filter_map(|pair| {
+                            let p: Vec<&str> = pair.split(',').map(|s| s.trim()).collect();
+                            if p.len() == 2 {
+                                if let (Ok(x), Ok(y)) = (p[0].parse::<f64>(), p[1].parse::<f64>()) {
+                                    return Some([x, y]);
+                                }
+                            }
+                            None
+                        })
+                        .collect();
+                    if self.drawing_polygon_vertices_input.contains("Polyline") || pts.len() < 3 {
+                        ShapeType::PolyLine {
+                            vertices: if pts.len() >= 2 { pts } else { vec![[100.0, 100.0], [200.0, 200.0]] },
+                            start_style: LineEndingStyle::None,
+                            end_style: LineEndingStyle::None,
+                        }
+                    } else {
+                        ShapeType::Polygon { vertices: pts }
+                    }
+                } else {
+                    let map_ending = |idx: usize| match idx {
+                        1 => LineEndingStyle::OpenArrow,
+                        2 => LineEndingStyle::ClosedArrow,
+                        3 => LineEndingStyle::Circle,
+                        4 => LineEndingStyle::Diamond,
+                        5 => LineEndingStyle::Square,
+                        6 => LineEndingStyle::Butt,
+                        7 => LineEndingStyle::Slash,
+                        _ => LineEndingStyle::None,
+                    };
+                    let custom_start = map_ending(self.drawing_line_start_style_idx);
+                    let custom_end = map_ending(self.drawing_line_end_style_idx);
+
+                    match self.drawing_shape_idx {
+                        0 => ShapeType::Rectangle,
+                        1 => ShapeType::Circle,
+                        2 => ShapeType::Line {
+                            start: [self.drawing_line_start_x, self.drawing_line_start_y],
+                            end: [self.drawing_line_end_x, self.drawing_line_end_y],
+                            start_style: custom_start,
+                            end_style: custom_end,
+                        },
+                        3 => ShapeType::Line {
+                            start: [self.drawing_line_start_x, self.drawing_line_start_y],
+                            end: [self.drawing_line_end_x, self.drawing_line_end_y],
+                            start_style: LineEndingStyle::None,
+                            end_style: LineEndingStyle::OpenArrow,
+                        },
+                        _ => ShapeType::Line {
+                            start: [self.drawing_line_start_x, self.drawing_line_start_y],
+                            end: [self.drawing_line_end_x, self.drawing_line_end_y],
+                            start_style: LineEndingStyle::ClosedArrow,
+                            end_style: LineEndingStyle::ClosedArrow,
+                        },
+                    }
+                };
+
+                let config = ShapeAnnotationConfig {
+                    shape_type,
+                    rect: [self.drawing_pos_x, self.drawing_pos_y, self.drawing_pos_x + self.drawing_width, self.drawing_pos_y + self.drawing_height],
+                    stroke_color: Some((self.drawing_stroke_color[0], self.drawing_stroke_color[1], self.drawing_stroke_color[2])),
+                    fill_color: if self.drawing_has_fill {
+                        Some((self.drawing_fill_color[0], self.drawing_fill_color[1], self.drawing_fill_color[2]))
+                    } else {
+                        None
+                    },
+                    stroke_width: self.drawing_stroke_width,
+                    border_style: dash,
+                    border_effect: be,
+                    opacity: self.drawing_opacity,
+                    author: Some("User".to_string()),
+                    locked: self.drawing_locked,
+                    popup_note: if self.drawing_note_input.trim().is_empty() { None } else { Some(self.drawing_note_input.trim().to_string()) },
+                };
+
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    match add_shape_annotation(&mut tab.doc, curr, &config) {
+                        Ok(_) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Inserted shape on page {}", curr + 1);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed to insert shape: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if apply_ink {
+                let stroke_groups: Vec<Vec<[f64; 2]>> = self.drawing_ink_strokes_input
+                    .split('|')
+                    .map(|grp| {
+                        grp.split(';')
+                            .filter_map(|pair| {
+                                let p: Vec<&str> = pair.split(',').map(|s| s.trim()).collect();
+                                if p.len() == 2 {
+                                    if let (Ok(x), Ok(y)) = (p[0].parse::<f64>(), p[1].parse::<f64>()) {
+                                        return Some([x, y]);
+                                    }
+                                }
+                                None
+                            })
+                            .collect()
+                    })
+                    .filter(|s: &Vec<[f64; 2]>| !s.is_empty())
+                    .collect();
+
+                let config = InkAnnotationConfig {
+                    strokes: if stroke_groups.is_empty() {
+                        vec![vec![[100.0, 100.0], [150.0, 140.0], [200.0, 120.0]]]
+                    } else {
+                        stroke_groups
+                    },
+                    stroke_width: self.drawing_stroke_width,
+                    color: (self.drawing_stroke_color[0], self.drawing_stroke_color[1], self.drawing_stroke_color[2]),
+                    opacity: self.drawing_opacity,
+                    smooth: self.drawing_ink_smooth,
+                    author: Some("User".to_string()),
+                    locked: self.drawing_locked,
+                    popup_note: if self.drawing_note_input.trim().is_empty() { None } else { Some(self.drawing_note_input.trim().to_string()) },
+                };
+
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    match add_ink_annotation(&mut tab.doc, curr, &config) {
+                        Ok(_) => {
+                            tab.is_modified = true;
+                            tab.invalidate_render();
+                            self.status_message = format!("Added ink drawing on page {}", curr + 1);
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed to add ink drawing: {}", e);
+                        }
+                    }
+                }
+            }
+
+            if apply_erase {
+                let erase_pt = [self.drawing_eraser_x, self.drawing_eraser_y];
+                let radius = self.drawing_eraser_radius;
+                if let Some(tab) = self.active_tab_mut() {
+                    let curr = tab.current_page;
+                    let mut erased_any = false;
+
+                    if let Ok(annots) = get_page_annotations(&tab.doc, curr) {
+                        for a in annots {
+                            if matches!(a.annot_type, AnnotationType::Ink) {
+                                if let Some(id) = a.id {
+                                    if let Ok(true) = erase_ink_strokes(&mut tab.doc, curr, id, erase_pt, radius) {
+                                        erased_any = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if erased_any {
+                        tab.is_modified = true;
+                        tab.invalidate_render();
+                        self.status_message = format!("Erased ink strokes at ({:.1}, {:.1}) on page {}", erase_pt[0], erase_pt[1], curr + 1);
+                    } else {
+                        self.status_message = format!("No ink strokes found at ({:.1}, {:.1})", erase_pt[0], erase_pt[1]);
+                    }
+                }
+            }
+
+            if close {
+                self.show_drawing_dialog = false;
             }
         }
     }

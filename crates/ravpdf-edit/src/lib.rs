@@ -10,6 +10,7 @@
 pub mod combine;
 pub mod content;
 pub mod create;
+pub mod image_edit;
 pub mod labels;
 pub mod pages;
 
@@ -22,6 +23,12 @@ pub use content::{
 pub use create::{
     create_pdf_from_images, create_pdf_from_markdown, create_pdf_from_raw_images,
     create_pdf_from_text, ImagePdfOptions, MarkdownPdfOptions, TextPdfOptions,
+};
+pub use image_edit::{
+    crop_page_image, delete_page_image, extract_page_images, reorder_page_image,
+    replace_page_image, replace_page_image_from_file, set_page_image_opacity,
+    snap_to_alignment_guides, transform_page_image, ImageTransformOptions, PageImage,
+    SnapGuide, SnapGuideOrientation, SnappedPosition, ZOrderAction,
 };
 pub use labels::{
     format_page_label, get_page_label, get_page_labels, set_page_labels, PageLabelRange,

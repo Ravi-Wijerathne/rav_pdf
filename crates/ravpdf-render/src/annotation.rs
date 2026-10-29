@@ -327,6 +327,106 @@ fn render_single_annotation(
             }
         }
 
+        "Ink" => {
+            if let Some(ink_list) = dict.get_array("InkList") {
+                let stroke_w = dict
+                    .get_dict("BS")
+                    .and_then(|bs| bs.get_f64("W"))
+                    .unwrap_or(2.0) as f32
+                    * zoom;
+
+                let stroke = Stroke {
+                    width: stroke_w.max(1.0),
+                    ..Default::default()
+                };
+
+                let mut paint = Paint::default();
+                paint.set_color(color);
+                paint.anti_alias = true;
+
+                for stroke_obj in ink_list {
+                    if let Object::Array(coords) = stroke_obj {
+                        let mut pb = PathBuilder::new();
+                        let mut started = false;
+                        let mut i = 0;
+                        while i + 1 < coords.len() {
+                            if let (Some(x), Some(y)) = (coords[i].as_f64(), coords[i + 1].as_f64()) {
+                                let px = (x - crop_box[0]) as f32 * zoom;
+                                let py = (crop_box[3] - y) as f32 * zoom;
+                                if !started {
+                                    pb.move_to(px, py);
+                                    started = true;
+                                } else {
+                                    pb.line_to(px, py);
+                                }
+                            }
+                            i += 2;
+                        }
+                        if let Some(path) = pb.finish() {
+                            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                        }
+                    }
+                }
+            }
+        }
+
+        "Polygon" | "PolyLine" => {
+            if let Some(vertices) = dict.get_array("Vertices") {
+                let stroke_w = dict
+                    .get_dict("BS")
+                    .and_then(|bs| bs.get_f64("W"))
+                    .unwrap_or(2.0) as f32
+                    * zoom;
+
+                let stroke = Stroke {
+                    width: stroke_w.max(1.0),
+                    ..Default::default()
+                };
+
+                let mut stroke_paint = Paint::default();
+                stroke_paint.set_color(color);
+                stroke_paint.anti_alias = true;
+
+                let mut pb = PathBuilder::new();
+                let mut started = false;
+                let mut i = 0;
+                while i + 1 < vertices.len() {
+                    if let (Some(x), Some(y)) = (vertices[i].as_f64(), vertices[i + 1].as_f64()) {
+                        let px = (x - crop_box[0]) as f32 * zoom;
+                        let py = (crop_box[3] - y) as f32 * zoom;
+                        if !started {
+                            pb.move_to(px, py);
+                            started = true;
+                        } else {
+                            pb.line_to(px, py);
+                        }
+                    }
+                    i += 2;
+                }
+
+                if subtype == "Polygon" {
+                    pb.close();
+                }
+
+                if let Some(path) = pb.finish() {
+                    // Optional interior color fill /IC
+                    if let Some(ic_arr) = dict.get_array("IC") {
+                        if ic_arr.len() >= 3 {
+                            if let (Some(r), Some(g), Some(b)) = (ic_arr[0].as_f64(), ic_arr[1].as_f64(), ic_arr[2].as_f64()) {
+                                let mut fill_paint = Paint::default();
+                                fill_paint.set_color(
+                                    Color::from_rgba(r as f32, g as f32, b as f32, color.alpha()).unwrap_or(Color::WHITE),
+                                );
+                                fill_paint.anti_alias = true;
+                                pixmap.fill_path(&path, &fill_paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+                            }
+                        }
+                    }
+                    pixmap.stroke_path(&path, &stroke_paint, &stroke, Transform::identity(), None);
+                }
+            }
+        }
+
         _ => {}
     }
 }
