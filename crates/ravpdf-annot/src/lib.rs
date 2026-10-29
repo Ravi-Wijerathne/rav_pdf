@@ -10,8 +10,9 @@ pub mod drawing;
 pub mod stamps;
 
 pub use annotation::{
-    add_annotation_to_page, detect_urls_in_text, get_page_annotations, Annotation, AnnotationType,
-    LinkAction, LinkHighlight,
+    add_annotation_to_page, delete_annotation, detect_urls_in_text, get_page_annotations,
+    update_annotation_color, update_annotation_contents, update_annotation_rect, Annotation,
+    AnnotationType, LinkAction, LinkHighlight,
 };
 pub use drawing::{
     add_ink_annotation, add_shape_annotation, erase_ink_strokes, set_annotation_locked,
@@ -89,5 +90,44 @@ mod tests {
         assert_eq!(urls.len(), 2);
         assert_eq!(urls[0].0, "https://ravpdf.org/docs");
         assert_eq!(urls[1].0, "https://github.com/rust-lang/rust");
+    }
+
+    #[test]
+    fn test_annotation_lifecycle_update_and_delete() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(612.0, 792.0);
+
+        let mut sticky = Annotation::new(AnnotationType::Text, [100.0, 100.0, 150.0, 150.0]);
+        sticky.contents = Some("Original note".into());
+        sticky.author = Some("Alice".into());
+        sticky.color = Some((1.0, 0.0, 0.0));
+        let annot_id = add_annotation_to_page(&mut doc, 0, &sticky).expect("add annotation");
+
+        // 1. Verify initially created
+        let page_annots = get_page_annotations(&doc, 0).expect("get annots");
+        assert_eq!(page_annots.len(), 1);
+        assert_eq!(page_annots[0].contents.as_deref(), Some("Original note"));
+
+        // 2. Update rectangle
+        update_annotation_rect(&mut doc, annot_id, [200.0, 200.0, 260.0, 260.0]).expect("update rect");
+        let updated_annots = get_page_annotations(&doc, 0).expect("get annots");
+        assert_eq!(updated_annots[0].rect, [200.0, 200.0, 260.0, 260.0]);
+
+        // 3. Update contents & author
+        update_annotation_contents(&mut doc, annot_id, "Updated note text", Some("Bob")).expect("update content");
+        let content_annots = get_page_annotations(&doc, 0).expect("get annots");
+        assert_eq!(content_annots[0].contents.as_deref(), Some("Updated note text"));
+        assert_eq!(content_annots[0].author.as_deref(), Some("Bob"));
+
+        // 4. Update color & opacity
+        update_annotation_color(&mut doc, annot_id, (0.0, 0.5, 1.0), Some(0.8)).expect("update color");
+        let color_annots = get_page_annotations(&doc, 0).expect("get annots");
+        assert_eq!(color_annots[0].opacity, 0.8);
+
+        // 5. Delete annotation
+        delete_annotation(&mut doc, 0, annot_id).expect("delete annotation");
+        let remaining_annots = get_page_annotations(&doc, 0).expect("get annots");
+        assert_eq!(remaining_annots.len(), 0);
+        assert!(!doc.objects.contains_key(&annot_id));
     }
 }

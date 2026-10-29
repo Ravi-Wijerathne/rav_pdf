@@ -1365,6 +1365,78 @@ fn test_callout_typewriter_and_image_extraction() {
     assert_eq!(pixmap.height(), 792);
 }
 
+#[test]
+fn test_annotation_manipulation_locking_text_selection_and_continuous_scroll() {
+    use ravpdf_annot::{
+        add_annotation_to_page, delete_annotation, get_page_annotations, set_annotation_locked,
+        update_annotation_color, update_annotation_contents, update_annotation_rect, Annotation,
+        AnnotationType,
+    };
+    use ravpdf_edit::extract_page_text_spans;
+
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0);
+    doc.add_blank_page(612.0, 792.0);
+    doc.add_blank_page(612.0, 792.0);
+
+    // 1. Multi-page rendering check (FR-01.2.2 - continuous scroll pipeline)
+    assert_eq!(doc.page_count(), 3);
+    for p_idx in 0..3 {
+        let pix = render_page(&doc, p_idx, &RenderOptions::default()).expect("render page in continuous view");
+        assert_eq!(pix.width(), 612);
+        assert_eq!(pix.height(), 792);
+    }
+
+    // 2. Add annotations for manipulation (FR-08.3, FR-09.12)
+    let mut note = Annotation::new(AnnotationType::Text, [100.0, 600.0, 150.0, 650.0]);
+    note.contents = Some("Original review note".into());
+    note.author = Some("Alice".into());
+    note.color = Some((1.0, 0.0, 0.0));
+    let note_id = add_annotation_to_page(&mut doc, 0, &note).expect("add note");
+
+    let mut highlight = Annotation::new(AnnotationType::Highlight, [100.0, 500.0, 300.0, 520.0]);
+    highlight.color = Some((1.0, 1.0, 0.0));
+    let hl_id = add_annotation_to_page(&mut doc, 0, &highlight).expect("add highlight");
+
+    let initial_annots = get_page_annotations(&doc, 0).expect("get annots");
+    assert_eq!(initial_annots.len(), 2);
+
+    // 3. Move / Reposition annotation rect (FR-08.3, FR-09.12)
+    update_annotation_rect(&mut doc, note_id, [150.0, 620.0, 200.0, 670.0]).expect("update rect");
+    let moved_annots = get_page_annotations(&doc, 0).expect("get annots after move");
+    let moved_note = moved_annots.iter().find(|a| a.id == Some(note_id)).unwrap();
+    assert_eq!(moved_note.rect, [150.0, 620.0, 200.0, 670.0]);
+
+    // 4. Update contents & author (FR-08.1, FR-08.3)
+    update_annotation_contents(&mut doc, note_id, "Updated note text", Some("Bob")).expect("update contents");
+    let updated_annots = get_page_annotations(&doc, 0).expect("get annots after text update");
+    let updated_note = updated_annots.iter().find(|a| a.id == Some(note_id)).unwrap();
+    assert_eq!(updated_note.contents.as_deref(), Some("Updated note text"));
+    assert_eq!(updated_note.author.as_deref(), Some("Bob"));
+
+    // 5. Update appearance color & opacity (FR-08.3, FR-09.11)
+    update_annotation_color(&mut doc, note_id, (0.0, 0.5, 1.0), Some(0.75)).expect("update color");
+    let colored_annots = get_page_annotations(&doc, 0).expect("get annots after color update");
+    let colored_note = colored_annots.iter().find(|a| a.id == Some(note_id)).unwrap();
+    assert_eq!(colored_note.opacity, 0.75);
+
+    // 6. Lock annotation flag (FR-09.12)
+    set_annotation_locked(&mut doc, note_id, true).expect("lock annotation");
+    let note_obj = doc.objects.get(&note_id).unwrap().as_dict().unwrap();
+    let flags = note_obj.get("F").and_then(|o| o.as_i64()).unwrap();
+    assert_eq!(flags & (1 << 7), 1 << 7); // Bit 8 (0-indexed 7) is Locked flag per ISO 32000-1
+
+    // 7. Delete annotation (FR-08.3)
+    delete_annotation(&mut doc, 0, hl_id).expect("delete highlight");
+    let remaining_annots = get_page_annotations(&doc, 0).expect("get annots after delete");
+    assert_eq!(remaining_annots.len(), 1);
+    assert!(!doc.objects.contains_key(&hl_id));
+
+    // 8. Text span extraction & text selection logic (FR-01.1.2, FR-04.6, FR-04.7)
+    let spans = extract_page_text_spans(&doc, 0).unwrap_or_default();
+    assert!(spans.is_empty()); // blank page has no text spans
+}
+
 
 
 

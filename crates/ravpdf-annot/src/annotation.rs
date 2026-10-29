@@ -421,3 +421,159 @@ pub fn add_annotation_to_page(
 
     Ok(annot_id)
 }
+
+/// Deletes an annotation from the specified page and document object graph (FR-08.3).
+///
+/// Also cleans up any linked `/Popup` annotation object.
+pub fn delete_annotation(
+    doc: &mut PdfDocument,
+    page_index: usize,
+    annot_id: ObjectId,
+) -> Result<()> {
+    let page_ids = doc.page_ids();
+    let page_id = *page_ids
+        .get(page_index)
+        .ok_or_else(|| PdfError::InvalidStructure(format!("Page {} out of range", page_index)))?;
+
+    // 1. Check for linked popup annotation before removal
+    let popup_id = if let Some(Object::Dictionary(dict)) = doc.objects.get(&annot_id) {
+        if let Some(Object::Reference(p_id)) = dict.get("Popup") {
+            Some(*p_id)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 2. Remove reference from page's /Annots array
+    let page_obj = doc
+        .objects
+        .get_mut(&page_id)
+        .ok_or(PdfError::ObjectNotFound(page_id.number, page_id.generation))?;
+
+    let page_dict = page_obj
+        .as_dict_mut()
+        .ok_or_else(|| PdfError::InvalidStructure("Expected page dictionary".into()))?;
+
+    if let Some(Object::Array(ref mut arr)) = page_dict.get_mut("Annots") {
+        arr.retain(|item| {
+            if let Some(r) = item.as_reference() {
+                r != annot_id && Some(r) != popup_id
+            } else {
+                true
+            }
+        });
+    }
+
+    // 3. Remove the annotation object and any linked popup object from doc.objects
+    doc.objects.remove(&annot_id);
+    if let Some(p_id) = popup_id {
+        doc.objects.remove(&p_id);
+    }
+
+    Ok(())
+}
+
+/// Updates the bounding rectangle of an existing annotation (FR-08.3, FR-09.12).
+///
+/// Modifies the `/Rect` entry conforming to ISO 32000-1 Clause 12.5.2 and updates modification timestamp `/M`.
+pub fn update_annotation_rect(
+    doc: &mut PdfDocument,
+    annot_id: ObjectId,
+    new_rect: [f64; 4],
+) -> Result<()> {
+    let annot_obj = doc
+        .objects
+        .get_mut(&annot_id)
+        .ok_or(PdfError::ObjectNotFound(annot_id.number, annot_id.generation))?;
+
+    let dict = annot_obj
+        .as_dict_mut()
+        .ok_or_else(|| PdfError::InvalidStructure("Expected annotation dictionary".into()))?;
+
+    // Standardize rect coordinates [x1, y1, x2, y2]
+    let min_x = new_rect[0].min(new_rect[2]);
+    let min_y = new_rect[1].min(new_rect[3]);
+    let max_x = new_rect[0].max(new_rect[2]);
+    let max_y = new_rect[1].max(new_rect[3]);
+
+    dict.insert(
+        "Rect",
+        Object::Array(vec![
+            Object::Real(min_x),
+            Object::Real(min_y),
+            Object::Real(max_x),
+            Object::Real(max_y),
+        ]),
+    );
+
+    // Update /M date
+    let now_str = chrono::Utc::now().format("D:%Y%m%d%H%M%SZ").to_string();
+    dict.insert("M", Object::String(PdfString::from_str(&now_str)));
+
+    Ok(())
+}
+
+/// Updates textual content and author of an existing annotation (FR-08.1, FR-08.3).
+pub fn update_annotation_contents(
+    doc: &mut PdfDocument,
+    annot_id: ObjectId,
+    contents: &str,
+    author: Option<&str>,
+) -> Result<()> {
+    let annot_obj = doc
+        .objects
+        .get_mut(&annot_id)
+        .ok_or(PdfError::ObjectNotFound(annot_id.number, annot_id.generation))?;
+
+    let dict = annot_obj
+        .as_dict_mut()
+        .ok_or_else(|| PdfError::InvalidStructure("Expected annotation dictionary".into()))?;
+
+    dict.insert("Contents", Object::String(PdfString::from_str(contents)));
+
+    if let Some(auth) = author {
+        dict.insert("T", Object::String(PdfString::from_str(auth)));
+    }
+
+    let now_str = chrono::Utc::now().format("D:%Y%m%d%H%M%SZ").to_string();
+    dict.insert("M", Object::String(PdfString::from_str(&now_str)));
+
+    Ok(())
+}
+
+/// Updates stroke/fill color and opacity of an existing annotation (FR-08.3, FR-09.11).
+pub fn update_annotation_color(
+    doc: &mut PdfDocument,
+    annot_id: ObjectId,
+    color: (f32, f32, f32),
+    opacity: Option<f32>,
+) -> Result<()> {
+    let annot_obj = doc
+        .objects
+        .get_mut(&annot_id)
+        .ok_or(PdfError::ObjectNotFound(annot_id.number, annot_id.generation))?;
+
+    let dict = annot_obj
+        .as_dict_mut()
+        .ok_or_else(|| PdfError::InvalidStructure("Expected annotation dictionary".into()))?;
+
+    dict.insert(
+        "C",
+        Object::Array(vec![
+            Object::Real(color.0 as f64),
+            Object::Real(color.1 as f64),
+            Object::Real(color.2 as f64),
+        ]),
+    );
+
+    if let Some(ca) = opacity {
+        dict.insert("CA", Object::Real(ca.clamp(0.0, 1.0) as f64));
+    }
+
+    let now_str = chrono::Utc::now().format("D:%Y%m%d%H%M%SZ").to_string();
+    dict.insert("M", Object::String(PdfString::from_str(&now_str)));
+
+    Ok(())
+}

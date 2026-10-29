@@ -25,12 +25,14 @@ use eframe::egui::{
 };
 use ravpdf_annot::{
     add_annotation_to_page, add_callout_annotation, add_ink_annotation, add_shape_annotation,
-    add_stamp_annotation, add_typewriter_annotation, erase_ink_strokes, get_page_annotations,
-    Annotation, AnnotationType, BorderEffect, BorderStyle, CalloutConfig, InkAnnotationConfig,
-    LineEndingStyle, LinkAction, ShapeAnnotationConfig, ShapeType, StampConfig, StandardStamp,
-    TypewriterConfig,
+    add_stamp_annotation, add_typewriter_annotation, delete_annotation, erase_ink_strokes,
+    get_page_annotations, set_annotation_locked, update_annotation_color,
+    update_annotation_contents, update_annotation_rect, Annotation, AnnotationType, BorderEffect,
+    BorderStyle, CalloutConfig, InkAnnotationConfig, LineEndingStyle, LinkAction,
+    ShapeAnnotationConfig, ShapeType, StampConfig, StandardStamp, TypewriterConfig,
 };
 use ravpdf_core::document::{paper_sizes, PdfDocument};
+use ravpdf_core::object::ObjectId;
 use ravpdf_core::outline::{add_bookmark, Bookmark};
 use ravpdf_edit::{
     create_pdf_from_images, create_pdf_from_markdown, create_pdf_from_text, crop_page,
@@ -156,6 +158,39 @@ enum ActiveTool {
     Redact,
     MeasureDistance,
     MeasureArea,
+}
+
+/// Page display layout mode conforming to FR-01.2.2.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum PageViewMode {
+    SinglePage,
+    ContinuousScroll,
+}
+
+/// Represents an active or selected annotation on the canvas conforming to FR-08.3 and FR-09.12.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectedAnnotation {
+    pub id: ObjectId,
+    pub page_index: usize,
+    pub annot_type: AnnotationType,
+    pub rect: [f64; 4],
+    pub contents: Option<String>,
+    pub author: Option<String>,
+    pub color: Option<(f32, f32, f32)>,
+    pub opacity: f32,
+    pub is_dragging: bool,
+    pub drag_start_rect: [f64; 4],
+    pub drag_start_pointer: Pos2,
+}
+
+/// State for interactive linear and box text selection conforming to FR-01.1.2, FR-04.6, and FR-04.7.
+#[derive(Debug, Clone, Default)]
+pub struct TextSelectionState {
+    pub is_selecting: bool,
+    pub start_pos: Option<Pos2>,
+    pub current_pos: Option<Pos2>,
+    pub selected_text: String,
+    pub selected_spans: Vec<TextSpan>,
 }
 
 struct RavPdfApp {
@@ -556,6 +591,20 @@ struct RavPdfApp {
     typewriter_pos_y: f64,
     typewriter_font_size: f64,
     typewriter_color: [f32; 3],
+
+    // View mode (Single page vs continuous scroll) (FR-01.2.2)
+    page_view_mode: PageViewMode,
+
+    // Interactive annotation selection & movement (FR-08.3, FR-09.12)
+    selected_annotation: Option<SelectedAnnotation>,
+    show_annot_inspector: bool,
+    annot_inspector_contents: String,
+    annot_inspector_author: String,
+    annot_inspector_color: [f32; 3],
+    annot_inspector_opacity: f32,
+
+    // Canvas text selection and clipboard copy (FR-01.1.2, FR-04.6, FR-04.7)
+    text_selection: TextSelectionState,
 }
 
 impl Default for RavPdfApp {
@@ -910,6 +959,15 @@ impl Default for RavPdfApp {
             typewriter_pos_y: 700.0,
             typewriter_font_size: 12.0,
             typewriter_color: [0.0, 0.0, 0.0],
+
+            page_view_mode: PageViewMode::SinglePage,
+            selected_annotation: None,
+            show_annot_inspector: false,
+            annot_inspector_contents: String::new(),
+            annot_inspector_author: "User".into(),
+            annot_inspector_color: [0.85, 0.15, 0.15],
+            annot_inspector_opacity: 1.0,
+            text_selection: TextSelectionState::default(),
 
             plugin_registry: {
                 let mut reg = PluginRegistry::new();
@@ -1669,6 +1727,41 @@ impl RavPdfApp {
 
                 ui.menu_button("Edit", |ui| {
                     if ui
+                        .add_enabled(!self.text_selection.selected_text.is_empty(), Button::new("Copy Selected Text (Ctrl+C) (FR-04.7)"))
+                        .clicked()
+                    {
+                        ctx.output_mut(|o| o.copied_text = self.text_selection.selected_text.clone());
+                        self.status_message = format!("Copied {} chars to clipboard", self.text_selection.selected_text.len());
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_doc, Button::new("Select All Text on Page (Ctrl+A) (FR-04.6)"))
+                        .clicked()
+                    {
+                        if let Some(tab) = self.active_tab() {
+                            let spans = extract_page_text_spans(&tab.doc, tab.current_page).unwrap_or_default();
+                            self.text_selection.selected_text = spans.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+                            self.text_selection.selected_spans = spans;
+                            self.status_message = format!("Selected all text ({} chars)", self.text_selection.selected_text.len());
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(self.selected_annotation.is_some(), Button::new("Delete Selected Annotation (Del) (FR-08.3)"))
+                        .clicked()
+                    {
+                        if let Some(sel) = self.selected_annotation.take() {
+                            if let Some(tab) = self.active_tab_mut() {
+                                let _ = delete_annotation(&mut tab.doc, sel.page_index, sel.id);
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                self.status_message = "Deleted annotation".into();
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
                         .add_enabled(has_doc, Button::new("Find in Document (Ctrl+F)"))
                         .clicked()
                     {
@@ -1860,6 +1953,16 @@ impl RavPdfApp {
                             tab.zoom = 1.0;
                             tab.invalidate_render();
                         }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    let is_single = self.page_view_mode == PageViewMode::SinglePage;
+                    if ui.add_enabled(has_doc, egui::SelectableLabel::new(is_single, "📄 Single Page View (FR-01.2.2)")).clicked() {
+                        self.page_view_mode = PageViewMode::SinglePage;
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(has_doc, egui::SelectableLabel::new(!is_single, "📜 Continuous Scroll View (FR-01.2.2)")).clicked() {
+                        self.page_view_mode = PageViewMode::ContinuousScroll;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -2261,6 +2364,23 @@ impl RavPdfApp {
 
                 ui.separator();
 
+                // View Mode selector (Single Page vs Continuous Scroll) (FR-01.2.2)
+                let is_single = self.page_view_mode == PageViewMode::SinglePage;
+                if ui.add_enabled(has_doc, egui::SelectableLabel::new(is_single, "📄 Single"))
+                    .on_hover_text("Single Page View (FR-01.2.2)")
+                    .clicked()
+                {
+                    self.page_view_mode = PageViewMode::SinglePage;
+                }
+                if ui.add_enabled(has_doc, egui::SelectableLabel::new(!is_single, "📜 Continuous"))
+                    .on_hover_text("Continuous Scroll View (FR-01.2.2)")
+                    .clicked()
+                {
+                    self.page_view_mode = PageViewMode::ContinuousScroll;
+                }
+
+                ui.separator();
+
                 // Find & Replace in document triggers (FR-34.1, FR-04.8)
                 if ui.add_enabled(has_doc, Button::new("🔍 Find")).clicked() {
                     self.search_bar_open = !self.search_bar_open;
@@ -2312,6 +2432,31 @@ impl RavPdfApp {
                         }
                         ui.checkbox(&mut self.measure_bake_as_annot, "Annotate")
                             .on_hover_text("Bake measurements into document as annotations (FR-26.4)");
+                    }
+
+                    if has_doc && self.selected_annotation.is_some() {
+                        ui.separator();
+                        if ui.button(RichText::new("🗑 Del Annot").color(Color32::from_rgb(239, 68, 68))).on_hover_text("Delete selected annotation (Del) (FR-08.3)").clicked() {
+                            if let Some(sel) = self.selected_annotation.take() {
+                                if let Some(tab) = self.active_tab_mut() {
+                                    let _ = delete_annotation(&mut tab.doc, sel.page_index, sel.id);
+                                    tab.is_modified = true;
+                                    tab.invalidate_render();
+                                    self.status_message = "Deleted annotation".into();
+                                }
+                            }
+                        }
+                        if ui.button("⚙ Annot Props").on_hover_text("Open annotation properties inspector (FR-08.3)").clicked() {
+                            self.show_annot_inspector = true;
+                        }
+                    }
+
+                    if has_doc && !self.text_selection.selected_text.is_empty() {
+                        ui.separator();
+                        if ui.button(RichText::new("📋 Copy Text").color(Color32::from_rgb(59, 130, 246))).on_hover_text("Copy selected text to clipboard (Ctrl+C) (FR-04.7)").clicked() {
+                            ctx.output_mut(|o| o.copied_text = self.text_selection.selected_text.clone());
+                            self.status_message = format!("Copied {} chars to clipboard", self.text_selection.selected_text.len());
+                        }
                     }
                 });
             });
@@ -2823,25 +2968,93 @@ impl RavPdfApp {
                     }
 
                     SidebarTab::Annotations => {
-                        ui.label("Annotations on current page:");
+                        ui.heading("Comments & Markup (FR-08.3)");
+                        ui.add_space(4.0);
+                        let mut to_delete: Option<(usize, ObjectId)> = None;
+                        let mut to_select: Option<SelectedAnnotation> = None;
+
                         if let Some(tab) = self.active_tab() {
-                            if let Ok(annots) = get_page_annotations(&tab.doc, tab.current_page) {
+                            let curr_page = tab.current_page;
+                            if let Ok(annots) = get_page_annotations(&tab.doc, curr_page) {
                                 if annots.is_empty() {
                                     ui.weak("(No annotations on this page)");
                                 } else {
-                                    for (idx, annot) in annots.iter().enumerate() {
-                                        ui.group(|ui| {
-                                            ui.label(format!(
-                                                "#{}: {}",
-                                                idx + 1,
-                                                annot.annot_type.subtype_name()
-                                            ));
-                                            if let Some(ref text) = annot.contents {
-                                                ui.weak(text);
-                                            }
-                                        });
-                                    }
+                                    ui.label(format!("{} annotation(s) on page {}:", annots.len(), curr_page + 1));
+                                    ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
+                                        for (idx, annot) in annots.iter().enumerate() {
+                                            let is_sel = self.selected_annotation.as_ref().map(|s| s.id) == annot.id;
+                                            ui.group(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    let icon = match annot.annot_type {
+                                                        AnnotationType::Text => "💬 Note",
+                                                        AnnotationType::Highlight => "🖍 Highlight",
+                                                        AnnotationType::Underline => "U̲ Underline",
+                                                        AnnotationType::StrikeOut => "S̶ StrikeOut",
+                                                        AnnotationType::Square => "▭ Square",
+                                                        AnnotationType::Circle => "◯ Circle",
+                                                        AnnotationType::Ink => "✏ Ink",
+                                                        AnnotationType::FreeText => "🗨 FreeText/Callout",
+                                                        AnnotationType::Link { .. } => "🔗 Link",
+                                                        AnnotationType::Stamp { .. } => "🏷 Stamp",
+                                                        _ => "📌 Annotation",
+                                                    };
+                                                    ui.label(RichText::new(format!("#{}: {}", idx + 1, icon)).strong());
+                                                    if let Some(annot_id) = annot.id {
+                                                        if ui.small_button(if is_sel { "Selected" } else { "Select" }).clicked() {
+                                                            to_select = Some(SelectedAnnotation {
+                                                                id: annot_id,
+                                                                page_index: curr_page,
+                                                                annot_type: annot.annot_type.clone(),
+                                                                rect: annot.rect,
+                                                                contents: annot.contents.clone(),
+                                                                author: annot.author.clone(),
+                                                                color: annot.color,
+                                                                opacity: annot.opacity,
+                                                                is_dragging: false,
+                                                                drag_start_rect: annot.rect,
+                                                                drag_start_pointer: Pos2::ZERO,
+                                                            });
+                                                        }
+                                                        if ui.small_button(RichText::new("🗑").color(Color32::from_rgb(239, 68, 68))).clicked() {
+                                                            to_delete = Some((curr_page, annot_id));
+                                                        }
+                                                    }
+                                                });
+                                                if let Some(ref text) = annot.contents {
+                                                    ui.label(RichText::new(text).size(11.0).italics());
+                                                }
+                                                if let Some(ref auth) = annot.author {
+                                                    ui.label(RichText::new(format!("By: {}", auth)).size(10.0).weak());
+                                                }
+                                                ui.label(RichText::new(format!("Rect: [{:.0}, {:.0}, {:.0}, {:.0}]", annot.rect[0], annot.rect[1], annot.rect[2], annot.rect[3])).size(9.0).weak());
+                                            });
+                                        }
+                                    });
                                 }
+                            }
+                        }
+
+                        if let Some(sel) = to_select {
+                            self.annot_inspector_contents = sel.contents.clone().unwrap_or_default();
+                            self.annot_inspector_author = sel.author.clone().unwrap_or_else(|| "User".into());
+                            if let Some(c) = sel.color {
+                                self.annot_inspector_color = [c.0, c.1, c.2];
+                            }
+                            self.annot_inspector_opacity = sel.opacity;
+                            self.selected_annotation = Some(sel);
+                            self.show_annot_inspector = true;
+                        }
+
+                        if let Some((p_idx, a_id)) = to_delete {
+                            if let Some(tab) = self.active_tab_mut() {
+                                let _ = delete_annotation(&mut tab.doc, p_idx, a_id);
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                self.status_message = "Deleted annotation".into();
+                            }
+                            if self.selected_annotation.as_ref().map(|s| s.id) == Some(a_id) {
+                                self.selected_annotation = None;
+                                self.show_annot_inspector = false;
                             }
                         }
                     }
@@ -3500,6 +3713,118 @@ impl RavPdfApp {
                 let _ = tab.ensure_page_rendered_with_plate(ctx, None, soft_proof.as_ref());
             }
 
+            // View Mode check: Continuous Scroll Mode (FR-01.2.2)
+            if self.page_view_mode == PageViewMode::ContinuousScroll {
+                let total_pages = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
+                let zoom = self.active_tab().map(|t| t.zoom).unwrap_or(1.0);
+                let mut visible_in_focus = None;
+
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for page_idx in 0..total_pages {
+                            let (pw, ph) = if let Some(tab) = self.active_tab() {
+                                if let Some(p) = tab.doc.get_page(page_idx) {
+                                    let w = (p.crop_box[2] - p.crop_box[0]).abs() as f32;
+                                    let h = (p.crop_box[3] - p.crop_box[1]).abs() as f32;
+                                    (w, h)
+                                } else {
+                                    (612.0, 792.0)
+                                }
+                            } else {
+                                (612.0, 792.0)
+                            };
+
+                            let page_pixel_size = Vec2::new(pw * zoom, ph * zoom);
+
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(8.0);
+                                ui.label(RichText::new(format!("Page {} of {}", page_idx + 1, total_pages)).size(11.0).weak());
+                                ui.add_space(2.0);
+
+                                let (rect, response) = ui.allocate_exact_size(page_pixel_size, egui::Sense::click_and_drag());
+
+                                ui.painter().rect_filled(rect.expand(2.0), 0.0, Color32::from_black_alpha(40));
+                                ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
+
+                                let tex_opt = if let Some(tab) = self.active_tab_mut() {
+                                    tab.get_or_render_continuous_page(ctx, page_idx)
+                                } else {
+                                    None
+                                };
+
+                                if let Some(tex) = tex_opt {
+                                    ui.painter().image(
+                                        tex.id(),
+                                        rect,
+                                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                        Color32::WHITE,
+                                    );
+                                }
+
+                                if ui.is_rect_visible(rect) && visible_in_focus.is_none() {
+                                    visible_in_focus = Some(page_idx);
+                                }
+
+                                if response.clicked() {
+                                    if let Some(pos) = response.interact_pointer_pos() {
+                                        let local_x = ((pos.x - rect.min.x) / zoom) as f64;
+                                        let local_y = ((rect.max.y - pos.y) / zoom) as f64;
+                                        match self.active_tool {
+                                            ActiveTool::StickyNote => {
+                                                if let Some(tab) = self.active_tab_mut() {
+                                                    let annot = Annotation::new(
+                                                        AnnotationType::Text,
+                                                        [local_x, local_y, local_x + 30.0, local_y + 30.0],
+                                                    );
+                                                    let _ = add_annotation_to_page(&mut tab.doc, page_idx, &annot);
+                                                    tab.is_modified = true;
+                                                    tab.invalidate_render();
+                                                    self.status_message = format!("Added sticky note to page {}", page_idx + 1);
+                                                }
+                                            }
+                                            ActiveTool::Text => {
+                                                self.free_text_coords = Some([local_x, local_y, local_x + 120.0, local_y + 24.0]);
+                                                self.free_text_content.clear();
+                                                self.show_free_text_dialog = true;
+                                            }
+                                            ActiveTool::Typewriter => {
+                                                self.typewriter_pos_x = local_x;
+                                                self.typewriter_pos_y = local_y;
+                                                self.show_typewriter_dialog = true;
+                                            }
+                                            ActiveTool::Callout => {
+                                                self.callout_box_x = local_x;
+                                                self.callout_box_y = local_y;
+                                                self.callout_box_w = 160.0;
+                                                self.callout_box_h = 40.0;
+                                                self.callout_leader_x = local_x - 50.0;
+                                                self.callout_leader_y = local_y - 40.0;
+                                                self.callout_knee_x = local_x - 15.0;
+                                                self.callout_knee_y = local_y - 10.0;
+                                                self.show_callout_dialog = true;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+
+                                ui.add_space(14.0);
+                            });
+                        }
+                    });
+
+                if let Some(vis) = visible_in_focus {
+                    if let Some(tab) = self.active_tab_mut() {
+                        if tab.current_page != vis {
+                            tab.current_page = vis;
+                            tab.page_input_buffer = (vis + 1).to_string();
+                        }
+                    }
+                }
+                return;
+            }
+
             // Read properties of current active page
             let (page_size, page_h, zoom) = {
                 let tab = self.active_tab().unwrap();
@@ -3789,6 +4114,69 @@ impl RavPdfApp {
                         }
                     }
 
+                    // Selected Annotation Bounding Box & 8 Handles (FR-08.3, FR-09.12)
+                    if let Some(ref sel) = self.selected_annotation {
+                        if sel.page_index == current_page {
+                            let ax1 = rect.min.x + (sel.rect[0] as f32) * zoom;
+                            let ax2 = rect.min.x + (sel.rect[2] as f32) * zoom;
+                            let ay1 = rect.min.y + (page_h - sel.rect[3] as f32) * zoom;
+                            let ay2 = rect.min.y + (page_h - sel.rect[1] as f32) * zoom;
+                            let box_rect = Rect::from_min_max(Pos2::new(ax1.min(ax2), ay1.min(ay2)), Pos2::new(ax1.max(ax2), ay1.max(ay2))).expand(2.0);
+                            ui.painter().rect_stroke(box_rect, 2.0, Stroke::new(1.8_f32, Color32::from_rgb(59, 130, 246)));
+
+                            for pt in [
+                                box_rect.left_top(), box_rect.center_top(), box_rect.right_top(),
+                                box_rect.left_center(), box_rect.right_center(),
+                                box_rect.left_bottom(), box_rect.center_bottom(), box_rect.right_bottom(),
+                            ] {
+                                ui.painter().rect_filled(Rect::from_center_size(pt, Vec2::splat(6.0)), 1.0, Color32::WHITE);
+                                ui.painter().rect_stroke(Rect::from_center_size(pt, Vec2::splat(6.0)), 1.0, Stroke::new(1.0_f32, Color32::from_rgb(59, 130, 246)));
+                            }
+                        }
+                    }
+
+                    // Text Selection Overlay & Floating Copy Pill (FR-01.1.2, FR-04.6, FR-04.7)
+                    for span in &self.text_selection.selected_spans {
+                        let span_w = (span.text.len() as f64 * span.font_size * 0.55 * zoom as f64) as f32;
+                        let span_h = (span.font_size * 1.2 * zoom as f64) as f32;
+                        let span_min = Pos2::new(rect.min.x + span.x as f32 * zoom, rect.min.y + (page_h - span.y as f32 - span.font_size as f32) * zoom);
+                        let span_rect = Rect::from_min_size(span_min, Vec2::new(span_w, span_h));
+                        ui.painter().rect_filled(span_rect, 1.0, Color32::from_rgba_unmultiplied(66, 133, 244, 90));
+                    }
+                    if !self.text_selection.selected_text.is_empty() {
+                        if let Some(pos) = self.text_selection.current_pos {
+                            let pill_rect = Rect::from_min_size(Pos2::new(pos.x.clamp(rect.min.x, rect.max.x - 140.0), (pos.y - 30.0).max(rect.min.y)), Vec2::new(130.0, 24.0));
+                            ui.painter().rect_filled(pill_rect, 4.0, Color32::from_rgba_unmultiplied(30, 41, 59, 230));
+                            ui.painter().text(pill_rect.center(), Align2::CENTER_CENTER, "📋 Copy (Ctrl+C)", FontId::proportional(11.0), Color32::WHITE);
+                        }
+                    }
+
+                    // Canvas Keyboard Shortcuts (Ctrl+C, Ctrl+A, Delete/Backspace)
+                    if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::C)) && !self.text_selection.selected_text.is_empty() {
+                        ctx.output_mut(|o| o.copied_text = self.text_selection.selected_text.clone());
+                        self.status_message = format!("Copied {} chars to clipboard", self.text_selection.selected_text.len());
+                    }
+
+                    if self.active_tool == ActiveTool::Select && ctx.input(|i| i.modifiers.command && i.key_pressed(Key::A)) {
+                        if let Some(tab) = self.active_tab() {
+                            let spans = extract_page_text_spans(&tab.doc, current_page).unwrap_or_default();
+                            self.text_selection.selected_text = spans.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+                            self.text_selection.selected_spans = spans;
+                            self.status_message = format!("Selected all text ({} chars)", self.text_selection.selected_text.len());
+                        }
+                    }
+
+                    if self.active_tool == ActiveTool::Select && (ctx.input(|i| i.key_pressed(Key::Delete)) || ctx.input(|i| i.key_pressed(Key::Backspace))) {
+                        if let Some(sel) = self.selected_annotation.take() {
+                            if let Some(tab) = self.active_tab_mut() {
+                                let _ = delete_annotation(&mut tab.doc, sel.page_index, sel.id);
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                                self.status_message = "Deleted annotation".into();
+                            }
+                        }
+                    }
+
                     // 4. Annotation Drag-Drawing and Click Handlers (FR-08, FR-09)
                     if response.drag_started() {
                         if let Some(pos) = response.interact_pointer_pos() {
@@ -3797,6 +4185,56 @@ impl RavPdfApp {
                             if self.active_tool == ActiveTool::Pencil {
                                 self.active_pencil_points.clear();
                                 self.active_pencil_points.push(pos);
+                            } else if self.active_tool == ActiveTool::Select {
+                                let mut hit_annot = None;
+                                if let Some(tab) = self.active_tab() {
+                                    if let Ok(annots) = get_page_annotations(&tab.doc, current_page) {
+                                        for a in annots {
+                                            let ax1 = rect.min.x + (a.rect[0] as f32) * zoom;
+                                            let ax2 = rect.min.x + (a.rect[2] as f32) * zoom;
+                                            let ay1 = rect.min.y + (page_h - a.rect[3] as f32) * zoom;
+                                            let ay2 = rect.min.y + (page_h - a.rect[1] as f32) * zoom;
+                                            let a_rect = Rect::from_min_max(Pos2::new(ax1.min(ax2), ay1.min(ay2)), Pos2::new(ax1.max(ax2), ay1.max(ay2))).expand(4.0);
+                                            if a_rect.contains(pos) {
+                                                hit_annot = Some(a);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(a) = hit_annot {
+                                    let a_id = a.id.unwrap_or(ObjectId { number: 0, generation: 0 });
+                                    self.selected_annotation = Some(SelectedAnnotation {
+                                        id: a_id,
+                                        page_index: current_page,
+                                        annot_type: a.annot_type.clone(),
+                                        rect: a.rect,
+                                        contents: a.contents.clone(),
+                                        author: a.author.clone(),
+                                        color: a.color,
+                                        opacity: a.opacity,
+                                        is_dragging: true,
+                                        drag_start_rect: a.rect,
+                                        drag_start_pointer: pos,
+                                    });
+                                    self.annot_inspector_contents = a.contents.unwrap_or_default();
+                                    self.annot_inspector_author = a.author.unwrap_or_else(|| "User".into());
+                                    if let Some(c) = a.color {
+                                        self.annot_inspector_color = [c.0, c.1, c.2];
+                                    }
+                                    self.annot_inspector_opacity = a.opacity;
+                                    self.show_annot_inspector = true;
+                                    self.text_selection.selected_text.clear();
+                                    self.text_selection.selected_spans.clear();
+                                } else {
+                                    self.selected_annotation = None;
+                                    self.show_annot_inspector = false;
+                                    self.text_selection.is_selecting = true;
+                                    self.text_selection.start_pos = Some(pos);
+                                    self.text_selection.current_pos = Some(pos);
+                                    self.text_selection.selected_spans.clear();
+                                    self.text_selection.selected_text.clear();
+                                }
                             }
                         }
                     }
@@ -3806,6 +4244,49 @@ impl RavPdfApp {
                             self.drag_current_pos = Some(pos);
                             if self.active_tool == ActiveTool::Pencil {
                                 self.active_pencil_points.push(pos);
+                            } else if self.active_tool == ActiveTool::Select {
+                                if let Some(ref mut sel) = self.selected_annotation {
+                                    if sel.is_dragging {
+                                        let dx = ((pos.x - sel.drag_start_pointer.x) / zoom) as f64;
+                                        let dy = -((pos.y - sel.drag_start_pointer.y) / zoom) as f64;
+                                        sel.rect = [
+                                            sel.drag_start_rect[0] + dx,
+                                            sel.drag_start_rect[1] + dy,
+                                            sel.drag_start_rect[2] + dx,
+                                            sel.drag_start_rect[3] + dy,
+                                        ];
+                                    }
+                                } else if self.text_selection.is_selecting {
+                                    self.text_selection.current_pos = Some(pos);
+                                    if let Some(start) = self.text_selection.start_pos {
+                                        let sel_screen_rect = Rect::from_two_pos(start, pos);
+                                        ui.painter().rect_filled(sel_screen_rect, 0.0, Color32::from_rgba_unmultiplied(66, 133, 244, 40));
+                                        ui.painter().rect_stroke(sel_screen_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(66, 133, 244)));
+
+                                        if let Some(tab) = self.active_tab() {
+                                            let spans = extract_page_text_spans(&tab.doc, current_page).unwrap_or_default();
+                                            let mut matched = Vec::new();
+                                            for span in spans {
+                                                let span_w = (span.text.len() as f64 * span.font_size * 0.55 * zoom as f64) as f32;
+                                                let span_h = (span.font_size * 1.2 * zoom as f64) as f32;
+                                                let span_min = Pos2::new(rect.min.x + span.x as f32 * zoom, rect.min.y + (page_h - span.y as f32 - span.font_size as f32) * zoom);
+                                                let span_rect = Rect::from_min_size(span_min, Vec2::new(span_w, span_h));
+                                                if span_rect.intersects(sel_screen_rect) {
+                                                    matched.push(span);
+                                                }
+                                            }
+                                            matched.sort_by(|a, b| {
+                                                if (a.y - b.y).abs() > 4.0 {
+                                                    b.y.partial_cmp(&a.y).unwrap_or(std::cmp::Ordering::Equal)
+                                                } else {
+                                                    a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal)
+                                                }
+                                            });
+                                            self.text_selection.selected_text = matched.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+                                            self.text_selection.selected_spans = matched;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -4155,6 +4636,23 @@ impl RavPdfApp {
                         }
                     }
 
+                    if response.drag_stopped() && self.active_tool == ActiveTool::Select {
+                        if let Some(ref mut sel) = self.selected_annotation {
+                            if sel.is_dragging {
+                                sel.is_dragging = false;
+                                let final_rect = sel.rect;
+                                let a_id = sel.id;
+                                if let Some(tab) = self.active_tab_mut() {
+                                    let _ = update_annotation_rect(&mut tab.doc, a_id, final_rect);
+                                    tab.is_modified = true;
+                                    tab.invalidate_render();
+                                    self.status_message = format!("Moved annotation to ({:.1}, {:.1})", final_rect[0], final_rect[1]);
+                                }
+                            }
+                        }
+                        self.text_selection.is_selecting = false;
+                    }
+
                     if response.drag_stopped() && self.active_tool == ActiveTool::Pencil {
                         if self.active_pencil_points.len() >= 2 {
                             let pts: Vec<[f64; 2]> = self.active_pencil_points.drain(..)
@@ -4216,6 +4714,63 @@ impl RavPdfApp {
                             let local_y = ((rect.max.y - pos.y) / zoom) as f64;
 
                             match self.active_tool {
+                                ActiveTool::Select => {
+                                    let mut pill_clicked = false;
+                                    if !self.text_selection.selected_text.is_empty() {
+                                        if let Some(curr) = self.text_selection.current_pos {
+                                            let pill_rect = Rect::from_min_size(Pos2::new(curr.x.clamp(rect.min.x, rect.max.x - 140.0), (curr.y - 30.0).max(rect.min.y)), Vec2::new(130.0, 24.0));
+                                            if pill_rect.contains(pos) {
+                                                ctx.output_mut(|o| o.copied_text = self.text_selection.selected_text.clone());
+                                                self.status_message = format!("Copied {} chars to clipboard", self.text_selection.selected_text.len());
+                                                pill_clicked = true;
+                                            }
+                                        }
+                                    }
+                                    if !pill_clicked {
+                                        let mut hit_annot = None;
+                                        if let Some(tab) = self.active_tab() {
+                                            if let Ok(annots) = get_page_annotations(&tab.doc, current_page) {
+                                                for a in annots {
+                                                    let ax1 = rect.min.x + (a.rect[0] as f32) * zoom;
+                                                    let ax2 = rect.min.x + (a.rect[2] as f32) * zoom;
+                                                    let ay1 = rect.min.y + (page_h - a.rect[3] as f32) * zoom;
+                                                    let ay2 = rect.min.y + (page_h - a.rect[1] as f32) * zoom;
+                                                    let a_rect = Rect::from_min_max(Pos2::new(ax1.min(ax2), ay1.min(ay2)), Pos2::new(ax1.max(ax2), ay1.max(ay2))).expand(4.0);
+                                                    if a_rect.contains(pos) {
+                                                        hit_annot = Some(a);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if let Some(a) = hit_annot {
+                                            let a_id = a.id.unwrap_or(ObjectId { number: 0, generation: 0 });
+                                            self.selected_annotation = Some(SelectedAnnotation {
+                                                id: a_id,
+                                                page_index: current_page,
+                                                annot_type: a.annot_type.clone(),
+                                                rect: a.rect,
+                                                contents: a.contents.clone(),
+                                                author: a.author.clone(),
+                                                color: a.color,
+                                                opacity: a.opacity,
+                                                is_dragging: false,
+                                                drag_start_rect: a.rect,
+                                                drag_start_pointer: pos,
+                                            });
+                                            self.annot_inspector_contents = a.contents.unwrap_or_default();
+                                            self.annot_inspector_author = a.author.unwrap_or_else(|| "User".into());
+                                            if let Some(c) = a.color {
+                                                self.annot_inspector_color = [c.0, c.1, c.2];
+                                            }
+                                            self.annot_inspector_opacity = a.opacity;
+                                            self.show_annot_inspector = true;
+                                        } else {
+                                            self.selected_annotation = None;
+                                            self.show_annot_inspector = false;
+                                        }
+                                    }
+                                }
                                 ActiveTool::StickyNote => {
                                     if let Some(tab) = self.active_tab_mut() {
                                         let annot = Annotation::new(
@@ -4251,6 +4806,27 @@ impl RavPdfApp {
                                     self.show_callout_dialog = true;
                                 }
                                 _ => {}
+                            }
+                        }
+                    }
+
+                    if response.double_clicked() && self.active_tool == ActiveTool::Select {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            if let Some(tab) = self.active_tab() {
+                                let spans = extract_page_text_spans(&tab.doc, current_page).unwrap_or_default();
+                                for span in spans {
+                                    let span_w = (span.text.len() as f64 * span.font_size * 0.55 * zoom as f64) as f32;
+                                    let span_h = (span.font_size * 1.2 * zoom as f64) as f32;
+                                    let span_min = Pos2::new(rect.min.x + span.x as f32 * zoom, rect.min.y + (page_h - span.y as f32 - span.font_size as f32) * zoom);
+                                    let span_rect = Rect::from_min_size(span_min, Vec2::new(span_w, span_h));
+                                    if span_rect.contains(pos) {
+                                        self.text_selection.selected_text = span.text.clone();
+                                        self.text_selection.selected_spans = vec![span];
+                                        self.text_selection.current_pos = Some(pos);
+                                        self.status_message = format!("Selected text: \"{}\"", self.text_selection.selected_text);
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -10299,6 +10875,118 @@ impl RavPdfApp {
 
             if close {
                 self.show_typewriter_dialog = false;
+            }
+        }
+
+        // 46. Annotation Inspector Dialog (FR-08.3)
+        if self.show_annot_inspector {
+            if let Some(ref sel) = self.selected_annotation {
+                let mut close = false;
+                let mut delete_requested = false;
+                let mut apply_contents = false;
+                let mut apply_color = false;
+                let mut toggle_lock = false;
+                let annot_id = sel.id;
+                let page_idx = sel.page_index;
+                let subtype_str = sel.annot_type.subtype_name().to_string();
+                let rect_coords = sel.rect;
+
+                egui::Window::new("🏷 Annotation Properties (FR-08.3)")
+                    .collapsible(true)
+                    .resizable(true)
+                    .default_size([300.0, 320.0])
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("Type: {}", subtype_str)).strong());
+                            ui.label(format!("(Page {})", page_idx + 1));
+                        });
+                        ui.label(format!("Rect: [{:.1}, {:.1}, {:.1}, {:.1}]", rect_coords[0], rect_coords[1], rect_coords[2], rect_coords[3]));
+                        ui.separator();
+
+                        ui.label("Author / User (T):");
+                        ui.text_edit_singleline(&mut self.annot_inspector_author);
+
+                        ui.label("Contents / Note Text:");
+                        ui.text_edit_multiline(&mut self.annot_inspector_contents);
+
+                        if ui.button("💾 Apply Text & Author").clicked() {
+                            apply_contents = true;
+                        }
+
+                        ui.separator();
+                        ui.label("Color & Opacity:");
+                        ui.horizontal(|ui| {
+                            ui.color_edit_button_rgb(&mut self.annot_inspector_color);
+                            ui.label("Color");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Slider::new(&mut self.annot_inspector_opacity, 0.05..=1.0).text("Opacity"));
+                        });
+
+                        if ui.button("🎨 Apply Color & Opacity").clicked() {
+                            apply_color = true;
+                        }
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("🔒 Toggle Lock (FR-09.12)").clicked() {
+                                toggle_lock = true;
+                            }
+                            if ui.button(RichText::new("🗑 Delete Annotation").color(Color32::from_rgb(239, 68, 68))).clicked() {
+                                delete_requested = true;
+                            }
+                            if ui.button("Close").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+
+                if toggle_lock {
+                    if let Some(tab) = self.active_tab_mut() {
+                        let _ = set_annotation_locked(&mut tab.doc, annot_id, true);
+                        tab.is_modified = true;
+                        self.status_message = "Toggled annotation lock flag".into();
+                    }
+                } else if delete_requested {
+                    if let Some(tab) = self.active_tab_mut() {
+                        let _ = delete_annotation(&mut tab.doc, page_idx, annot_id);
+                        tab.is_modified = true;
+                        tab.invalidate_render();
+                        self.status_message = "Deleted annotation".into();
+                    }
+                    self.selected_annotation = None;
+                    self.show_annot_inspector = false;
+                } else if apply_contents {
+                    let contents = self.annot_inspector_contents.clone();
+                    let author = self.annot_inspector_author.clone();
+                    if let Some(tab) = self.active_tab_mut() {
+                        let _ = update_annotation_contents(&mut tab.doc, annot_id, &contents, Some(&author));
+                        tab.is_modified = true;
+                        tab.invalidate_render();
+                        self.status_message = "Updated annotation contents".into();
+                    }
+                    if let Some(ref mut s) = self.selected_annotation {
+                        s.contents = Some(contents);
+                        s.author = Some(author);
+                    }
+                } else if apply_color {
+                    let col = (self.annot_inspector_color[0], self.annot_inspector_color[1], self.annot_inspector_color[2]);
+                    let op = self.annot_inspector_opacity;
+                    if let Some(tab) = self.active_tab_mut() {
+                        let _ = update_annotation_color(&mut tab.doc, annot_id, col, Some(op));
+                        tab.is_modified = true;
+                        tab.invalidate_render();
+                        self.status_message = "Updated annotation appearance".into();
+                    }
+                    if let Some(ref mut s) = self.selected_annotation {
+                        s.color = Some(col);
+                        s.opacity = op;
+                    }
+                } else if close {
+                    self.show_annot_inspector = false;
+                }
+            } else {
+                self.show_annot_inspector = false;
             }
         }
     }
