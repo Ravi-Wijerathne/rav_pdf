@@ -1437,6 +1437,203 @@ fn test_annotation_manipulation_locking_text_selection_and_continuous_scroll() {
     assert!(spans.is_empty()); // blank page has no text spans
 }
 
+#[test]
+fn test_form_field_interactive_lifecycle_and_properties() {
+    use ravpdf_forms::{
+        delete_form_field, get_page_form_fields, update_form_field_properties,
+        update_form_field_rect,
+    };
+
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0);
+
+    // 1. Add Text Field and Checkbox (FR-11.1)
+    let text_f = FormField::new_text("FullName", [100.0, 500.0, 300.0, 524.0]);
+    let check_f = FormField::new_checkbox("AgreeTerms", [100.0, 450.0, 120.0, 470.0], false);
+    let text_id = add_form_field(&mut doc, 0, &text_f).expect("add text field");
+    let check_id = add_form_field(&mut doc, 0, &check_f).expect("add check field");
+    assert!(check_id.number > 0);
+
+    let page_fields = get_page_form_fields(&doc, 0).expect("get page fields");
+    assert_eq!(page_fields.len(), 2);
+
+    // 2. Update Field Rect / Spatial Movement (FR-11.2)
+    let new_rect = [110.0, 510.0, 310.0, 534.0];
+    update_form_field_rect(&mut doc, text_id, new_rect).expect("update rect");
+    let text_obj = doc.objects.get(&text_id).unwrap().as_dict().unwrap();
+    let rect_arr = text_obj.get("Rect").unwrap().as_array().unwrap();
+    assert_eq!(rect_arr[0].as_f64().unwrap(), 110.0);
+    assert_eq!(rect_arr[1].as_f64().unwrap(), 510.0);
+
+    // 3. Update Properties: Name, Tooltip, Default Value, Flags, DA (FR-11.2.1 - FR-11.2.6)
+    update_form_field_properties(
+        &mut doc,
+        text_id,
+        Some("CustomerFullName"),
+        Some("Enter your legal name"),
+        Some("Jane Doe"),
+        Some(true),            // ReadOnly
+        Some(true),            // Required
+        Some([0.0, 0.2, 0.8]), // Blue text
+        Some(14.0),            // 14pt
+    )
+    .expect("update properties");
+
+    let updated_dict = doc.objects.get(&text_id).unwrap().as_dict().unwrap();
+    assert_eq!(
+        updated_dict.get("T").unwrap().as_str().unwrap(),
+        "CustomerFullName"
+    );
+    assert_eq!(
+        updated_dict.get("TU").unwrap().as_str().unwrap(),
+        "Enter your legal name"
+    );
+    assert_eq!(
+        updated_dict.get("DV").unwrap().as_str().unwrap(),
+        "Jane Doe"
+    );
+
+    let flags = updated_dict.get("Ff").unwrap().as_i64().unwrap();
+    assert_eq!(flags & 1, 1); // ReadOnly (bit 1)
+    assert_eq!(flags & 2, 2); // Required (bit 2)
+
+    let da = updated_dict.get("DA").unwrap().as_str().unwrap();
+    assert!(da.contains("14 Tf") || da.contains("14.0 Tf") || da.contains("14"));
+    assert!(da.contains("rg"));
+
+    // 4. Delete Field (FR-11.1, FR-11.3)
+    delete_form_field(&mut doc, text_id).expect("delete form field");
+    let remaining_fields = get_page_form_fields(&doc, 0).expect("get fields after delete");
+    assert_eq!(remaining_fields.len(), 1);
+    assert_eq!(remaining_fields[0].name, "AgreeTerms");
+    assert!(!doc.objects.contains_key(&text_id));
+}
+
+#[test]
+fn test_batch_redactions_and_document_sanitization_workflow() {
+    use ravpdf_annot::{add_annotation_to_page, Annotation, AnnotationType};
+    use ravpdf_core::object::{Object, PdfDictionary, PdfString};
+    use ravpdf_tools::{
+        apply_batch_redactions, sanitize_document, RedactionAppearance, SanitizeOptions,
+    };
+
+    let mut doc = PdfDocument::new();
+    let content = b"BT\n/F1 12 Tf\n50 700 Td\n(Confidential SSN: 000-12-3456) Tj\nET\n";
+    doc.add_page_with_content(612.0, 792.0, content.to_vec());
+    doc.add_blank_page(612.0, 792.0);
+
+    // 1. Add Annotation
+    let mut note = Annotation::new(AnnotationType::Text, [100.0, 100.0, 150.0, 150.0]);
+    note.contents = Some("Internal auditor review note".into());
+    note.author = Some("Auditor".into());
+    note.color = Some((1.0, 0.0, 0.0));
+    add_annotation_to_page(&mut doc, 0, &note).expect("add note");
+
+    // 2. Add Form Field
+    let field = FormField::new_text("SecretField", [50.0, 300.0, 200.0, 320.0]);
+    add_form_field(&mut doc, 0, &field).expect("add field");
+
+    // 3. Add Metadata
+    let info_id = doc.next_object_id();
+    let mut info_dict = PdfDictionary::new();
+    info_dict.insert("Author", PdfString::from_str("Confidential Agent"));
+    info_dict.insert("Title", PdfString::from_str("Top Secret Brief"));
+    doc.objects.insert(info_id, Object::Dictionary(info_dict));
+    doc.info_id = Some(info_id);
+
+    // 4. Batch Redactions (FR-15.1, FR-15.3, FR-15.4)
+    let redactions = vec![
+        (
+            0,
+            [45.0, 690.0, 250.0, 720.0],
+            RedactionAppearance {
+                fill_color: [0.0, 0.0, 0.0],
+                overlay_text: Some("[REDACTED]".into()),
+                text_color: [1.0, 1.0, 1.0],
+                font_size: Some(10.0),
+            },
+        ),
+        (
+            1,
+            [100.0, 400.0, 300.0, 450.0],
+            RedactionAppearance {
+                fill_color: [0.8, 0.0, 0.0],
+                overlay_text: Some("CONFIDENTIAL".into()),
+                text_color: [1.0, 1.0, 1.0],
+                font_size: None,
+            },
+        ),
+    ];
+    let applied = apply_batch_redactions(&mut doc, &redactions).expect("apply batch redactions");
+    assert_eq!(applied, 2);
+
+    // Verify page 0 content stream was updated with redaction overlay
+    let page0_id = doc.page_ids()[0];
+    let page0_dict = doc.objects.get(&page0_id).unwrap().as_dict().unwrap();
+    let contents = page0_dict.get("Contents").unwrap();
+    let stream_id = match contents {
+        Object::Reference(id) => *id,
+        Object::Array(arr) => arr.last().unwrap().as_reference().unwrap(),
+        _ => panic!("unexpected contents"),
+    };
+    let stream_obj = doc.objects.get(&stream_id).unwrap().as_stream().unwrap();
+    let decoded = stream_obj.decode().unwrap();
+    let stream_str = String::from_utf8_lossy(&decoded);
+    assert!(stream_str.contains("re"));
+    assert!(stream_str.contains("f"));
+    assert!(stream_str.contains("[REDACTED]"));
+
+    // 5. Document Sanitization (FR-15.5)
+    let opts = SanitizeOptions {
+        remove_metadata: true,
+        remove_annotations: true,
+        remove_attachments: true,
+        remove_javascript: true,
+        remove_bookmarks: true,
+        flatten_forms: true,
+    };
+    let report = sanitize_document(&mut doc, &opts).expect("sanitize doc");
+    assert_eq!(report.metadata_fields_removed, 2);
+    assert!(report.annotations_removed >= 1);
+    assert!(doc.info_id.is_none());
+}
+
+#[test]
+fn test_organize_pages_grid_operations_workflow() {
+    use ravpdf_edit::{duplicate_page, extract_pages, insert_blank_page, reorder_pages, rotate_page};
+
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0); // Page 0
+    doc.add_blank_page(612.0, 792.0); // Page 1
+    doc.add_blank_page(612.0, 792.0); // Page 2
+    assert_eq!(doc.page_count(), 3);
+
+    // 1. Rotate Page (FR-06.3)
+    rotate_page(&mut doc, 1, 90).expect("rotate page 1");
+    let page1_id = doc.page_ids()[1];
+    let page1_dict = doc.objects.get(&page1_id).unwrap().as_dict().unwrap();
+    assert_eq!(page1_dict.get("Rotate").unwrap().as_i64().unwrap(), 90);
+
+    // 2. Duplicate Page (FR-06.10)
+    let dup_id = duplicate_page(&mut doc, 0).expect("duplicate page 0");
+    assert_eq!(doc.page_count(), 4);
+    assert!(doc.objects.contains_key(&dup_id));
+
+    // 3. Insert Blank Page (FR-06.8)
+    insert_blank_page(&mut doc, 2, 595.0, 842.0).expect("insert blank A4");
+    assert_eq!(doc.page_count(), 5);
+
+    // 4. Reorder Pages (FR-06.5)
+    // Swap page 0 and page 1
+    let order = vec![1, 0, 2, 3, 4];
+    reorder_pages(&mut doc, &order).expect("reorder pages");
+    assert_eq!(doc.page_count(), 5);
+
+    // 5. Extract Pages (FR-06.7)
+    let extracted = extract_pages(&doc, &[0, 2]).expect("extract pages 0 and 2");
+    assert_eq!(extracted.page_count(), 2);
+}
+
 
 
 

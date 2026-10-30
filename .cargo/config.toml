@@ -2,3 +2,4 @@
 # Configure 8MB stack (matching Linux/macOS defaults).
 [target.'cfg(target_os = "windows")']
 rustflags = ["-C", "link-arg=/STACK:8388608"]
+

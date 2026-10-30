@@ -873,3 +873,140 @@ pub fn set_form_field_value(doc: &mut PdfDocument, field_id: ObjectId, value: &s
 
     Ok(())
 }
+
+/// Deletes an interactive form field from the document, unlinking it from page annotations
+/// and from the AcroForm Fields array conforming to ISO 32000-1 (FR-11.1, FR-11.3).
+pub fn delete_form_field(doc: &mut PdfDocument, field_id: ObjectId) -> Result<()> {
+    // 1. Remove from Catalog /AcroForm /Fields
+    if let Some(catalog) = doc.catalog_mut() {
+        if let Some(af_dict) = catalog.get_dict_mut("AcroForm") {
+            if let Some(fields_arr) = af_dict.get_array_mut("Fields") {
+                fields_arr.retain(|item| item.as_reference() != Some(field_id));
+            }
+        }
+    }
+
+    // 2. Unlink from page /Annots
+    let p_ref = doc
+        .objects
+        .get(&field_id)
+        .and_then(Object::as_dict)
+        .and_then(|d| d.get("P"))
+        .and_then(Object::as_reference);
+
+    if let Some(page_id) = p_ref {
+        if let Some(page_dict) = doc.objects.get_mut(&page_id).and_then(Object::as_dict_mut) {
+            if let Some(annots_arr) = page_dict.get_array_mut("Annots") {
+                annots_arr.retain(|item| item.as_reference() != Some(field_id));
+            }
+        }
+    } else {
+        // Fallback: search across all pages
+        let page_ids = doc.page_ids();
+        for pid in page_ids {
+            if let Some(page_dict) = doc.objects.get_mut(&pid).and_then(Object::as_dict_mut) {
+                if let Some(annots_arr) = page_dict.get_array_mut("Annots") {
+                    annots_arr.retain(|item| item.as_reference() != Some(field_id));
+                }
+            }
+        }
+    }
+
+    // 3. Remove field object itself
+    doc.objects.remove(&field_id);
+
+    Ok(())
+}
+
+/// Updates the spatial rectangle of an existing form field (FR-11.2).
+pub fn update_form_field_rect(
+    doc: &mut PdfDocument,
+    field_id: ObjectId,
+    new_rect: [f64; 4],
+) -> Result<()> {
+    let field_obj = doc
+        .objects
+        .get_mut(&field_id)
+        .ok_or(PdfError::ObjectNotFound(field_id.number, field_id.generation))?;
+    let field_dict = field_obj
+        .as_dict_mut()
+        .ok_or_else(|| PdfError::InvalidStructure("Expected field dictionary".into()))?;
+
+    field_dict.insert(
+        "Rect",
+        vec![
+            Object::Real(new_rect[0]),
+            Object::Real(new_rect[1]),
+            Object::Real(new_rect[2]),
+            Object::Real(new_rect[3]),
+        ],
+    );
+
+    Ok(())
+}
+
+/// Updates the metadata and appearance properties of an existing form field (FR-11.2.1 - FR-11.2.6).
+pub fn update_form_field_properties(
+    doc: &mut PdfDocument,
+    field_id: ObjectId,
+    name: Option<&str>,
+    tooltip: Option<&str>,
+    default_value: Option<&str>,
+    read_only: Option<bool>,
+    required: Option<bool>,
+    text_color: Option<[f32; 3]>,
+    font_size: Option<f32>,
+) -> Result<()> {
+    let field_obj = doc
+        .objects
+        .get_mut(&field_id)
+        .ok_or(PdfError::ObjectNotFound(field_id.number, field_id.generation))?;
+    let field_dict = field_obj
+        .as_dict_mut()
+        .ok_or_else(|| PdfError::InvalidStructure("Expected field dictionary".into()))?;
+
+    if let Some(n) = name {
+        field_dict.insert("T", PdfString::from_str(n));
+    }
+    if let Some(tu) = tooltip {
+        if tu.is_empty() {
+            field_dict.remove("TU");
+        } else {
+            field_dict.insert("TU", PdfString::from_str(tu));
+        }
+    }
+    if let Some(dv) = default_value {
+        field_dict.insert("DV", PdfString::from_str(dv));
+    }
+
+    // Flags:
+    let mut flags = field_dict.get_i64("Ff").unwrap_or(0);
+    if let Some(ro) = read_only {
+        if ro {
+            flags |= 1 << 0;
+        } else {
+            flags &= !(1 << 0);
+        }
+    }
+    if let Some(req) = required {
+        if req {
+            flags |= 1 << 1;
+        } else {
+            flags &= !(1 << 1);
+        }
+    }
+    field_dict.insert("Ff", flags);
+
+    // Appearance DA string:
+    if font_size.is_some() || text_color.is_some() {
+        let size = font_size.unwrap_or(12.0);
+        let da_str = if let Some(tc) = text_color {
+            format!("/Helv {:.1} Tf {:.2} {:.2} {:.2} rg", size, tc[0], tc[1], tc[2])
+        } else {
+            format!("/Helv {:.1} Tf 0 g", size)
+        };
+        field_dict.insert("DA", PdfString::from_str(&da_str));
+    }
+
+    Ok(())
+}

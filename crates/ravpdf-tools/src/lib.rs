@@ -116,7 +116,10 @@ pub use print::{
     PrintAnnotationMode, PrintDuplex, PrintJobConfig, PrintLayoutMode, PrintOrientation,
     PrintPreviewReport, PrintScaling,
 };
-pub use redact::{redact_page_area, redact_pattern};
+pub use redact::{
+    apply_batch_redactions, redact_page_area, redact_page_area_with_appearance, redact_pattern,
+    sanitize_document, RedactionAppearance, SanitizeOptions, SanitizeReport,
+};
 pub use rich_media::{
     add_rich_media_annotation, extract_rich_media_content, get_rich_media_annotations,
     MediaContent, RichMediaActivation, RichMediaAnnotation, RichMediaConfig, RichMediaDeactivation,

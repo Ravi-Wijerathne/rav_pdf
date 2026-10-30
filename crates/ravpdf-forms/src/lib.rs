@@ -14,8 +14,9 @@ pub mod taborder;
 pub use autodetect::{apply_auto_detected_fields, auto_detect_form_fields, AutoDetectedField};
 pub use data::{export_form_data, import_form_data, FormDataFormat};
 pub use field::{
-    add_form_field, duplicate_form_field, get_form_fields, get_page_form_fields,
-    set_form_field_value, BarcodeSymbology, CheckboxStyle, FormField, FormFieldType,
+    add_form_field, delete_form_field, duplicate_form_field, get_form_fields,
+    get_page_form_fields, set_form_field_value, update_form_field_properties,
+    update_form_field_rect, BarcodeSymbology, CheckboxStyle, FormField, FormFieldType,
 };
 pub use flatten::flatten_form;
 pub use taborder::{apply_page_tab_order, sort_fields_by_tab_order, TabOrder};
@@ -143,5 +144,50 @@ mod tests {
         let page1_fields = get_page_form_fields(&doc, 1).expect("page 1 fields");
         assert_eq!(page1_fields.len(), 1);
         assert_eq!(page1_fields[0].name, "TrackingCode");
+    }
+
+    #[test]
+    fn test_delete_and_update_form_fields() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(612.0, 792.0);
+
+        let field = FormField::new_text("Notes", [50.0, 500.0, 200.0, 530.0]);
+        let fid = add_form_field(&mut doc, 0, &field).expect("add field");
+
+        let fields = get_form_fields(&doc).expect("get fields");
+        assert_eq!(fields.len(), 1);
+
+        // Update rect (FR-11.2)
+        update_form_field_rect(&mut doc, fid, [60.0, 510.0, 210.0, 540.0]).expect("update rect");
+        let updated = get_form_fields(&doc).expect("get fields");
+        assert_eq!(updated[0].rect, [60.0, 510.0, 210.0, 540.0]);
+
+        // Update properties (FR-11.2.1, FR-11.2.6)
+        update_form_field_properties(
+            &mut doc,
+            fid,
+            Some("DetailedNotes"),
+            Some("Enter your notes here"),
+            Some("Default"),
+            Some(true),
+            Some(true),
+            Some([0.1, 0.2, 0.8]),
+            Some(14.0),
+        )
+        .expect("update properties");
+
+        let prop_updated = get_form_fields(&doc).expect("get fields");
+        assert_eq!(prop_updated[0].name, "DetailedNotes");
+        assert_eq!(prop_updated[0].tooltip.as_deref(), Some("Enter your notes here"));
+        assert_eq!(prop_updated[0].default_value.as_deref(), Some("Default"));
+        assert!(prop_updated[0].read_only);
+        assert!(prop_updated[0].required);
+
+        // Delete field (FR-11.1, FR-11.3)
+        delete_form_field(&mut doc, fid).expect("delete field");
+        let empty = get_form_fields(&doc).expect("get fields after delete");
+        assert_eq!(empty.len(), 0);
+        let empty_page = get_page_form_fields(&doc, 0).expect("get page fields after delete");
+        assert_eq!(empty_page.len(), 0);
     }
 }
