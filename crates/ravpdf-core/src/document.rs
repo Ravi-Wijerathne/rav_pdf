@@ -163,6 +163,12 @@ impl PdfDocument {
         self.get_object(self.root_id).and_then(Object::as_dict)
     }
 
+    /// Resolves mutable reference to the root Catalog dictionary.
+    pub fn catalog_mut(&mut self) -> Option<&mut PdfDictionary> {
+        let root_id = self.root_id;
+        self.objects.get_mut(&root_id).and_then(Object::as_dict_mut)
+    }
+
     /// Resolves the root `/Pages` dictionary ID.
     pub fn pages_root_id(&self) -> Option<ObjectId> {
         self.catalog()?.get_ref("Pages")
