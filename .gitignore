@@ -76,3 +76,7 @@ dist/
 
 # Antigravity IDE / Agent scratch files
 scratch/
+
+# Others
+.agents/teamwork
+PROJECT.md

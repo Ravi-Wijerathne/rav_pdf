@@ -4,9 +4,9 @@
 
 use crate::error::{PdfError, Result};
 use crate::object::{ObjectId, Object, PdfDictionary, PdfName, PdfStream};
-use crate::parser::Parser;
+use crate::parser::{Parser, XRefEntry};
 use crate::writer::PdfWriter;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -38,6 +38,12 @@ pub struct PdfDocument {
     pub info_id: Option<ObjectId>,
     pub objects: BTreeMap<ObjectId, Object>,
     pub trailer: PdfDictionary,
+    /// Verbatim byte buffer of the opened PDF (for incremental saves conforming to DR-02.5 / NFR-03.5)
+    pub original_bytes: Option<Vec<u8>>,
+    /// Byte offset of the previous startxref in `original_bytes`
+    pub prev_startxref: Option<usize>,
+    /// Set of ObjectIds modified or created since the document was loaded
+    pub dirty_objects: BTreeSet<ObjectId>,
 }
 
 impl Default for PdfDocument {
@@ -76,6 +82,9 @@ impl PdfDocument {
             info_id: None,
             objects,
             trailer,
+            original_bytes: None,
+            prev_startxref: None,
+            dirty_objects: BTreeSet::new(),
         }
     }
 
@@ -104,11 +113,43 @@ impl PdfDocument {
         let (xref_map, trailer) = parser.parse_xref_and_trailer(startxref_offset)?;
 
         let mut objects = BTreeMap::new();
+        let mut obj_stm_ids = BTreeSet::new();
 
-        for (_id, offset) in xref_map {
-            if offset < data.len() {
-                if let Ok((parsed_id, obj)) = parser.parse_indirect_object_at(offset) {
-                    objects.insert(parsed_id, obj);
+        // Phase 1: Load top-level uncompressed objects and identify object streams
+        for (&_id, entry) in &xref_map {
+            match entry {
+                XRefEntry::Uncompressed { offset, .. } => {
+                    if *offset < data.len() {
+                        if let Ok((parsed_id, obj)) = parser.parse_indirect_object_at(*offset) {
+                            objects.insert(parsed_id, obj);
+                        }
+                    }
+                }
+                XRefEntry::Compressed { container_obj_num, .. } => {
+                    obj_stm_ids.insert(*container_obj_num);
+                }
+            }
+        }
+
+        // Phase 2: Decode all /ObjStm containers and insert compressed objects into objects
+        for container_id in obj_stm_ids {
+            if let Some(Object::Stream(stream)) = objects.get(&ObjectId::new(container_id, 0)) {
+                let is_obj_stm = stream
+                    .dict
+                    .get_name("Type")
+                    .map(|t| t == "ObjStm")
+                    .unwrap_or(false);
+                if is_obj_stm {
+                    if let Ok(compressed_objs) = Parser::parse_object_stream(stream) {
+                        for (nested_id, nested_obj) in compressed_objs {
+                            // Precedence check: only insert if xref_map indicates this object is in this container
+                            if let Some(XRefEntry::Compressed { container_obj_num, .. }) = xref_map.get(&nested_id) {
+                                if *container_obj_num == container_id {
+                                    objects.insert(nested_id, nested_obj);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -125,6 +166,9 @@ impl PdfDocument {
             info_id,
             objects,
             trailer,
+            original_bytes: Some(data.to_vec()),
+            prev_startxref: Some(startxref_offset),
+            dirty_objects: BTreeSet::new(),
         })
     }
 
@@ -137,7 +181,9 @@ impl PdfDocument {
     /// Generates the next available object ID for new objects.
     pub fn next_object_id(&self) -> ObjectId {
         let max_num = self.objects.keys().map(|k| k.number).max().unwrap_or(0);
-        ObjectId::new(max_num + 1, 0)
+        let trailer_size = self.trailer.get_i64("Size").unwrap_or(0) as u32;
+        let base_num = max_num.max(trailer_size.saturating_sub(1));
+        ObjectId::new(base_num + 1, 0)
     }
 
     /// Resolves an indirect object by its ObjectId.
@@ -332,6 +378,7 @@ impl PdfDocument {
         page_dict.insert("Resources", PdfDictionary::new());
 
         self.objects.insert(page_id, Object::Dictionary(page_dict));
+        self.mark_dirty(page_id);
 
         // Update Pages tree
         self.append_page_to_root(page_id);
@@ -350,6 +397,7 @@ impl PdfDocument {
         let mut stream = PdfStream::with_plain_data(PdfDictionary::new(), content_stream);
         let _ = stream.compress_flate();
         self.objects.insert(content_id, Object::Stream(stream));
+        self.mark_dirty(content_id);
 
         let page_id = self.next_object_id();
         let pages_id = self.pages_root_id().unwrap_or(ObjectId::new(2, 0));
@@ -370,6 +418,7 @@ impl PdfDocument {
         page_dict.insert("Resources", PdfDictionary::new());
 
         self.objects.insert(page_id, Object::Dictionary(page_dict));
+        self.mark_dirty(page_id);
         self.append_page_to_root(page_id);
 
         page_id
@@ -392,6 +441,7 @@ impl PdfDocument {
                     }
                 }
             }
+            self.mark_dirty(pages_id);
         }
     }
 
@@ -405,6 +455,64 @@ impl PdfDocument {
         let bytes = self.to_bytes()?;
         fs::write(path, bytes)?;
         Ok(())
+    }
+
+    /// Marks an object ID as modified for incremental save.
+    pub fn mark_dirty(&mut self, id: ObjectId) {
+        self.dirty_objects.insert(id);
+    }
+
+    /// Sets or updates an indirect object and marks it as dirty.
+    pub fn set_object(&mut self, id: ObjectId, obj: Object) {
+        self.objects.insert(id, obj);
+        self.mark_dirty(id);
+    }
+
+    /// Saves pending dirty objects as an incremental update appended to `original_bytes`.
+    ///
+    /// Conforms to ISO 32000-1 Section 7.5.6, preserving existing bytes verbatim.
+    /// Updates `original_bytes` and `prev_startxref` to reflect the new revision state.
+    pub fn save_incremental(&mut self) -> Result<Vec<u8>> {
+        let orig = self.original_bytes.as_ref().ok_or_else(|| {
+            PdfError::InvalidStructure(
+                "Cannot perform incremental save on document without original bytes".into(),
+            )
+        })?;
+        let prev_startxref = self.prev_startxref.unwrap_or(0);
+
+        let modified: Vec<(ObjectId, Object)> = self
+            .dirty_objects
+            .iter()
+            .filter_map(|id| self.objects.get(id).map(|obj| (*id, obj.clone())))
+            .collect();
+
+        let updated_bytes =
+            PdfWriter::write_incremental_update(orig, &modified, prev_startxref, &self.trailer)?;
+
+        // Update document state for subsequent incremental saves
+        let parser = Parser::new(&updated_bytes);
+        let new_startxref = parser.find_startxref()?;
+        let (_, new_trailer) = parser.parse_xref_and_trailer(new_startxref)?;
+        self.prev_startxref = Some(new_startxref);
+        self.trailer = new_trailer;
+        self.original_bytes = Some(updated_bytes.clone());
+        self.dirty_objects.clear();
+
+        Ok(updated_bytes)
+    }
+
+    /// Explicit incremental update passing an external slice of modified objects.
+    pub fn write_incremental_update(
+        &self,
+        modified_objects: &[(ObjectId, Object)],
+    ) -> Result<Vec<u8>> {
+        let orig = self.original_bytes.as_ref().ok_or_else(|| {
+            PdfError::InvalidStructure(
+                "Cannot perform incremental update on document without original bytes".into(),
+            )
+        })?;
+        let prev_startxref = self.prev_startxref.unwrap_or(0);
+        PdfWriter::write_incremental_update(orig, modified_objects, prev_startxref, &self.trailer)
     }
 }
 
@@ -428,5 +536,113 @@ mod tests {
         assert_eq!(reloaded.page_count(), 2);
         let p1 = reloaded.get_page(0).expect("page 0");
         assert_eq!(p1.media_box, [0.0, 0.0, paper_sizes::A4.0, paper_sizes::A4.1]);
+    }
+
+    #[test]
+    fn test_multiple_successive_incremental_saves() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(paper_sizes::A4.0, paper_sizes::A4.1);
+        let base_bytes = doc.to_bytes().expect("to bytes");
+
+        // Revision 1: add a new blank page
+        let mut doc_rev1 = PdfDocument::load_from_bytes(&base_bytes).expect("load rev1");
+        let new_page_id = doc_rev1.add_blank_page(paper_sizes::LETTER.0, paper_sizes::LETTER.1);
+        doc_rev1.mark_dirty(new_page_id);
+        doc_rev1.mark_dirty(doc_rev1.pages_root_id().unwrap());
+
+        let rev1_bytes = doc_rev1.save_incremental().expect("save rev1");
+        // Verify exact byte preservation of revision 0
+        assert_eq!(&rev1_bytes[..base_bytes.len()], &base_bytes[..]);
+
+        // Revision 2: add a custom object
+        let mut doc_rev2 = PdfDocument::load_from_bytes(&rev1_bytes).expect("load rev2");
+        assert_eq!(doc_rev2.page_count(), 2);
+
+        let annot_id = doc_rev2.next_object_id();
+        let mut annot_dict = PdfDictionary::new();
+        annot_dict.insert("Type", PdfName::new("Annot"));
+        annot_dict.insert("Subtype", PdfName::new("Text"));
+        doc_rev2.set_object(annot_id, Object::Dictionary(annot_dict));
+
+        let rev2_bytes = doc_rev2.save_incremental().expect("save rev2");
+        // Verify exact byte preservation of revision 1
+        assert_eq!(&rev2_bytes[..rev1_bytes.len()], &rev1_bytes[..]);
+
+        let doc_final = PdfDocument::load_from_bytes(&rev2_bytes).expect("load final");
+        assert_eq!(doc_final.page_count(), 2);
+        assert!(doc_final.get_object(annot_id).is_some());
+    }
+
+    #[test]
+    fn test_incremental_save_without_original_bytes_fails() {
+        let mut doc = PdfDocument::new();
+        let err = doc.save_incremental();
+        assert!(err.is_err());
+        assert!(matches!(err.unwrap_err(), PdfError::InvalidStructure(_)));
+    }
+
+    #[test]
+    fn test_end_to_end_objstm_document_loading() {
+        // Construct a synthetic PDF 1.5 document with an object stream and xref stream
+        // Obj 1 (Catalog) & Obj 2 (Pages) are inside ObjStm 3
+        // Obj 4 is a Page object (uncompressed)
+        // Obj 5 is the XRef stream containing Type 2 entries for 1 and 2
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"%PDF-1.5\n%\xE2\xE3\xCF\xD3\n");
+
+        // Object 4: Page
+        let obj4_offset = buf.len();
+        buf.extend_from_slice(b"4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources <<>> >>\nendobj\n");
+
+        // Object 3: ObjStm containing Catalog (1) and Pages (2)
+        // Obj 1: << /Type /Catalog /Pages 2 0 R >>
+        // Obj 2: << /Type /Pages /Count 1 /Kids [4 0 R] >>
+        let objstm_payload = b"1 0 2 34\n<< /Type /Catalog /Pages 2 0 R >>\n<< /Type /Pages /Count 1 /Kids [4 0 R] >>\n";
+        let obj3_offset = buf.len();
+        let obj3_header = format!("3 0 obj\n<< /Type /ObjStm /N 2 /First 9 /Length {} >>\nstream\n", objstm_payload.len());
+        buf.extend_from_slice(obj3_header.as_bytes());
+        buf.extend_from_slice(objstm_payload);
+        buf.extend_from_slice(b"\nendstream\nendobj\n");
+
+        // Object 5: XRef stream
+        // W = [1, 2, 1] -> entry size = 4
+        // Entry 1 (Obj 1): Type 2, container 3, index 0 -> [2, 0, 3, 0]
+        // Entry 2 (Obj 2): Type 2, container 3, index 1 -> [2, 0, 3, 1]
+        // Entry 3 (Obj 3): Type 1, offset obj3_offset, gen 0 -> [1, (offset>>8), (offset&0xFF), 0]
+        // Entry 4 (Obj 4): Type 1, offset obj4_offset, gen 0
+        // Entry 5 (Obj 5): Type 1, offset obj5_offset, gen 0
+        let obj5_offset = buf.len();
+        let o3_hi = ((obj3_offset >> 8) & 0xFF) as u8;
+        let o3_lo = (obj3_offset & 0xFF) as u8;
+        let o4_hi = ((obj4_offset >> 8) & 0xFF) as u8;
+        let o4_lo = (obj4_offset & 0xFF) as u8;
+        let o5_hi = ((obj5_offset >> 8) & 0xFF) as u8;
+        let o5_lo = (obj5_offset & 0xFF) as u8;
+
+        let xref_data = vec![
+            2, 0, 3, 0,         // Obj 1: in ObjStm 3 at index 0
+            2, 0, 3, 1,         // Obj 2: in ObjStm 3 at index 1
+            1, o3_hi, o3_lo, 0, // Obj 3: uncompressed
+            1, o4_hi, o4_lo, 0, // Obj 4: uncompressed
+            1, o5_hi, o5_lo, 0, // Obj 5: uncompressed
+        ];
+
+        let obj5_header = format!(
+            "5 0 obj\n<< /Type /XRef /Size 6 /Index [1 5] /W [1 2 1] /Root 1 0 R /Length {} >>\nstream\n",
+            xref_data.len()
+        );
+        buf.extend_from_slice(obj5_header.as_bytes());
+        buf.extend_from_slice(&xref_data);
+        buf.extend_from_slice(b"\nendstream\nendobj\n");
+
+        // startxref and %%EOF
+        let footer = format!("startxref\n{}\n%%EOF\n", obj5_offset);
+        buf.extend_from_slice(footer.as_bytes());
+
+        let doc = PdfDocument::load_from_bytes(&buf).expect("load doc with objstm and type 2 xref");
+        assert_eq!(doc.page_count(), 1);
+        let p = doc.get_page(0).expect("page 0");
+        assert_eq!(p.media_box, [0.0, 0.0, 612.0, 792.0]);
     }
 }

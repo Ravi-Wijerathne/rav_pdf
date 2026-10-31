@@ -111,6 +111,161 @@ impl PdfWriter {
         Ok(writer.into_bytes())
     }
 
+    /// Appends an incremental update to `original_bytes` conforming to ISO 32000-1 Section 7.5.6.
+    ///
+    /// Preserves all original bytes without altering a single byte.
+    /// Serializes modified/new indirect objects, outputs subsection-clustered xref tables,
+    /// chains the trailer dictionary via `/Prev <prev_startxref>`, and retains `/Root`, `/Info`,
+    /// `/Encrypt`, and persistent document `/ID[0]`.
+    pub fn write_incremental_update(
+        original_bytes: &[u8],
+        modified_objects: &[(ObjectId, Object)],
+        prev_startxref: usize,
+        trailer: &PdfDictionary,
+    ) -> Result<Vec<u8>> {
+        if original_bytes.is_empty() {
+            return Err(crate::error::PdfError::InvalidStructure(
+                "Original bytes cannot be empty for incremental update".into(),
+            ));
+        }
+
+        let parser = crate::parser::Parser::new(original_bytes);
+        let effective_prev_startxref = if prev_startxref == 0 {
+            parser.find_startxref()?
+        } else {
+            prev_startxref
+        };
+
+        // Extract previous trailer to carry over keys
+        let (_, prev_trailer) = parser.parse_xref_and_trailer(effective_prev_startxref)?;
+
+        let mut buffer = original_bytes.to_vec();
+
+        // Ensure newline separation
+        if !buffer.ends_with(b"\n") && !buffer.ends_with(b"\r") {
+            buffer.push(b'\n');
+        }
+
+        // Serialize modified indirect objects
+        let mut xref_offsets: BTreeMap<u32, (usize, u16)> = BTreeMap::new();
+        for (id, obj) in modified_objects {
+            let offset = buffer.len();
+            xref_offsets.insert(id.number, (offset, id.generation));
+
+            let header = format!("{} {} obj\n", id.number, id.generation);
+            buffer.extend_from_slice(header.as_bytes());
+
+            Self::write_object(&mut buffer, obj)?;
+            buffer.extend_from_slice(b"\nendobj\n");
+        }
+
+        // Write incremental xref table with contiguous subsections
+        let xref_start_offset = buffer.len();
+        buffer.extend_from_slice(b"xref\n");
+
+        if !xref_offsets.is_empty() {
+            let keys: Vec<u32> = xref_offsets.keys().copied().collect();
+            let mut i = 0;
+            while i < keys.len() {
+                let start_num = keys[i];
+                let mut run_len = 1;
+                while i + run_len < keys.len() && keys[i + run_len] == start_num + run_len as u32 {
+                    run_len += 1;
+                }
+
+                let sub_header = format!("{} {}\n", start_num, run_len);
+                buffer.extend_from_slice(sub_header.as_bytes());
+
+                for num in start_num..(start_num + run_len as u32) {
+                    let &(offset, gen) = &xref_offsets[&num];
+                    let entry = format!("{:010} {:05} n \n", offset, gen);
+                    buffer.extend_from_slice(entry.as_bytes());
+                }
+
+                i += run_len;
+            }
+        }
+
+        // Synthesize incremental trailer
+        let prev_size = prev_trailer.get_i64("Size").unwrap_or(0);
+        let max_mod_id = xref_offsets.keys().copied().max().unwrap_or(0);
+        let explicit_size = trailer.get_i64("Size").unwrap_or(0);
+        let new_size = prev_size.max(explicit_size).max((max_mod_id + 1) as i64);
+
+        let mut trailer_dict = PdfDictionary::new();
+        trailer_dict.insert("Size", new_size);
+        trailer_dict.insert("Prev", effective_prev_startxref as i64);
+
+        // Carry over /Root or check modified_objects / trailer
+        if let Some(root_obj) = trailer.get("Root") {
+            trailer_dict.insert("Root", root_obj.clone());
+        } else if let Some(cat_id) = modified_objects.iter().find_map(|(id, obj)| {
+            if let Object::Dictionary(d) = obj {
+                if d.get_name("Type") == Some("Catalog") {
+                    return Some(*id);
+                }
+            }
+            None
+        }) {
+            trailer_dict.insert("Root", cat_id);
+        } else if let Some(root_obj) = prev_trailer.get("Root") {
+            trailer_dict.insert("Root", root_obj.clone());
+        }
+
+        // Carry over /Info
+        if let Some(info_obj) = trailer.get("Info") {
+            trailer_dict.insert("Info", info_obj.clone());
+        } else if let Some(info_obj) = prev_trailer.get("Info") {
+            trailer_dict.insert("Info", info_obj.clone());
+        }
+
+        // Carry over /Encrypt
+        if let Some(encrypt_obj) = trailer.get("Encrypt") {
+            trailer_dict.insert("Encrypt", encrypt_obj.clone());
+        } else if let Some(encrypt_obj) = prev_trailer.get("Encrypt") {
+            trailer_dict.insert("Encrypt", encrypt_obj.clone());
+        }
+
+        // Retain permanent ID[0], generate new random ID[1]
+        let mut id1 = [0u8; 16];
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let seed_a = (now.as_nanos() ^ (buffer.len() as u128)) as u64;
+        let seed_b = (now.as_secs() << 32) | (max_mod_id as u64);
+        id1[..8].copy_from_slice(&seed_a.to_le_bytes());
+        id1[8..].copy_from_slice(&seed_b.to_le_bytes());
+        let new_instance_id = PdfString::from_hex(id1.to_vec());
+
+        let permanent_id = if let Some(id_arr) = trailer.get_array("ID").or_else(|| prev_trailer.get_array("ID")) {
+            id_arr.first().cloned().unwrap_or_else(|| {
+                Object::String(PdfString::from_hex(vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]))
+            })
+        } else {
+            Object::String(PdfString::from_hex(vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]))
+        };
+
+        trailer_dict.insert(
+            "ID",
+            vec![permanent_id, Object::String(new_instance_id)],
+        );
+
+        // Copy any additional keys from trailer or prev_trailer
+        for (k, v) in trailer.map.iter() {
+            if !trailer_dict.map.contains_key(k) {
+                trailer_dict.map.insert(k.clone(), v.clone());
+            }
+        }
+
+        buffer.extend_from_slice(b"trailer\n");
+        Self::write_dictionary(&mut buffer, &trailer_dict)?;
+
+        let footer = format!("\nstartxref\n{}\n%%EOF\n", xref_start_offset);
+        buffer.extend_from_slice(footer.as_bytes());
+
+        Ok(buffer)
+    }
+
     /// Serializes an individual Object into target buffer.
     pub fn write_object(buf: &mut Vec<u8>, obj: &Object) -> Result<()> {
         match obj {
@@ -254,5 +409,62 @@ mod tests {
         assert_eq!(trailer.get_ref("Root"), Some(root_id));
         assert!(xref_map.contains_key(&root_id));
         assert!(xref_map.contains_key(&pages_id));
+    }
+
+    #[test]
+    fn test_incremental_save_preserves_exact_bytes_and_parses() {
+        // 1. Create base document
+        let mut objects = BTreeMap::new();
+        let root_id = ObjectId::new(1, 0);
+        let pages_id = ObjectId::new(2, 0);
+
+        let mut catalog = PdfDictionary::new();
+        catalog.insert("Type", PdfName::new("Catalog"));
+        catalog.insert("Pages", pages_id);
+        objects.insert(root_id, Object::Dictionary(catalog));
+
+        let mut pages = PdfDictionary::new();
+        pages.insert("Type", PdfName::new("Pages"));
+        pages.insert("Count", 0);
+        pages.insert("Kids", vec![]);
+        objects.insert(pages_id, Object::Dictionary(pages.clone()));
+
+        let base_bytes = PdfWriter::write_document(&objects, root_id, None).expect("write base");
+        let base_len = base_bytes.len();
+
+        let parser = crate::parser::Parser::new(&base_bytes);
+        let base_startxref = parser.find_startxref().expect("base startxref");
+
+        // 2. Perform incremental update: modify pages dictionary (Count = 1)
+        let mut updated_pages = pages.clone();
+        updated_pages.insert("Count", 1);
+        let modified = vec![(pages_id, Object::Dictionary(updated_pages))];
+
+        let trailer = PdfDictionary::new();
+        let inc_bytes = PdfWriter::write_incremental_update(&base_bytes, &modified, base_startxref, &trailer)
+            .expect("write incremental");
+
+        // 3. Verify byte-level invariance
+        assert!(inc_bytes.len() > base_len);
+        assert_eq!(&inc_bytes[..base_len], &base_bytes[..]);
+
+        // 4. Verify incremental parser reading
+        let inc_parser = crate::parser::Parser::new(&inc_bytes);
+        let new_startxref = inc_parser.find_startxref().expect("new startxref");
+        assert!(new_startxref >= base_len);
+
+        let (xref_map, inc_trailer) = inc_parser
+            .parse_xref_and_trailer(new_startxref)
+            .expect("parse inc xref");
+        assert_eq!(inc_trailer.get_i64("Prev"), Some(base_startxref as i64));
+        assert_eq!(inc_trailer.get_ref("Root"), Some(root_id));
+        assert!(xref_map.contains_key(&root_id));
+        assert!(xref_map.contains_key(&pages_id));
+
+        // Verify modified object resolved
+        let offset = xref_map[&pages_id].offset().expect("pages uncompressed offset");
+        let (_, obj) = inc_parser.parse_indirect_object_at(offset).expect("parse pages");
+        let pages_dict = obj.as_dict().expect("pages dict");
+        assert_eq!(pages_dict.get_i64("Count"), Some(1));
     }
 }

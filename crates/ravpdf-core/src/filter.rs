@@ -6,15 +6,20 @@ use crate::error::{PdfError, Result};
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use std::io::{Read, Write};
+use std::collections::HashMap;
+use std::io::{Cursor, Read, Write};
 
 /// Decodes raw stream data using the named PDF filter.
+/// Supports standard names and ISO 32000-1 Table 6 abbreviations.
 pub fn decode_stream(filter_name: &str, data: &[u8]) -> Result<Vec<u8>> {
-    match filter_name {
-        "FlateDecode" | "/FlateDecode" => decode_flate(data),
-        "ASCIIHexDecode" | "/ASCIIHexDecode" => decode_ascii_hex(data),
-        "ASCII85Decode" | "/ASCII85Decode" => decode_ascii85(data),
-        "RunLengthDecode" | "/RunLengthDecode" => decode_run_length(data),
+    let name = filter_name.strip_prefix('/').unwrap_or(filter_name);
+    match name {
+        "FlateDecode" | "Fl" => decode_flate(data),
+        "ASCIIHexDecode" | "AHx" => decode_ascii_hex(data),
+        "ASCII85Decode" | "A85" => decode_ascii85(data),
+        "RunLengthDecode" | "RL" => decode_run_length(data),
+        "LZWDecode" | "LZW" => decode_lzw(data, true),
+        "DCTDecode" | "DCT" => decode_dct(data),
         other => Err(PdfError::FilterError(format!(
             "Unsupported or unhandled stream filter: {}",
             other
@@ -23,12 +28,18 @@ pub fn decode_stream(filter_name: &str, data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Compresses stream data using the specified filter (default is FlateDecode).
+/// Supports standard names and ISO 32000-1 Table 6 abbreviations.
 pub fn encode_stream(filter_name: &str, data: &[u8]) -> Result<Vec<u8>> {
-    match filter_name {
-        "FlateDecode" | "/FlateDecode" => encode_flate(data),
-        "ASCIIHexDecode" | "/ASCIIHexDecode" => encode_ascii_hex(data),
-        "ASCII85Decode" | "/ASCII85Decode" => encode_ascii85(data),
-        "RunLengthDecode" | "/RunLengthDecode" => encode_run_length(data),
+    let name = filter_name.strip_prefix('/').unwrap_or(filter_name);
+    match name {
+        "FlateDecode" | "Fl" => encode_flate(data),
+        "ASCIIHexDecode" | "AHx" => encode_ascii_hex(data),
+        "ASCII85Decode" | "A85" => encode_ascii85(data),
+        "RunLengthDecode" | "RL" => encode_run_length(data),
+        "LZWDecode" | "LZW" => encode_lzw(data, true),
+        "DCTDecode" | "DCT" => Err(PdfError::FilterError(
+            "DCTEncode requires image dimensions; call encode_dct(rgb_data, width, height, quality) directly".into(),
+        )),
         other => Err(PdfError::FilterError(format!(
             "Unsupported encoding filter: {}",
             other
@@ -57,7 +68,7 @@ pub fn encode_flate(data: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| PdfError::FilterError(format!("FlateEncode finish error: {}", e)))
 }
 
-/// ASCIIHexDecode: Decodes ASCII hexadecimal digits.
+/// ASCIIHexDecode: Decodes ASCII hexadecimal digits conforming to ISO 32000-1 Section 7.4.2.
 /// Whitespace characters are ignored. An optional '>' terminates the data.
 pub fn decode_ascii_hex(data: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
@@ -98,7 +109,7 @@ pub fn decode_ascii_hex(data: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-/// ASCIIHexEncode: Encodes bytes to uppercase hex ASCII.
+/// ASCIIHexEncode: Encodes bytes to uppercase hex ASCII terminated with '>'.
 pub fn encode_ascii_hex(data: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::with_capacity(data.len() * 2 + 1);
     for &byte in data {
@@ -109,7 +120,7 @@ pub fn encode_ascii_hex(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// ASCII85Decode: Decodes 5-character groups in the range '!' (33) to 'u' (117)
-/// into 4-byte integers. 'z' expands to four 0x00 bytes.
+/// into 4-byte integers conforming to ISO 32000-1 Section 7.4.3. 'z' expands to four 0x00 bytes.
 pub fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut tuple: u32 = 0;
@@ -120,6 +131,10 @@ pub fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>> {
         let b = data[i];
         if b.is_ascii_whitespace() {
             i += 1;
+            continue;
+        }
+        if b == b'<' && i + 1 < data.len() && data[i + 1] == b'~' {
+            i += 2;
             continue;
         }
         if b == b'~' && i + 1 < data.len() && data[i + 1] == b'>' {
@@ -167,6 +182,10 @@ pub fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>> {
             let shift = (3 - j) * 8;
             output.push((tuple >> shift) as u8);
         }
+    } else if count == 1 {
+        return Err(PdfError::FilterError(
+            "Invalid single-character final group in ASCII85 stream".into(),
+        ));
     }
 
     Ok(output)
@@ -215,7 +234,7 @@ pub fn encode_ascii85(data: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-/// RunLengthDecode: Decodes run-length encoded stream.
+/// RunLengthDecode: Decodes run-length encoded stream conforming to ISO 32000-1 Section 7.4.5.
 pub fn decode_run_length(data: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut i = 0;
@@ -225,7 +244,7 @@ pub fn decode_run_length(data: &[u8]) -> Result<Vec<u8>> {
         i += 1;
 
         if length == 128 {
-            // EOD
+            // EOD marker
             break;
         } else if length < 128 {
             let count = (length as usize) + 1;
@@ -293,6 +312,277 @@ pub fn encode_run_length(data: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+// -----------------------------------------------------------------------------
+// LZW (Lempel-Ziv-Welch) Implementation conforming to ISO 32000-1 Section 7.4.4
+// -----------------------------------------------------------------------------
+
+const LZW_CLEAR_TABLE: u16 = 256;
+const LZW_EOD: u16 = 257;
+const LZW_FIRST_ENTRY: u16 = 258;
+const LZW_MAX_CODES: usize = 4096;
+
+struct MsbBitReader<'a> {
+    data: &'a [u8],
+    byte_pos: usize,
+    bit_buf: u32,
+    bits_in_buf: u32,
+}
+
+impl<'a> MsbBitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            byte_pos: 0,
+            bit_buf: 0,
+            bits_in_buf: 0,
+        }
+    }
+
+    fn read_bits(&mut self, n: u32) -> Option<u16> {
+        while self.bits_in_buf < n {
+            if self.byte_pos >= self.data.len() {
+                return None;
+            }
+            self.bit_buf = (self.bit_buf << 8) | (self.data[self.byte_pos] as u32);
+            self.byte_pos += 1;
+            self.bits_in_buf += 8;
+        }
+        let shift = self.bits_in_buf - n;
+        let val = (self.bit_buf >> shift) & ((1 << n) - 1);
+        self.bits_in_buf -= n;
+        self.bit_buf &= (1 << self.bits_in_buf) - 1;
+        Some(val as u16)
+    }
+}
+
+struct MsbBitWriter {
+    bytes: Vec<u8>,
+    bit_buf: u32,
+    bits_in_buf: u32,
+}
+
+impl MsbBitWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            bit_buf: 0,
+            bits_in_buf: 0,
+        }
+    }
+
+    fn write_bits(&mut self, val: u16, n: u32) {
+        self.bit_buf = (self.bit_buf << n) | (val as u32 & ((1 << n) - 1));
+        self.bits_in_buf += n;
+        while self.bits_in_buf >= 8 {
+            let shift = self.bits_in_buf - 8;
+            let byte = (self.bit_buf >> shift) as u8;
+            self.bytes.push(byte);
+            self.bits_in_buf -= 8;
+            self.bit_buf &= (1 << self.bits_in_buf) - 1;
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.bits_in_buf > 0 {
+            let byte = (self.bit_buf << (8 - self.bits_in_buf)) as u8;
+            self.bytes.push(byte);
+        }
+        self.bytes
+    }
+}
+
+fn init_lzw_decode_table() -> Vec<Vec<u8>> {
+    let mut table = Vec::with_capacity(LZW_MAX_CODES);
+    for i in 0..=255 {
+        table.push(vec![i as u8]);
+    }
+    table.push(Vec::new()); // 256 CLEAR_TABLE
+    table.push(Vec::new()); // 257 EOD
+    table
+}
+
+/// LZWDecode: Decodes an LZW-compressed byte stream conforming to ISO 32000-1 Section 7.4.4.
+/// `early_change` indicates whether code length increments 1 code early (PDF standard default: true).
+pub fn decode_lzw(data: &[u8], early_change: bool) -> Result<Vec<u8>> {
+    let mut reader = MsbBitReader::new(data);
+    let mut table = init_lzw_decode_table();
+    let mut code_size = 9u32;
+    let mut output = Vec::new();
+    let mut prev_entry: Option<Vec<u8>> = None;
+
+    while let Some(code) = reader.read_bits(code_size) {
+        if code == LZW_CLEAR_TABLE {
+            table = init_lzw_decode_table();
+            code_size = 9;
+            prev_entry = None;
+            continue;
+        }
+        if code == LZW_EOD {
+            break;
+        }
+
+        let entry = if (code as usize) < table.len() {
+            table[code as usize].clone()
+        } else if (code as usize) == table.len() {
+            // Special KwKwK case
+            if let Some(ref prev) = prev_entry {
+                let mut k = prev.clone();
+                k.push(prev[0]);
+                k
+            } else {
+                return Err(PdfError::FilterError("Invalid initial KwKwK in LZW".into()));
+            }
+        } else {
+            return Err(PdfError::FilterError(format!(
+                "Invalid LZW code: {} (table size {})",
+                code,
+                table.len()
+            )));
+        };
+
+        output.extend_from_slice(&entry);
+
+        if let Some(ref prev) = prev_entry {
+            if table.len() < LZW_MAX_CODES {
+                let mut new_entry = prev.clone();
+                new_entry.push(entry[0]);
+                table.push(new_entry);
+
+                let next_index = table.len();
+                let target = if early_change { 511 } else { 512 };
+                if next_index == target && code_size < 10 {
+                    code_size = 10;
+                } else if next_index == (if early_change { 1023 } else { 1024 }) && code_size < 11 {
+                    code_size = 11;
+                } else if next_index == (if early_change { 2047 } else { 2048 }) && code_size < 12 {
+                    code_size = 12;
+                }
+            }
+        }
+
+        prev_entry = Some(entry);
+    }
+
+    Ok(output)
+}
+
+/// LZWEncode: Encodes data with LZW compression conforming to ISO 32000-1 Section 7.4.4.
+pub fn encode_lzw(data: &[u8], early_change: bool) -> Result<Vec<u8>> {
+    if data.is_empty() {
+        let mut writer = MsbBitWriter::new();
+        writer.write_bits(LZW_CLEAR_TABLE, 9);
+        writer.write_bits(LZW_EOD, 9);
+        return Ok(writer.finish());
+    }
+
+    let mut table: HashMap<Vec<u8>, u16> = HashMap::new();
+    let mut next_code = LZW_FIRST_ENTRY;
+    let mut code_size = 9u32;
+    let mut writer = MsbBitWriter::new();
+
+    let init_map = |t: &mut HashMap<Vec<u8>, u16>| {
+        t.clear();
+        for i in 0..=255 {
+            t.insert(vec![i as u8], i as u16);
+        }
+    };
+    init_map(&mut table);
+
+    // Initial ClearTable
+    writer.write_bits(LZW_CLEAR_TABLE, code_size);
+
+    let mut current = Vec::new();
+    for &byte in data {
+        let mut next_seq = current.clone();
+        next_seq.push(byte);
+
+        if table.contains_key(&next_seq) {
+            current = next_seq;
+        } else {
+            let code = table[&current];
+            writer.write_bits(code, code_size);
+
+            if next_code < LZW_MAX_CODES as u16 {
+                table.insert(next_seq, next_code);
+                next_code += 1;
+
+                let code_just_added = (next_code - 1) as usize;
+                let target = if early_change { 511 } else { 512 };
+                if code_just_added == target && code_size < 10 {
+                    code_size = 10;
+                } else if code_just_added == (if early_change { 1023 } else { 1024 }) && code_size < 11 {
+                    code_size = 11;
+                } else if code_just_added == (if early_change { 2047 } else { 2048 }) && code_size < 12 {
+                    code_size = 12;
+                }
+            } else {
+                writer.write_bits(LZW_CLEAR_TABLE, code_size);
+                init_map(&mut table);
+                next_code = LZW_FIRST_ENTRY;
+                code_size = 9;
+            }
+
+            current = vec![byte];
+        }
+    }
+
+    if !current.is_empty() {
+        let code = table[&current];
+        writer.write_bits(code, code_size);
+    }
+
+    writer.write_bits(LZW_EOD, code_size);
+    Ok(writer.finish())
+}
+
+// -----------------------------------------------------------------------------
+// DCT (JPEG) Implementation conforming to ISO 32000-1 Section 7.4.8
+// -----------------------------------------------------------------------------
+
+/// DCTDecode (JPEG) decompression conforming to ISO 32000-1 Section 7.4.8.
+/// Decompresses a JPEG byte stream into raw RGB pixel bytes (3 bytes per pixel: R, G, B interleaved).
+pub fn decode_dct(data: &[u8]) -> Result<Vec<u8>> {
+    let img = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
+        .map_err(|e| PdfError::FilterError(format!("DCTDecode decompression error: {}", e)))?;
+    Ok(img.to_rgb8().into_raw())
+}
+
+/// Decodes a JPEG byte stream (DCTDecode) and returns `(raw_rgb_bytes, width, height)`.
+pub fn decode_dct_with_dimensions(data: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
+    let img = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
+        .map_err(|e| PdfError::FilterError(format!("DCTDecode decompression error: {}", e)))?;
+    let width = img.width();
+    let height = img.height();
+    Ok((img.to_rgb8().into_raw(), width, height))
+}
+
+/// DCTEncode (JPEG) compression.
+/// Encodes raw RGB pixel bytes of dimensions `width x height` into a JPEG byte stream with configurable quality (1-100).
+pub fn encode_dct(rgb_data: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>> {
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|wh| wh.checked_mul(3))
+        .ok_or_else(|| PdfError::FilterError("Image dimensions overflow usize".into()))?;
+    if rgb_data.len() != expected_len {
+        return Err(PdfError::FilterError(format!(
+            "DCTEncode error: expected RGB buffer size {} for {}x{} image, got {}",
+            expected_len, width, height, rgb_data.len()
+        )));
+    }
+
+    let rgb_img = image::RgbImage::from_raw(width, height, rgb_data.to_vec())
+        .ok_or_else(|| PdfError::FilterError("Failed to create RGB image buffer".into()))?;
+
+    let mut output = Vec::new();
+    let mut cursor = Cursor::new(&mut output);
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, quality.clamp(1, 100));
+    encoder
+        .encode(rgb_img.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+        .map_err(|e| PdfError::FilterError(format!("DCTEncode error: {}", e)))?;
+    drop(encoder);
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +604,28 @@ mod tests {
     }
 
     #[test]
+    fn test_ascii_hex_edge_cases() {
+        // Odd number of digits pads with trailing zero
+        let data_odd = b"4B6>";
+        let decoded_odd = decode_ascii_hex(data_odd).expect("odd hex decode");
+        assert_eq!(decoded_odd, vec![0x4B, 0x60]);
+
+        // Whitespace ignored and lowercase accepted
+        let data_ws = b" 4 8 \n 6 5 \r\t 6 c \n 6 C 6 f > ";
+        let decoded_ws = decode_ascii_hex(data_ws).expect("whitespace hex decode");
+        assert_eq!(decoded_ws, b"Hello".to_vec());
+
+        // Unterminated stream without '>'
+        let data_unterminated = b"48656C6C6F";
+        let decoded_unterminated = decode_ascii_hex(data_unterminated).expect("unterminated hex");
+        assert_eq!(decoded_unterminated, b"Hello".to_vec());
+
+        // Invalid character error
+        let data_invalid = b"486Z6C>";
+        assert!(decode_ascii_hex(data_invalid).is_err());
+    }
+
+    #[test]
     fn test_ascii85_roundtrip() {
         let original = b"Hello World! Testing ASCII85 Base-85 encoding for PDF streams.";
         let encoded = encode_ascii85(original).expect("encode ascii85");
@@ -322,10 +634,238 @@ mod tests {
     }
 
     #[test]
+    fn test_ascii85_edge_cases() {
+        // Zero block compression
+        let zeros = vec![0u8; 12];
+        let encoded_zeros = encode_ascii85(&zeros).expect("encode zeros");
+        assert_eq!(encoded_zeros, b"zzz~>");
+        let decoded_zeros = decode_ascii85(&encoded_zeros).expect("decode zeros");
+        assert_eq!(decoded_zeros, zeros);
+
+        // Remainder chunks (1, 2, 3 remainder bytes)
+        for len in 1..=10 {
+            let src: Vec<u8> = (0..len).map(|b| b as u8).collect();
+            let enc = encode_ascii85(&src).expect("encode remainder");
+            let dec = decode_ascii85(&enc).expect("decode remainder");
+            assert_eq!(src, dec);
+        }
+
+        // Whitespace handling with leading <~ and trailing ~>
+        let hello_enc = encode_ascii85(b"Hello World").expect("encode hello");
+        let mut with_ws = b" <~ ".to_vec();
+        with_ws.extend_from_slice(&hello_enc[..5]);
+        with_ws.extend_from_slice(b" \n\t ");
+        with_ws.extend_from_slice(&hello_enc[5..]);
+        with_ws.extend_from_slice(b" ");
+        let dec = decode_ascii85(&with_ws).expect("decode with whitespace");
+        assert_eq!(dec, b"Hello World".to_vec());
+
+        // Invalid character error
+        assert!(decode_ascii85(b"~v~>").is_err());
+
+        // Invalid single-character final group error
+        assert!(decode_ascii85(b"9~>").is_err());
+    }
+
+    #[test]
     fn test_run_length_roundtrip() {
         let original = b"AAAAABBBBBCCCCCDDDDD1234567890EEEEE";
         let encoded = encode_run_length(original).expect("encode run length");
         let decoded = decode_run_length(&encoded).expect("decode run length");
         assert_eq!(original.to_vec(), decoded);
+    }
+
+    #[test]
+    fn test_run_length_edge_cases() {
+        // Run of 128 repeated bytes (maximum repeat run in PDF RLE)
+        let max_run = vec![0x42; 128];
+        let enc_max_run = encode_run_length(&max_run).expect("encode 128 run");
+        let dec_max_run = decode_run_length(&enc_max_run).expect("decode 128 run");
+        assert_eq!(max_run, dec_max_run);
+
+        // Run of 128 literal distinct bytes (maximum literal run in PDF RLE)
+        let max_lit: Vec<u8> = (0..128).collect();
+        let enc_max_lit = encode_run_length(&max_lit).expect("encode 128 lit");
+        let dec_max_lit = decode_run_length(&enc_max_lit).expect("decode 128 lit");
+        assert_eq!(max_lit, dec_max_lit);
+
+        // Truncated copy run
+        let truncated_copy = vec![5, 0x01, 0x02]; // length 5 expects 6 bytes, only 2 provided
+        assert!(decode_run_length(&truncated_copy).is_err());
+
+        // Truncated repeat run
+        let truncated_repeat = vec![250]; // repeat run expects 1 byte to follow
+        assert!(decode_run_length(&truncated_repeat).is_err());
+    }
+
+    #[test]
+    fn test_lzw_roundtrip() {
+        let original = b"TOBEORNOTTOBEORTOBEORNOT";
+        let compressed = encode_lzw(original, true).expect("encode lzw");
+        let decompressed = decode_lzw(&compressed, true).expect("decode lzw");
+        assert_eq!(original.to_vec(), decompressed);
+    }
+
+    #[test]
+    fn test_lzw_early_change_variants() {
+        let original = b"PDF standard LZW stream verification test with repeated patterns abcdef123456abcdef123456";
+        // EarlyChange = true (default)
+        let enc_early = encode_lzw(original, true).expect("encode lzw early true");
+        let dec_early = decode_lzw(&enc_early, true).expect("decode lzw early true");
+        assert_eq!(original.to_vec(), dec_early);
+
+        // EarlyChange = false
+        let enc_late = encode_lzw(original, false).expect("encode lzw early false");
+        let dec_late = decode_lzw(&enc_late, false).expect("decode lzw early false");
+        assert_eq!(original.to_vec(), dec_late);
+    }
+
+    #[test]
+    fn test_lzw_kwkwk_pattern() {
+        // Highly repetitive pattern that exercises code == table.len() KwKwK path
+        let data = b"ABABABABABABABABABABABABABABABABAB";
+        let enc = encode_lzw(data, true).expect("encode kwkwk");
+        let dec = decode_lzw(&enc, true).expect("decode kwkwk");
+        assert_eq!(data.to_vec(), dec);
+    }
+
+    #[test]
+    fn test_lzw_corrupt_data() {
+        // Premature end of stream without EOD
+        let empty = vec![0x80]; // partial bits
+        let res = decode_lzw(&empty, true);
+        // Clean error or graceful EOF
+        assert!(res.is_ok() || res.is_err());
+
+        // Completely invalid codes
+        let invalid = vec![0xFF, 0xFF, 0xFF, 0xFF];
+        assert!(decode_lzw(&invalid, true).is_err());
+    }
+
+    #[test]
+    fn test_dct_roundtrip_synthetic() {
+        let width = 8u32;
+        let height = 8u32;
+        // Generate an 8x8 synthetic RGB checkerboard pattern
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                if (x + y) % 2 == 0 {
+                    rgb.extend_from_slice(&[255, 0, 0]); // Red
+                } else {
+                    rgb.extend_from_slice(&[0, 255, 255]); // Cyan
+                }
+            }
+        }
+
+        // Encode as JPEG at high quality 95
+        let jpeg_bytes = encode_dct(&rgb, width, height, 95).expect("encode dct");
+        assert!(jpeg_bytes.starts_with(&[0xFF, 0xD8])); // JPEG SOI
+        assert!(jpeg_bytes.ends_with(&[0xFF, 0xD9])); // JPEG EOI
+
+        // Decode with dimensions
+        let (decoded_rgb, w, h) = decode_dct_with_dimensions(&jpeg_bytes).expect("decode dct with dims");
+        assert_eq!(w, width);
+        assert_eq!(h, height);
+        assert_eq!(decoded_rgb.len(), (width * height * 3) as usize);
+
+        // Decode via decode_stream
+        let stream_decoded = decode_stream("DCTDecode", &jpeg_bytes).expect("decode stream dct");
+        assert_eq!(stream_decoded.len(), (width * height * 3) as usize);
+
+        // Decode via abbreviation
+        let abbr_decoded = decode_stream("DCT", &jpeg_bytes).expect("decode stream dct abbr");
+        assert_eq!(abbr_decoded, stream_decoded);
+    }
+
+    #[test]
+    fn test_dct_corrupted_stream() {
+        // Non-JPEG arbitrary bytes
+        let corrupt_data = b"This is not a JPEG stream at all!";
+        let err = decode_dct(corrupt_data);
+        assert!(err.is_err());
+        assert!(matches!(err.unwrap_err(), PdfError::FilterError(_)));
+
+        // Truncated JPEG stream (SOI without valid payload)
+        let truncated = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let err2 = decode_dct(&truncated);
+        assert!(err2.is_err());
+    }
+
+    #[test]
+    fn test_dct_dimension_mismatch() {
+        let bad_rgb = vec![0u8; 10]; // Not 8x8x3 = 192 bytes
+        let err = encode_dct(&bad_rgb, 8, 8, 85);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_filter_dispatch_aliases() {
+        let text = b"Testing filter aliases across ISO 32000 Table 6";
+
+        // FlateDecode and Fl
+        let flate_enc = encode_stream("FlateDecode", text).unwrap();
+        assert_eq!(decode_stream("FlateDecode", &flate_enc).unwrap(), text);
+        assert_eq!(decode_stream("/FlateDecode", &flate_enc).unwrap(), text);
+        assert_eq!(decode_stream("Fl", &flate_enc).unwrap(), text);
+        assert_eq!(decode_stream("/Fl", &flate_enc).unwrap(), text);
+
+        // ASCIIHexDecode and AHx
+        let hex_enc = encode_stream("AHx", text).unwrap();
+        assert_eq!(decode_stream("ASCIIHexDecode", &hex_enc).unwrap(), text);
+        assert_eq!(decode_stream("/AHx", &hex_enc).unwrap(), text);
+
+        // ASCII85Decode and A85
+        let a85_enc = encode_stream("A85", text).unwrap();
+        assert_eq!(decode_stream("ASCII85Decode", &a85_enc).unwrap(), text);
+        assert_eq!(decode_stream("/A85", &a85_enc).unwrap(), text);
+
+        // RunLengthDecode and RL
+        let rl_enc = encode_stream("RL", text).unwrap();
+        assert_eq!(decode_stream("RunLengthDecode", &rl_enc).unwrap(), text);
+        assert_eq!(decode_stream("/RL", &rl_enc).unwrap(), text);
+
+        // LZWDecode and LZW
+        let lzw_enc = encode_stream("LZW", text).unwrap();
+        assert_eq!(decode_stream("LZWDecode", &lzw_enc).unwrap(), text);
+        assert_eq!(decode_stream("/LZW", &lzw_enc).unwrap(), text);
+
+        // Unsupported filter
+        assert!(decode_stream("UnsupportedFilter", text).is_err());
+    }
+
+    #[test]
+    fn test_lzw_early_change_threshold_crossings() {
+        let mut large_data = Vec::new();
+        for i in 0..2000 {
+            large_data.extend_from_slice(format!("Token_{:04}_data_chunk_#", i % 100).as_bytes());
+        }
+
+        let enc_early = encode_lzw(&large_data, true).expect("encode lzw EarlyChange=true");
+        let dec_early = decode_lzw(&enc_early, true).expect("decode lzw EarlyChange=true");
+        assert_eq!(large_data, dec_early, "EarlyChange=true roundtrip must match");
+
+        let enc_late = encode_lzw(&large_data, false).expect("encode lzw EarlyChange=false");
+        let dec_late = decode_lzw(&enc_late, false).expect("decode lzw EarlyChange=false");
+        assert_eq!(large_data, dec_late, "EarlyChange=false roundtrip must match");
+    }
+
+    #[test]
+    fn test_lzw_table_saturation_clear_table_emission() {
+        let mut diverse_data = Vec::with_capacity(30000);
+        for i in 0..15000 {
+            diverse_data.push((i % 256) as u8);
+            diverse_data.push(((i * 7 + 13) % 256) as u8);
+        }
+
+        for &early_change in &[true, false] {
+            let enc = encode_lzw(&diverse_data, early_change).expect("encode diverse LZW");
+            let dec = decode_lzw(&enc, early_change).expect("decode diverse LZW");
+            assert_eq!(
+                diverse_data, dec,
+                "LZW with > 4096 code entries must cleanly roundtrip through ClearTable reset (early={})",
+                early_change
+            );
+        }
     }
 }

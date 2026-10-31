@@ -23,5 +23,5 @@ pub use document::{paper_sizes, Page, PdfDocument};
 pub use error::{PdfError, Result};
 pub use object::{ObjectId, Object, PdfDictionary, PdfName, PdfStream, PdfString};
 pub use outline::{add_bookmark, get_document_bookmarks, Bookmark};
-pub use parser::Parser;
+pub use parser::{Parser, XRefEntry, XRefMap};
 pub use writer::PdfWriter;
