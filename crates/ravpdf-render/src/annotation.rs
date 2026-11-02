@@ -350,7 +350,8 @@ fn render_single_annotation(
                         let mut started = false;
                         let mut i = 0;
                         while i + 1 < coords.len() {
-                            if let (Some(x), Some(y)) = (coords[i].as_f64(), coords[i + 1].as_f64()) {
+                            if let (Some(x), Some(y)) = (coords[i].as_f64(), coords[i + 1].as_f64())
+                            {
                                 let px = (x - crop_box[0]) as f32 * zoom;
                                 let py = (crop_box[3] - y) as f32 * zoom;
                                 if !started {
@@ -412,13 +413,22 @@ fn render_single_annotation(
                     // Optional interior color fill /IC
                     if let Some(ic_arr) = dict.get_array("IC") {
                         if ic_arr.len() >= 3 {
-                            if let (Some(r), Some(g), Some(b)) = (ic_arr[0].as_f64(), ic_arr[1].as_f64(), ic_arr[2].as_f64()) {
+                            if let (Some(r), Some(g), Some(b)) =
+                                (ic_arr[0].as_f64(), ic_arr[1].as_f64(), ic_arr[2].as_f64())
+                            {
                                 let mut fill_paint = Paint::default();
                                 fill_paint.set_color(
-                                    Color::from_rgba(r as f32, g as f32, b as f32, color.alpha()).unwrap_or(Color::WHITE),
+                                    Color::from_rgba(r as f32, g as f32, b as f32, color.alpha())
+                                        .unwrap_or(Color::WHITE),
                                 );
                                 fill_paint.anti_alias = true;
-                                pixmap.fill_path(&path, &fill_paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+                                pixmap.fill_path(
+                                    &path,
+                                    &fill_paint,
+                                    tiny_skia::FillRule::Winding,
+                                    Transform::identity(),
+                                    None,
+                                );
                             }
                         }
                     }

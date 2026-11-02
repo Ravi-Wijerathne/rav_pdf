@@ -16,8 +16,8 @@ pub use color::PdfColor;
 pub use interpreter::{ContentInterpreter, GraphicsState, RenderOptions};
 pub use tiny_skia::{Color, Pixmap};
 
-use ravpdf_core::error::{PdfError, Result};
 use ravpdf_core::document::PdfDocument;
+use ravpdf_core::error::{PdfError, Result};
 
 /// Renders a single PDF page into a high-resolution software `tiny_skia::Pixmap`.
 pub fn render_page(
@@ -43,7 +43,7 @@ pub fn render_page(
     let content_bytes = doc.get_page_content(page_index).unwrap_or_default();
     if !content_bytes.is_empty() {
         let mut interpreter =
-            ContentInterpreter::new(&mut pixmap, page.crop_box, options.zoom);
+            ContentInterpreter::with_doc(&mut pixmap, doc, page.crop_box, options.zoom);
         let _ = interpreter.interpret(&content_bytes, page.resources.as_ref());
     }
 
@@ -108,7 +108,8 @@ mod tests {
     fn test_render_vector_content() {
         let mut doc = PdfDocument::new();
         // Draw a red rectangle and blue line in PDF operators
-        let content = b"1 0 0 rg\n 50 50 100 100 re\n f\n 0 0 1 RG\n 2 w\n 50 50 m\n 150 150 l\n S\n";
+        let content =
+            b"1 0 0 rg\n 50 50 100 100 re\n f\n 0 0 1 RG\n 2 w\n 50 50 m\n 150 150 l\n S\n";
         doc.add_page_with_content(612.0, 792.0, content.to_vec());
 
         let options = RenderOptions::default();
@@ -149,5 +150,51 @@ mod tests {
         assert_eq!(pixmap.width(), 612);
         assert_eq!(pixmap.height(), 792);
     }
-}
 
+    #[test]
+    fn test_render_text_and_image_xobject() {
+        use ravpdf_core::object::{Object, PdfDictionary, PdfName, PdfStream};
+
+        let mut doc = PdfDocument::new();
+
+        // 1. Create a 2x2 RGB image XObject
+        let img_id = doc.next_object_id();
+        let mut img_dict = PdfDictionary::new();
+        img_dict.insert("Type", PdfName::new("XObject"));
+        img_dict.insert("Subtype", PdfName::new("Image"));
+        img_dict.insert("Width", 2);
+        img_dict.insert("Height", 2);
+        img_dict.insert("ColorSpace", PdfName::new("DeviceRGB"));
+        img_dict.insert("BitsPerComponent", 8);
+
+        // 2x2 red image (6 bytes: [255, 0, 0] x 4)
+        let red_bytes = vec![255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0];
+        let stream = PdfStream::with_plain_data(img_dict, red_bytes);
+        doc.objects.insert(img_id, Object::Stream(stream));
+
+        // 2. Build content stream invoking text and the image XObject
+        let content = b"BT\n /F1 16 Tf\n 100 700 Td\n (Hello RavPDF) Tj\n ET\n q\n 50 0 0 50 100 500 cm\n /Im1 Do\n Q\n";
+        doc.add_page_with_content(612.0, 792.0, content.to_vec());
+
+        // Register XObject /Im1 in page resources
+        let page_id = doc.page_ids()[0];
+        if let Some(Object::Dictionary(page_dict)) = doc.objects.get_mut(&page_id) {
+            let mut res = PdfDictionary::new();
+            let mut xobjs = PdfDictionary::new();
+            xobjs.insert("Im1", img_id);
+            res.insert("XObject", Object::Dictionary(xobjs));
+            page_dict.insert("Resources", Object::Dictionary(res));
+        }
+
+        let options = RenderOptions::default();
+        let pixmap = render_page(&doc, 0, &options).expect("render text and image");
+        assert_eq!(pixmap.width(), 612);
+        assert_eq!(pixmap.height(), 792);
+
+        // Verify that pixels around the rendered image (x: 100..150, y: 792-550=242) contain red
+        let px = pixmap.pixel(120, 260).unwrap();
+        assert_eq!(px.red(), 255);
+        assert_eq!(px.green(), 0);
+        assert_eq!(px.blue(), 0);
+    }
+}

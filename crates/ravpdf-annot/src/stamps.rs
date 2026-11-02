@@ -93,9 +93,9 @@ impl StandardStamp {
     /// Default primary RGB color for the stamp border and text.
     pub fn default_color(&self) -> (f32, f32, f32) {
         match self {
-            StandardStamp::Approved
-            | StandardStamp::Accepted
-            | StandardStamp::ForPublicRelease => (0.12, 0.55, 0.22), // Dark Green
+            StandardStamp::Approved | StandardStamp::Accepted | StandardStamp::ForPublicRelease => {
+                (0.12, 0.55, 0.22)
+            } // Dark Green
             StandardStamp::NotApproved
             | StandardStamp::Void
             | StandardStamp::Expired
@@ -109,7 +109,7 @@ impl StandardStamp {
             | StandardStamp::Witness
             | StandardStamp::InitialHere => (0.10, 0.35, 0.75), // Corporate Blue
             StandardStamp::SignHere => (0.85, 0.60, 0.0), // Gold / Signpost
-            StandardStamp::Custom(_) => (0.2, 0.2, 0.2), // Dark Charcoal
+            StandardStamp::Custom(_) => (0.2, 0.2, 0.2),  // Dark Charcoal
         }
     }
 
@@ -229,7 +229,9 @@ pub fn add_stamp_annotation(
         .get(page_index)
         .ok_or_else(|| PdfError::InvalidStructure(format!("Page {} out of range", page_index)))?;
 
-    let color = config.color.unwrap_or_else(|| config.stamp_type.default_color());
+    let color = config
+        .color
+        .unwrap_or_else(|| config.stamp_type.default_color());
     let label = config
         .custom_text
         .as_deref()
@@ -280,7 +282,11 @@ pub fn add_stamp_annotation(
     // Text placement
     app_stream_content.push_str(&format!(
         "BT\n/F1 {:.2} Tf\n{:.3} {:.3} {:.3} rg\n",
-        if config.dynamic_date.is_some() { h * 0.38 } else { h * 0.48 },
+        if config.dynamic_date.is_some() {
+            h * 0.38
+        } else {
+            h * 0.48
+        },
         color.0,
         color.1,
         color.2
@@ -404,7 +410,10 @@ pub fn add_stamp_annotation(
         Some(Object::Array(arr)) => arr.push(Object::Reference(annot_id)),
         Some(Object::Reference(orig)) => {
             let o = *orig;
-            p_dict.insert("Annots", vec![Object::Reference(o), Object::Reference(annot_id)]);
+            p_dict.insert(
+                "Annots",
+                vec![Object::Reference(o), Object::Reference(annot_id)],
+            );
         }
         _ => {
             p_dict.insert("Annots", vec![Object::Reference(annot_id)]);
@@ -508,10 +517,7 @@ pub fn add_callout_annotation(
     app_stream_content.push_str("q\n");
 
     // Translate to local coords relative to (min_x, min_y)
-    app_stream_content.push_str(&format!(
-        "1 0 0 1 {:.2} {:.2} cm\n",
-        -min_x, -min_y
-    ));
+    app_stream_content.push_str(&format!("1 0 0 1 {:.2} {:.2} cm\n", -min_x, -min_y));
 
     // 1. Leader Line from pointer to knee to box
     app_stream_content.push_str(&format!(
@@ -652,7 +658,10 @@ pub fn add_callout_annotation(
         Some(Object::Array(arr)) => arr.push(Object::Reference(annot_id)),
         Some(Object::Reference(orig)) => {
             let o = *orig;
-            p_dict.insert("Annots", vec![Object::Reference(o), Object::Reference(annot_id)]);
+            p_dict.insert(
+                "Annots",
+                vec![Object::Reference(o), Object::Reference(annot_id)],
+            );
         }
         _ => {
             p_dict.insert("Annots", vec![Object::Reference(annot_id)]);
@@ -779,7 +788,10 @@ pub fn add_typewriter_annotation(
         Some(Object::Array(arr)) => arr.push(Object::Reference(annot_id)),
         Some(Object::Reference(orig)) => {
             let o = *orig;
-            p_dict.insert("Annots", vec![Object::Reference(o), Object::Reference(annot_id)]);
+            p_dict.insert(
+                "Annots",
+                vec![Object::Reference(o), Object::Reference(annot_id)],
+            );
         }
         _ => {
             p_dict.insert("Annots", vec![Object::Reference(annot_id)]);
@@ -815,19 +827,23 @@ mod tests {
         doc.add_blank_page(612.0, 792.0);
 
         // 1. Add standard Approved stamp
-        let mut config = StampConfig::default();
-        config.stamp_type = StandardStamp::Approved;
-        config.rect = [100.0, 600.0, 180.0, 56.0];
+        let config = StampConfig {
+            stamp_type: StandardStamp::Approved,
+            rect: [100.0, 600.0, 180.0, 56.0],
+            ..Default::default()
+        };
         let annot_id = add_stamp_annotation(&mut doc, 0, &config).expect("add approved stamp");
         assert!(doc.objects.contains_key(&annot_id));
 
         // 2. Add dynamic Confidential stamp with date and author
-        let mut dyn_config = StampConfig::default();
-        dyn_config.stamp_type = StandardStamp::Confidential;
-        dyn_config.rect = [100.0, 500.0, 220.0, 60.0];
-        dyn_config.author = Some("SecurityOfficer".to_string());
-        dyn_config.dynamic_date = Some(Utc::now());
-        dyn_config.popup_note = Some("Classified review complete".to_string());
+        let dyn_config = StampConfig {
+            stamp_type: StandardStamp::Confidential,
+            rect: [100.0, 500.0, 220.0, 60.0],
+            author: Some("SecurityOfficer".to_string()),
+            dynamic_date: Some(Utc::now()),
+            popup_note: Some("Classified review complete".to_string()),
+            ..Default::default()
+        };
 
         let dyn_id =
             add_stamp_annotation(&mut doc, 0, &dyn_config).expect("add dynamic confidential stamp");

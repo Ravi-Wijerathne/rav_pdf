@@ -4,7 +4,7 @@
 
 use ravpdf_core::document::PdfDocument;
 use ravpdf_core::error::{PdfError, Result};
-use ravpdf_core::object::{ObjectId, Object, PdfDictionary, PdfName, PdfString};
+use ravpdf_core::object::{Object, ObjectId, PdfDictionary, PdfName, PdfString};
 use regex::Regex;
 
 /// Action associated with a link annotation conforming to ISO 32000-1 Section 12.6.
@@ -58,15 +58,15 @@ impl LinkHighlight {
 /// Subtypes of PDF annotations conforming to ISO 32000-1 Section 12.5.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnnotationType {
-    Text,        // Sticky Note
-    FreeText,    // Text box on page
-    Highlight,   // Highlight
-    Underline,   // Underline
-    StrikeOut,   // Strikeout
-    Square,      // Rectangle
-    Circle,      // Oval / Circle
-    Line,        // Line
-    Ink,         // Freehand drawing
+    Text,          // Sticky Note
+    FreeText,      // Text box on page
+    Highlight,     // Highlight
+    Underline,     // Underline
+    StrikeOut,     // Strikeout
+    Square,        // Rectangle
+    Circle,        // Oval / Circle
+    Line,          // Line
+    Ink,           // Freehand drawing
     Stamp(String), // Rubber stamp
     Link {
         action: LinkAction,
@@ -103,7 +103,9 @@ impl AnnotationType {
             "Circle" => Some(AnnotationType::Circle),
             "Line" => Some(AnnotationType::Line),
             "Ink" => Some(AnnotationType::Ink),
-            "Stamp" => Some(AnnotationType::Stamp(stamp_name.unwrap_or_else(|| "Draft".into()))),
+            "Stamp" => Some(AnnotationType::Stamp(
+                stamp_name.unwrap_or_else(|| "Draft".into()),
+            )),
             _ => None,
         }
     }
@@ -190,7 +192,11 @@ impl Annotation {
         if let Some((r, g, b)) = self.color {
             dict.insert(
                 "C",
-                vec![Object::Real(r as f64), Object::Real(g as f64), Object::Real(b as f64)],
+                vec![
+                    Object::Real(r as f64),
+                    Object::Real(g as f64),
+                    Object::Real(b as f64),
+                ],
             );
         }
 
@@ -206,7 +212,12 @@ impl Annotation {
             dict.insert("Name", PdfName::new(stamp_name.as_str()));
         }
 
-        if let AnnotationType::Link { ref action, border_width, highlight } = self.annot_type {
+        if let AnnotationType::Link {
+            ref action,
+            border_width,
+            highlight,
+        } = self.annot_type
+        {
             dict.insert("H", PdfName::new(highlight.to_pdf_name()));
             dict.insert(
                 "Border",
@@ -280,7 +291,8 @@ impl Annotation {
             } else if let Some(dest) = dict.get("Dest") {
                 match dest {
                     Object::Array(d_arr) => {
-                        let page_idx = d_arr.first().and_then(Object::as_i64).unwrap_or(0).max(0) as usize;
+                        let page_idx =
+                            d_arr.first().and_then(Object::as_i64).unwrap_or(0).max(0) as usize;
                         LinkAction::GoToPage(page_idx)
                     }
                     Object::String(s) => LinkAction::Named(s.to_string_lossy()),
@@ -346,7 +358,8 @@ impl Annotation {
 ///
 /// Traceability: FR-20.5.
 pub fn detect_urls_in_text(text: &str) -> Vec<(String, usize, usize)> {
-    let Ok(re) = Regex::new(r#"https?://[^\s<>"'{}|\\^`]+[^\s`!()\[\]{};:'".,<>?«»“”‘’]"#) else {
+    let Ok(re) = Regex::new(r#"https?://[^\s<>"'{}|\\^`]+[^\s`!()\[\]{};:'".,<>?«»“”‘’]"#)
+    else {
         return Vec::new();
     };
 
@@ -486,7 +499,10 @@ pub fn update_annotation_rect(
     let annot_obj = doc
         .objects
         .get_mut(&annot_id)
-        .ok_or(PdfError::ObjectNotFound(annot_id.number, annot_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(
+            annot_id.number,
+            annot_id.generation,
+        ))?;
 
     let dict = annot_obj
         .as_dict_mut()
@@ -525,7 +541,10 @@ pub fn update_annotation_contents(
     let annot_obj = doc
         .objects
         .get_mut(&annot_id)
-        .ok_or(PdfError::ObjectNotFound(annot_id.number, annot_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(
+            annot_id.number,
+            annot_id.generation,
+        ))?;
 
     let dict = annot_obj
         .as_dict_mut()
@@ -553,7 +572,10 @@ pub fn update_annotation_color(
     let annot_obj = doc
         .objects
         .get_mut(&annot_id)
-        .ok_or(PdfError::ObjectNotFound(annot_id.number, annot_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(
+            annot_id.number,
+            annot_id.generation,
+        ))?;
 
     let dict = annot_obj
         .as_dict_mut()
@@ -576,4 +598,225 @@ pub fn update_annotation_color(
     dict.insert("M", Object::String(PdfString::from_str(&now_str)));
 
     Ok(())
+}
+
+/// Exports all annotations across all pages of a document into ISO 19444-1 compliant XFDF XML (FR-08.3.6).
+pub fn export_annotations_to_xfdf(doc: &PdfDocument) -> Result<String> {
+    let mut xml = String::new();
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    xml.push_str("<xfdf xmlns=\"http://ns.adobe.com/xfdf/\" xml:space=\"preserve\">\n");
+    xml.push_str("  <annots>\n");
+
+    let total_pages = doc.page_count();
+    for page_idx in 0..total_pages {
+        let annots = get_page_annotations(doc, page_idx).unwrap_or_default();
+        for annot in annots {
+            let tag = match annot.annot_type {
+                AnnotationType::Text => "text",
+                AnnotationType::Highlight => "highlight",
+                AnnotationType::Underline => "underline",
+                AnnotationType::StrikeOut => "strikeout",
+                AnnotationType::FreeText => "freetext",
+                AnnotationType::Square => "square",
+                AnnotationType::Circle => "circle",
+                AnnotationType::Line => "line",
+                AnnotationType::Ink => "ink",
+                AnnotationType::Stamp(_) => "stamp",
+                AnnotationType::Link { .. } => "link",
+            };
+
+            let rect_str = format!(
+                "{:.2},{:.2},{:.2},{:.2}",
+                annot.rect[0], annot.rect[1], annot.rect[2], annot.rect[3]
+            );
+
+            let color_str = if let Some(c) = annot.color {
+                format!(
+                    "#{:02X}{:02X}{:02X}",
+                    (c.0.clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (c.1.clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (c.2.clamp(0.0, 1.0) * 255.0).round() as u8
+                )
+            } else {
+                "#000000".to_string()
+            };
+
+            let author_attr = annot
+                .author
+                .as_deref()
+                .map(|a| format!(" title=\"{}\"", escape_xml(a)))
+                .unwrap_or_default();
+
+            xml.push_str(&format!(
+                "    <{} page=\"{}\" rect=\"{}\" color=\"{}\" opacity=\"{:.2}\"{}>\n",
+                tag, page_idx, rect_str, color_str, annot.opacity, author_attr
+            ));
+
+            if let Some(ref text) = annot.contents {
+                xml.push_str(&format!(
+                    "      <contents>{}</contents>\n",
+                    escape_xml(text)
+                ));
+            }
+
+            xml.push_str(&format!("    </{}>\n", tag));
+        }
+    }
+
+    xml.push_str("  </annots>\n");
+    xml.push_str("</xfdf>\n");
+    Ok(xml)
+}
+
+/// Imports annotations from an XFDF XML string and applies them to the document (FR-08.3.6).
+///
+/// Returns the number of annotations successfully imported.
+pub fn import_annotations_from_xfdf(doc: &mut PdfDocument, xfdf_content: &str) -> Result<usize> {
+    let mut imported = 0;
+    let total_pages = doc.page_count();
+    if total_pages == 0 {
+        return Ok(0);
+    }
+
+    let supported_tags = [
+        "text",
+        "highlight",
+        "underline",
+        "strikeout",
+        "freetext",
+        "square",
+        "circle",
+        "line",
+        "ink",
+        "stamp",
+        "link",
+    ];
+
+    for tag in supported_tags {
+        let open_pat = format!("<{}", tag);
+        let close_pat = format!("</{}>", tag);
+
+        let mut search_idx = 0;
+        while let Some(start) = xfdf_content[search_idx..].find(&open_pat) {
+            let abs_start = search_idx + start;
+            let end_opt = xfdf_content[abs_start..].find(&close_pat);
+            let single_tag_end = xfdf_content[abs_start..].find("/>");
+
+            let block = if let Some(end) = end_opt {
+                let abs_end = abs_start + end + close_pat.len();
+                search_idx = abs_end;
+                &xfdf_content[abs_start..abs_end]
+            } else if let Some(end) = single_tag_end {
+                let abs_end = abs_start + end + 2;
+                search_idx = abs_end;
+                &xfdf_content[abs_start..abs_end]
+            } else {
+                break;
+            };
+
+            // Parse page
+            let page: usize = extract_xml_attr(block, "page")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+                .min(total_pages - 1);
+
+            // Parse rect
+            let rect = if let Some(rect_s) = extract_xml_attr(block, "rect") {
+                let parts: Vec<f64> = rect_s
+                    .split(',')
+                    .filter_map(|p| p.trim().parse::<f64>().ok())
+                    .collect();
+                if parts.len() >= 4 {
+                    [parts[0], parts[1], parts[2], parts[3]]
+                } else {
+                    [50.0, 50.0, 150.0, 150.0]
+                }
+            } else {
+                [50.0, 50.0, 150.0, 150.0]
+            };
+
+            // Parse color
+            let color = extract_xml_attr(block, "color").and_then(|hex| {
+                let hex = hex.trim_start_matches('#');
+                if hex.len() == 6 {
+                    let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
+                    let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
+                    let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
+                    Some((r, g, b))
+                } else {
+                    None
+                }
+            });
+
+            // Parse opacity
+            let opacity: f32 = extract_xml_attr(block, "opacity")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1.0);
+
+            // Parse title / author
+            let author = extract_xml_attr(block, "title").map(unescape_xml);
+
+            // Parse contents
+            let contents = extract_xml_inner(block, "contents").map(unescape_xml);
+
+            let annot_type = match tag {
+                "text" => AnnotationType::Text,
+                "highlight" => AnnotationType::Highlight,
+                "underline" => AnnotationType::Underline,
+                "strikeout" => AnnotationType::StrikeOut,
+                "freetext" => AnnotationType::FreeText,
+                "square" => AnnotationType::Square,
+                "circle" => AnnotationType::Circle,
+                "line" => AnnotationType::Line,
+                "ink" => AnnotationType::Ink,
+                "stamp" => AnnotationType::Stamp("Approved".into()),
+                _ => AnnotationType::Text,
+            };
+
+            let mut annot = Annotation::new(annot_type, rect);
+            annot.color = color;
+            annot.opacity = opacity;
+            annot.author = author;
+            annot.contents = contents;
+
+            if add_annotation_to_page(doc, page, &annot).is_ok() {
+                imported += 1;
+            }
+        }
+    }
+
+    Ok(imported)
+}
+
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn unescape_xml(s: &str) -> String {
+    s.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn extract_xml_attr<'a>(tag_str: &'a str, attr_name: &str) -> Option<&'a str> {
+    let pat = format!("{}=\"", attr_name);
+    let start = tag_str.find(&pat)? + pat.len();
+    let rest = &tag_str[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+fn extract_xml_inner<'a>(block: &'a str, tag_name: &str) -> Option<&'a str> {
+    let open = format!("<{}>", tag_name);
+    let close = format!("</{}>", tag_name);
+    let start = block.find(&open)? + open.len();
+    let rest = &block[start..];
+    let end = rest.find(&close)?;
+    Some(rest[..end].trim())
 }

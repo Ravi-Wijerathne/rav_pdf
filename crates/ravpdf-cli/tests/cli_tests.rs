@@ -13,7 +13,11 @@ fn test_full_document_lifecycle() {
     // 1. Create document conforming to ISO 32000
     let mut doc = PdfDocument::new();
     let content = b"BT\n/F1 14 Tf\n100 700 Td\n(Account Number: 123-45-6789) Tj\nET\n";
-    doc.add_page_with_content(paper_sizes::LETTER.0, paper_sizes::LETTER.1, content.to_vec());
+    doc.add_page_with_content(
+        paper_sizes::LETTER.0,
+        paper_sizes::LETTER.1,
+        content.to_vec(),
+    );
     doc.add_blank_page(paper_sizes::A4.0, paper_sizes::A4.1);
 
     assert_eq!(doc.page_count(), 2);
@@ -69,7 +73,13 @@ fn test_full_document_lifecycle() {
 
     // 9. Encryption & Decryption (FR-14)
     let mut enc_doc = re_merged.clone();
-    encrypt_document(&mut enc_doc, "userpass", "ownerpass", Permissions::all_permitted()).expect("encrypt");
+    encrypt_document(
+        &mut enc_doc,
+        "userpass",
+        "ownerpass",
+        Permissions::all_permitted(),
+    )
+    .expect("encrypt");
     assert!(enc_doc.trailer.contains_key("Encrypt"));
 
     decrypt_document(&mut enc_doc, "userpass").expect("decrypt");
@@ -87,20 +97,24 @@ fn test_accessibility_export_and_comments_workflows() {
     use ravpdf_annot::{add_annotation_to_page, Annotation, AnnotationType};
     use ravpdf_tools::{
         audit_accessibility, export_comments_to_csv, export_page_to_image, export_to_html,
-        export_to_plain_text, get_document_comments, remediate_all_automatic,
-        ExportImageFormat,
+        export_to_plain_text, get_document_comments, remediate_all_automatic, ExportImageFormat,
     };
 
     let mut doc = PdfDocument::new();
     let content = b"BT\n/F1 14 Tf\n50 700 Td\n(Accessibility & Export Test Report) Tj\nET\n";
-    doc.add_page_with_content(paper_sizes::LETTER.0, paper_sizes::LETTER.1, content.to_vec());
+    doc.add_page_with_content(
+        paper_sizes::LETTER.0,
+        paper_sizes::LETTER.1,
+        content.to_vec(),
+    );
 
     // 1. Accessibility Audit (FR-21.1)
     let audit_before = audit_accessibility(&doc).expect("audit before");
     assert!(!audit_before.is_compliant);
 
     // 2. Auto-Remediation (FR-21.3 - FR-21.10)
-    let audit_after = remediate_all_automatic(&mut doc, "Compliant Report", "en-US").expect("remediate");
+    let audit_after =
+        remediate_all_automatic(&mut doc, "Compliant Report", "en-US").expect("remediate");
     assert_eq!(audit_after.failed_count, 0);
     assert!(audit_after.is_compliant);
 
@@ -138,9 +152,9 @@ fn test_accessibility_export_and_comments_workflows() {
 fn test_measure_portfolio_and_linearization_workflows() {
     use ravpdf_tools::{
         add_measurement_line_annotation, calculate_distance, create_portfolio,
-        extract_portfolio_item, get_portfolio, is_linearized, is_portfolio,
-        linearize_document, optimize_document, search_portfolio, LinearUnit,
-        PortfolioItem, PortfolioLayout, ScaleRatio,
+        extract_portfolio_item, get_portfolio, is_linearized, is_portfolio, linearize_document,
+        optimize_document, search_portfolio, LinearUnit, PortfolioItem, PortfolioLayout,
+        ScaleRatio,
     };
 
     // 1. Measurement Engine (FR-26.1, FR-26.4, FR-26.5)
@@ -216,10 +230,10 @@ fn test_js_scan_print_and_plugin_workflows() {
     use image::RgbaImage;
     use ravpdf_forms::{add_form_field, FormField};
     use ravpdf_tools::{
-        batch_scan_to_pdf, execute_all_field_calculations, execute_script,
-        generate_postscript, generate_print_preview_layout, BookletBinding, JsExecutionContext,
-        JsValue, PluginPermission, PluginRegistry, PrintJobConfig, PrintLayoutMode,
-        SampleWatermarkPlugin, ScannerJobConfig,
+        batch_scan_to_pdf, execute_all_field_calculations, execute_script, generate_postscript,
+        generate_print_preview_layout, BookletBinding, JsExecutionContext, JsValue,
+        PluginPermission, PluginRegistry, PrintJobConfig, PrintLayoutMode, SampleWatermarkPlugin,
+        ScannerJobConfig,
     };
 
     // 1. JavaScript Engine & AcroForm Calculation Workflow (FR-12)
@@ -254,14 +268,19 @@ fn test_js_scan_print_and_plugin_workflows() {
     );
 
     // Custom expression evaluation with app.alert
-    let expr_res = execute_script(&mut js_ctx, "app.alert('Total verified: ' + grand_total, 'Audit', 3, 0);")
-        .expect("alert script");
+    let expr_res = execute_script(
+        &mut js_ctx,
+        "app.alert('Total verified: ' + grand_total, 'Audit', 3, 0);",
+    )
+    .expect("alert script");
     assert_eq!(expr_res, JsValue::Number(1.0));
     assert_eq!(js_ctx.alerts.len(), 1);
     assert!(js_ctx.alerts[0].message.contains("Total verified: 75"));
 
     // Sync back to document
-    js_ctx.sync_to_document(&mut doc).expect("sync js back to doc");
+    js_ctx
+        .sync_to_document(&mut doc)
+        .expect("sync js back to doc");
 
     // 2. Scan Cleanup & Batch Scan to PDF (FR-32)
     let mut scan_page1 = RgbaImage::new(120, 160);
@@ -279,8 +298,8 @@ fn test_js_scan_print_and_plugin_workflows() {
     }
 
     let scan_config = ScannerJobConfig::default();
-    let scanned_doc = batch_scan_to_pdf(&[scan_page1, scan_page2], &scan_config)
-        .expect("batch scan to pdf");
+    let scanned_doc =
+        batch_scan_to_pdf(&[scan_page1, scan_page2], &scan_config).expect("batch scan to pdf");
     assert_eq!(scanned_doc.page_count(), 2);
 
     // 3. Print Imposition & PostScript Generation (FR-35)
@@ -326,15 +345,16 @@ fn test_js_scan_print_and_plugin_workflows() {
             Some(&mut target_doc),
         )
         .expect("dispatch plugin action");
-    assert!(plugin_result.unwrap().contains("Applied sample draft watermark across 1 pages"));
+    assert!(plugin_result
+        .unwrap()
+        .contains("Applied sample draft watermark across 1 pages"));
 }
 
 #[test]
 fn test_form_data_import_export_autodetect_taborder_workflows() {
     use ravpdf_forms::{
         apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
-        export_form_data, get_form_fields, import_form_data,
-        FormDataFormat, FormField, TabOrder,
+        export_form_data, get_form_fields, import_form_data, FormDataFormat, FormField, TabOrder,
     };
 
     let mut doc = PdfDocument::new();
@@ -372,11 +392,15 @@ fn test_form_data_import_export_autodetect_taborder_workflows() {
 
     // 3. Import modified data (FR-11.3.2)
     let updated_json = r#"{"ApplicantName": "Jane Smith", "Department": "Research"}"#;
-    let imported_count = import_form_data(&mut doc, updated_json, FormDataFormat::Json).expect("import json");
+    let imported_count =
+        import_form_data(&mut doc, updated_json, FormDataFormat::Json).expect("import json");
     assert_eq!(imported_count, 2);
 
     let fields = get_form_fields(&doc).expect("get fields");
-    let name_val = fields.iter().find(|f| f.name == "ApplicantName").and_then(|f| f.value.as_deref());
+    let name_val = fields
+        .iter()
+        .find(|f| f.name == "ApplicantName")
+        .and_then(|f| f.value.as_deref());
     assert_eq!(name_val, Some("Jane Smith"));
 
     // 4. Form Field Auto-Detection (FR-11.3.1)
@@ -397,11 +421,19 @@ fn test_form_data_import_export_autodetect_taborder_workflows() {
     // 5. Tab Order Specification (FR-11.2.7)
     apply_page_tab_order(&mut scan_doc, 0, TabOrder::Row).expect("apply row tab order");
     let page_id = scan_doc.page_ids()[0];
-    let page_obj = scan_doc.objects.get(&page_id).and_then(|o| o.as_dict()).unwrap();
+    let page_obj = scan_doc
+        .objects
+        .get(&page_id)
+        .and_then(|o| o.as_dict())
+        .unwrap();
     assert_eq!(page_obj.get_name("Tabs"), Some("R"));
 
     apply_page_tab_order(&mut scan_doc, 0, TabOrder::Column).expect("apply col tab order");
-    let page_obj2 = scan_doc.objects.get(&page_id).and_then(|o| o.as_dict()).unwrap();
+    let page_obj2 = scan_doc
+        .objects
+        .get(&page_id)
+        .and_then(|o| o.as_dict())
+        .unwrap();
     assert_eq!(page_obj2.get_name("Tabs"), Some("C"));
 }
 
@@ -409,9 +441,9 @@ fn test_form_data_import_export_autodetect_taborder_workflows() {
 fn test_multimedia_and_3d_workflows() {
     use ravpdf_tools::{
         add_3d_annotation, add_rich_media_annotation, extract_3d_stream,
-        extract_rich_media_content, get_3d_annotations, get_rich_media_annotations,
-        MediaContent, RichMediaActivation, RichMediaConfig, RichMediaDeactivation,
-        ThreeDConfig, ThreeDFormat, ThreeDLighting, ThreeDRenderMode, ThreeDView,
+        extract_rich_media_content, get_3d_annotations, get_rich_media_annotations, MediaContent,
+        RichMediaActivation, RichMediaConfig, RichMediaDeactivation, ThreeDConfig, ThreeDFormat,
+        ThreeDLighting, ThreeDRenderMode, ThreeDView,
     };
 
     let mut doc = PdfDocument::new();
@@ -436,7 +468,8 @@ fn test_multimedia_and_3d_workflows() {
         deactivation: RichMediaDeactivation::PageClose,
     };
 
-    let media_annot_id = add_rich_media_annotation(&mut doc, 0, &media_cfg).expect("add rich media");
+    let media_annot_id =
+        add_rich_media_annotation(&mut doc, 0, &media_cfg).expect("add rich media");
     assert!(doc.objects.contains_key(&media_annot_id));
 
     let page_media = get_rich_media_annotations(&doc, 0).expect("get rich media");
@@ -484,9 +517,7 @@ fn test_multimedia_and_3d_workflows() {
 
 #[test]
 fn test_action_wizard_batch_workflows() {
-    use ravpdf_tools::{
-        execute_batch_cancellable, ActionSequence, BatchAction, BatchJob,
-    };
+    use ravpdf_tools::{execute_batch_cancellable, ActionSequence, BatchAction, BatchJob};
 
     // 1. Templates generation & Recipe Serialization (FR-30.3, FR-30.7)
     let dist_template = ActionSequence::template_prepare_for_distribution();
@@ -494,7 +525,8 @@ fn test_action_wizard_batch_workflows() {
     assert_eq!(dist_template.actions.len(), 3);
 
     let json_recipe = serde_json::to_string_pretty(&dist_template).expect("serialize recipe");
-    let loaded_recipe: ActionSequence = serde_json::from_str(&json_recipe).expect("deserialize recipe");
+    let loaded_recipe: ActionSequence =
+        serde_json::from_str(&json_recipe).expect("deserialize recipe");
     assert_eq!(loaded_recipe.name, dist_template.name);
     assert_eq!(loaded_recipe.actions.len(), dist_template.actions.len());
 
@@ -570,7 +602,8 @@ fn test_ocr_workflows() {
         preserve_appearance: true,
     };
 
-    let (mut doc, ocr_res) = create_pdf_from_image_with_ocr(&img, &config).expect("create pdf from image with OCR");
+    let (mut doc, ocr_res) =
+        create_pdf_from_image_with_ocr(&img, &config).expect("create pdf from image with OCR");
     assert_eq!(doc.page_count(), 1);
     assert!(!ocr_res.lines.is_empty());
     assert!(ocr_res.average_confidence > 0.0);
@@ -596,7 +629,7 @@ fn test_ocr_workflows() {
 
 #[test]
 fn test_sign_preflight_and_color_workflows() {
-    use ravpdf_crypto::{get_document_signatures, DigitalId, SignatureStatus, sign_pdf_document};
+    use ravpdf_crypto::{get_document_signatures, sign_pdf_document, DigitalId, SignatureStatus};
     use ravpdf_tools::{
         convert_document_colors, embed_output_intent, execute_preflight_fixup, get_output_intents,
         run_preflight, PreflightFixup, PreflightProfile, StandardIccProfile,
@@ -606,8 +639,13 @@ fn test_sign_preflight_and_color_workflows() {
     let mut doc = PdfDocument::new();
     doc.add_blank_page(612.0, 792.0);
 
-    let digital_id = DigitalId::generate("Authorized Certifier", "Legal Dept", "certifier@org.com", 365)
-        .expect("generate digital ID");
+    let digital_id = DigitalId::generate(
+        "Authorized Certifier",
+        "Legal Dept",
+        "certifier@org.com",
+        365,
+    )
+    .expect("generate digital ID");
     let signed_bytes = sign_pdf_document(
         doc,
         0,
@@ -653,10 +691,12 @@ fn test_sign_preflight_and_color_workflows() {
 
     let oi_list = get_output_intents(&audit_doc).expect("get output intents");
     assert_eq!(oi_list.len(), 2); // 1 from preflight fixup, 1 from embed_output_intent
-    assert!(oi_list.iter().any(|oi| oi.output_condition_identifier == "U.S. Web Coated (SWOP) v2"));
+    assert!(oi_list
+        .iter()
+        .any(|oi| oi.output_condition_identifier == "U.S. Web Coated (SWOP) v2"));
 
-    let converted_count = convert_document_colors(&mut audit_doc, "DeviceCMYK")
-        .expect("convert document colors");
+    let converted_count =
+        convert_document_colors(&mut audit_doc, "DeviceCMYK").expect("convert document colors");
     assert_eq!(converted_count, 0); // content had no color operators, handled safely without error
 }
 
@@ -789,7 +829,10 @@ fn test_aes256_encryption_and_certification_signature_ltv_workflow() {
     )
     .expect("encrypt with AES-256");
 
-    let enc_id = enc_doc.trailer.get_ref("Encrypt").expect("Encrypt dictionary");
+    let enc_id = enc_doc
+        .trailer
+        .get_ref("Encrypt")
+        .expect("Encrypt dictionary");
     let enc_dict = enc_doc.objects.get(&enc_id).unwrap().as_dict().unwrap();
     assert_eq!(enc_dict.get_i64("Length"), Some(256));
     assert_eq!(enc_dict.get_i64("V"), Some(5));
@@ -825,17 +868,24 @@ fn test_aes256_encryption_and_certification_signature_ltv_workflow() {
         .expect("sign certified document with ltv");
     assert!(!signed_bytes.is_empty());
 
-    let verified_doc = PdfDocument::load_from_bytes(&signed_bytes).expect("parse certified signed doc");
+    let verified_doc =
+        PdfDocument::load_from_bytes(&signed_bytes).expect("parse certified signed doc");
     let sigs = get_document_signatures(&verified_doc, Some(&signed_bytes)).expect("get sigs");
     assert_eq!(sigs.len(), 1);
 
     let s = &sigs[0];
     assert_eq!(s.field_name, "AuthorCertSig");
     assert_eq!(s.signer_name.as_deref(), Some("Chief Executive Officer"));
-    assert_eq!(s.reason.as_deref(), Some("Author Certification with Form Filling Permitted"));
+    assert_eq!(
+        s.reason.as_deref(),
+        Some("Author Certification with Form Filling Permitted")
+    );
     assert_eq!(s.location.as_deref(), Some("Zurich, Switzerland"));
     assert!(s.is_certification);
-    assert_eq!(s.doc_mdp_permission, Some(DocMdpPermission::AnnotationsAndFormFilling));
+    assert_eq!(
+        s.doc_mdp_permission,
+        Some(DocMdpPermission::AnnotationsAndFormFilling)
+    );
     assert!(s.has_ltv);
     assert!(matches!(s.status, SignatureStatus::Valid(_)));
 }
@@ -887,7 +937,9 @@ Section continued with detailed specifications.
     // 2. Extract structured text spans (FR-04.1, FR-04.3)
     let spans = extract_page_text_spans(&doc, 0).expect("extract text spans");
     assert!(!spans.is_empty());
-    assert!(spans.iter().any(|s| s.text.contains("Technical Architecture Specification")));
+    assert!(spans
+        .iter()
+        .any(|s| s.text.contains("Technical Architecture Specification")));
 
     // 3. In-place text replacement with font & color update (FR-04.1, FR-04.3, FR-04.12)
     let rep_count = replace_text_span_in_page(
@@ -903,7 +955,9 @@ Section continued with detailed specifications.
     assert_eq!(rep_count, 1);
 
     let updated_spans = extract_page_text_spans(&doc, 0).expect("extract updated spans");
-    assert!(updated_spans.iter().any(|s| s.text.contains("Executive Engineering Report")));
+    assert!(updated_spans
+        .iter()
+        .any(|s| s.text.contains("Executive Engineering Report")));
 
     // 4. Insert formatted text block with Justify alignment and Underline (FR-04.2, FR-04.4)
     let block_opts = FormattedTextBlockOptions {
@@ -929,7 +983,10 @@ Section continued with detailed specifications.
     let final_content = doc.get_page_content(0).expect("get final page content");
     let final_str = String::from_utf8_lossy(&final_content);
     assert!(final_str.contains("Executive Engineering Report"));
-    assert!(final_str.contains("approved by executive steering committee") || final_str.contains("Approved by executive"));
+    assert!(
+        final_str.contains("approved by executive steering committee")
+            || final_str.contains("Approved by executive")
+    );
 
     // 5. Font substitution verification (FR-04.12)
     let arial_sub = suggest_font_substitute("Arial");
@@ -958,12 +1015,8 @@ fn test_image_editing_and_stamping_workflows() {
     doc.add_blank_page(612.0, 792.0);
 
     // 1. Insert Image XObject (FR-05.1)
-    let raw_rgb = vec![
-        255, 0, 0, 0, 255, 0,
-        0, 0, 255, 255, 255, 0,
-    ];
-    insert_raw_image(&mut doc, 0, raw_rgb, 2, 2, 80.0, 500.0, 200.0, 100.0)
-        .expect("insert image");
+    let raw_rgb = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+    insert_raw_image(&mut doc, 0, raw_rgb, 2, 2, 80.0, 500.0, 200.0, 100.0).expect("insert image");
 
     // 2. Extract and inspect page images (FR-05.1 - FR-05.12)
     let images = extract_page_images(&doc, 0).expect("extract images");
@@ -1092,11 +1145,7 @@ fn test_drawing_shapes_and_ink_annotations_workflows() {
         [150.0, 660.0],
         [190.0, 630.0],
     ];
-    let stroke_b = vec![
-        [250.0, 600.0],
-        [270.0, 630.0],
-        [300.0, 610.0],
-    ];
+    let stroke_b = vec![[250.0, 600.0], [270.0, 630.0], [300.0, 610.0]];
     let ink_cfg = InkAnnotationConfig {
         strokes: vec![stroke_a, stroke_b],
         stroke_width: 2.5,
@@ -1116,7 +1165,8 @@ fn test_drawing_shapes_and_ink_annotations_workflows() {
     assert!(ink_obj.contains_key("AP"));
 
     // 2. Eraser Tool removing ink stroke A (FR-09.2)
-    let erased = erase_ink_strokes(&mut doc, 0, ink_id, [122.0, 638.0], 12.0).expect("erase stroke");
+    let erased =
+        erase_ink_strokes(&mut doc, 0, ink_id, [122.0, 638.0], 12.0).expect("erase stroke");
     assert!(erased);
     assert!(doc.objects.contains_key(&ink_id));
     let updated_ink = doc.objects.get(&ink_id).unwrap().as_dict().unwrap();
@@ -1192,11 +1242,7 @@ fn test_drawing_shapes_and_ink_annotations_workflows() {
     // 6. Polygon & Polyline (FR-09.7, FR-09.8)
     let poly_cfg = ShapeAnnotationConfig {
         shape_type: ShapeType::Polygon {
-            vertices: vec![
-                [100.0, 150.0],
-                [200.0, 250.0],
-                [300.0, 150.0],
-            ],
+            vertices: vec![[100.0, 150.0], [200.0, 250.0], [300.0, 150.0]],
         },
         rect: [100.0, 150.0, 300.0, 250.0],
         stroke_color: Some((0.5, 0.1, 0.8)),
@@ -1242,8 +1288,12 @@ fn test_drawing_shapes_and_ink_annotations_workflows() {
 
 #[test]
 fn test_comparison_and_format_conversion_pipeline() {
-    use ravpdf_edit::{create_pdf_from_markdown, create_pdf_from_text, MarkdownPdfOptions, TextPdfOptions};
-    use ravpdf_tools::{compare_documents, generate_comparison_pdf_report, set_document_info, DocumentInfo};
+    use ravpdf_edit::{
+        create_pdf_from_markdown, create_pdf_from_text, MarkdownPdfOptions, TextPdfOptions,
+    };
+    use ravpdf_tools::{
+        compare_documents, generate_comparison_pdf_report, set_document_info, DocumentInfo,
+    };
 
     // 1. Text & Markdown creation (FR-02.5, FR-02.6, FR-03.1.6)
     let text_content = "Annual Report 2026\nQuarter 1: Revenue $1,200,000\nQuarter 2: Revenue $1,450,000\nTotal Profit: $450,000";
@@ -1274,7 +1324,8 @@ fn test_comparison_and_format_conversion_pipeline() {
     assert!(page_diff.deletions.iter().any(|s| s.contains("$1,450,000")));
 
     // 3. Comparison PDF Report Generation (FR-17.1, FR-37.2)
-    let rep_doc = generate_comparison_pdf_report(&report, "Report_v1.pdf", "Report_v2.pdf").expect("gen pdf report");
+    let rep_doc = generate_comparison_pdf_report(&report, "Report_v1.pdf", "Report_v2.pdf")
+        .expect("gen pdf report");
     assert!(rep_doc.page_count() >= 1);
 
     let rep_text = ravpdf_tools::extract_all_text(&rep_doc).expect("extract rep text");
@@ -1299,7 +1350,10 @@ fn test_comparison_and_format_conversion_pipeline() {
 
 #[test]
 fn test_callout_typewriter_and_image_extraction() {
-    use ravpdf_annot::{add_callout_annotation, add_typewriter_annotation, get_page_annotations, CalloutConfig, TypewriterConfig};
+    use ravpdf_annot::{
+        add_callout_annotation, add_typewriter_annotation, get_page_annotations, CalloutConfig,
+        TypewriterConfig,
+    };
     use ravpdf_edit::{extract_all_images_to_dir, insert_raw_image};
 
     let mut doc = PdfDocument::new();
@@ -1344,15 +1398,13 @@ fn test_callout_typewriter_and_image_extraction() {
 
     // 4. Raw image embedding & image extraction pipeline (FR-05.1, FR-05.9, FR-37.2)
     // 2x2 RGB image: 4 pixels
-    let raw_rgb = vec![
-        255, 0, 0,    0, 255, 0,
-        0, 0, 255,    255, 255, 0,
-    ];
+    let raw_rgb = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
     insert_raw_image(&mut doc, 0, raw_rgb, 2, 2, 100.0, 100.0, 200.0, 200.0)
         .expect("insert raw image");
 
     let temp_dir = std::env::temp_dir().join(format!("ravpdf_extract_test_{}", std::process::id()));
-    let extracted_files = extract_all_images_to_dir(&doc, Some(0), &temp_dir).expect("extract images");
+    let extracted_files =
+        extract_all_images_to_dir(&doc, Some(0), &temp_dir).expect("extract images");
     assert_eq!(extracted_files.len(), 1);
     assert!(extracted_files[0].exists());
 
@@ -1382,7 +1434,8 @@ fn test_annotation_manipulation_locking_text_selection_and_continuous_scroll() {
     // 1. Multi-page rendering check (FR-01.2.2 - continuous scroll pipeline)
     assert_eq!(doc.page_count(), 3);
     for p_idx in 0..3 {
-        let pix = render_page(&doc, p_idx, &RenderOptions::default()).expect("render page in continuous view");
+        let pix = render_page(&doc, p_idx, &RenderOptions::default())
+            .expect("render page in continuous view");
         assert_eq!(pix.width(), 612);
         assert_eq!(pix.height(), 792);
     }
@@ -1408,16 +1461,23 @@ fn test_annotation_manipulation_locking_text_selection_and_continuous_scroll() {
     assert_eq!(moved_note.rect, [150.0, 620.0, 200.0, 670.0]);
 
     // 4. Update contents & author (FR-08.1, FR-08.3)
-    update_annotation_contents(&mut doc, note_id, "Updated note text", Some("Bob")).expect("update contents");
+    update_annotation_contents(&mut doc, note_id, "Updated note text", Some("Bob"))
+        .expect("update contents");
     let updated_annots = get_page_annotations(&doc, 0).expect("get annots after text update");
-    let updated_note = updated_annots.iter().find(|a| a.id == Some(note_id)).unwrap();
+    let updated_note = updated_annots
+        .iter()
+        .find(|a| a.id == Some(note_id))
+        .unwrap();
     assert_eq!(updated_note.contents.as_deref(), Some("Updated note text"));
     assert_eq!(updated_note.author.as_deref(), Some("Bob"));
 
     // 5. Update appearance color & opacity (FR-08.3, FR-09.11)
     update_annotation_color(&mut doc, note_id, (0.0, 0.5, 1.0), Some(0.75)).expect("update color");
     let colored_annots = get_page_annotations(&doc, 0).expect("get annots after color update");
-    let colored_note = colored_annots.iter().find(|a| a.id == Some(note_id)).unwrap();
+    let colored_note = colored_annots
+        .iter()
+        .find(|a| a.id == Some(note_id))
+        .unwrap();
     assert_eq!(colored_note.opacity, 0.75);
 
     // 6. Lock annotation flag (FR-09.12)
@@ -1600,7 +1660,9 @@ fn test_batch_redactions_and_document_sanitization_workflow() {
 
 #[test]
 fn test_organize_pages_grid_operations_workflow() {
-    use ravpdf_edit::{duplicate_page, extract_pages, insert_blank_page, reorder_pages, rotate_page};
+    use ravpdf_edit::{
+        duplicate_page, extract_pages, insert_blank_page, reorder_pages, rotate_page,
+    };
 
     let mut doc = PdfDocument::new();
     doc.add_blank_page(612.0, 792.0); // Page 0
@@ -1634,10 +1696,107 @@ fn test_organize_pages_grid_operations_workflow() {
     assert_eq!(extracted.page_count(), 2);
 }
 
+#[test]
+fn test_xfdf_exchange_headings_and_image_rendering_workflows() {
+    use ravpdf_annot::{
+        add_annotation_to_page, export_annotations_to_xfdf, import_annotations_from_xfdf,
+        Annotation, AnnotationType,
+    };
+    use ravpdf_core::object::{Object, PdfDictionary, PdfStream};
+    use ravpdf_core::outline::{auto_generate_bookmarks_from_headings, get_document_bookmarks};
+    use ravpdf_forms::{duplicate_form_field, get_page_form_fields, FormField};
+    use ravpdf_render::{render_page, RenderOptions};
 
+    // 1. Auto-generate Bookmarks from Document Headings (FR-19.7)
+    let mut doc = PdfDocument::new();
+    let content = b"BT /F1 20 Tf 50 700 Td (1. Executive Summary) Tj ET\nBT /F1 14 Tf 50 650 Td (1.1 Background Context) Tj ET\n";
+    doc.add_page_with_content(612.0, 792.0, content.to_vec());
+    doc.add_blank_page(612.0, 792.0);
+    doc.add_blank_page(612.0, 792.0);
 
+    let count = auto_generate_bookmarks_from_headings(&mut doc).expect("auto-generate bookmarks");
+    assert_eq!(count, 2);
+    let bookmarks = get_document_bookmarks(&doc).expect("get bookmarks");
+    assert_eq!(bookmarks.len(), 2);
+    assert_eq!(bookmarks[0].title, "1. Executive Summary");
+    assert_eq!(bookmarks[1].title, "1.1 Background Context");
 
+    // 2. ISO 19444-1 XFDF Annotation Export and Import (FR-08.3.6)
+    let mut note = Annotation::new(AnnotationType::Text, [50.0, 500.0, 80.0, 530.0]);
+    note.contents = Some("Reviewed and approved".into());
+    note.author = Some("Auditor".into());
+    add_annotation_to_page(&mut doc, 0, &note).expect("add note");
 
+    let xfdf_xml = export_annotations_to_xfdf(&doc).expect("export xfdf");
+    assert!(xfdf_xml.contains("xmlns=\"http://ns.adobe.com/xfdf/\""));
+    assert!(xfdf_xml.contains("<text"));
+    assert!(xfdf_xml.contains("Reviewed and approved"));
 
+    // Import into fresh target document
+    let mut target_doc = PdfDocument::new();
+    target_doc.add_blank_page(612.0, 792.0);
+    let imported = import_annotations_from_xfdf(&mut target_doc, &xfdf_xml).expect("import xfdf");
+    assert_eq!(imported, 1);
+    let target_annots = ravpdf_annot::get_page_annotations(&target_doc, 0).expect("get annots");
+    assert_eq!(target_annots.len(), 1);
+    assert_eq!(
+        target_annots[0].contents.as_deref(),
+        Some("Reviewed and approved")
+    );
 
+    // 3. Duplicate Form Field Across Pages (FR-11.3.5)
+    let text_field = FormField::new_text("ApplicantName", [50.0, 600.0, 250.0, 624.0]);
+    let created = duplicate_form_field(&mut doc, &text_field, &[0, 1, 2]).expect("duplicate field");
+    assert_eq!(created.len(), 3);
+    for page_idx in 0..3 {
+        let fields = get_page_form_fields(&doc, page_idx).expect("get page fields");
+        assert!(fields.iter().any(|f| f.name == "ApplicantName"));
+    }
 
+    // 4. Image XObject rasterization and rendering (FR-01.1.1, FR-05.1-12)
+    let mut img_dict = PdfDictionary::new();
+    img_dict.insert("Type", Object::Name("XObject".into()));
+    img_dict.insert("Subtype", Object::Name("Image".into()));
+    img_dict.insert("Width", Object::Integer(2));
+    img_dict.insert("Height", Object::Integer(2));
+    img_dict.insert("ColorSpace", Object::Name("DeviceRGB".into()));
+    img_dict.insert("BitsPerComponent", Object::Integer(8));
+    // 2x2 RGB raw pixels
+    let img_stream = PdfStream::new(img_dict, vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0]);
+    let img_id = doc.next_object_id();
+    doc.set_object(img_id, Object::Stream(img_stream));
+
+    // Register in page resources XObject dict
+    let page_id = doc.page_ids()[0];
+    let page_dict = doc
+        .objects
+        .get_mut(&page_id)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap();
+    let mut xobj_dict = PdfDictionary::new();
+    xobj_dict.insert("Im1", Object::Reference(img_id));
+    let mut res_dict = PdfDictionary::new();
+    res_dict.insert("XObject", Object::Dictionary(xobj_dict));
+    page_dict.insert("Resources", Object::Dictionary(res_dict));
+
+    // Paint Image with CTM transform
+    let img_content = b"q 100 0 0 100 100 200 cm /Im1 Do Q\n";
+    let content_id = doc.next_object_id();
+    doc.set_object(
+        content_id,
+        Object::Stream(PdfStream::new(PdfDictionary::new(), img_content.to_vec())),
+    );
+    let page_dict = doc
+        .objects
+        .get_mut(&page_id)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap();
+    page_dict.insert("Contents", Object::Reference(content_id));
+
+    let rendered_pixmap =
+        render_page(&doc, 0, &RenderOptions::default()).expect("render page with image");
+    assert!(rendered_pixmap.width() > 0);
+    assert!(rendered_pixmap.height() > 0);
+}

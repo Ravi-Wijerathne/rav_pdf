@@ -102,7 +102,10 @@ pub fn compare_documents(doc_a: &PdfDocument, doc_b: &PdfDocument) -> Comparison
         }
 
         if p >= report.doc_b_pages {
-            deletions.push(format!("Page {} was deleted from original document", page_num));
+            deletions.push(format!(
+                "Page {} was deleted from original document",
+                page_num
+            ));
             report.total_differences += 1;
             report.page_diffs.push(PageDiff {
                 page_number: page_num,
@@ -118,8 +121,16 @@ pub fn compare_documents(doc_a: &PdfDocument, doc_b: &PdfDocument) -> Comparison
         let text_a = extract_page_text(doc_a, p).unwrap_or_default();
         let text_b = extract_page_text(doc_b, p).unwrap_or_default();
 
-        let lines_a: Vec<&str> = text_a.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
-        let lines_b: Vec<&str> = text_b.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
+        let lines_a: Vec<&str> = text_a
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        let lines_b: Vec<&str> = text_b
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
 
         let set_a: HashSet<&str> = lines_a.iter().copied().collect();
         let set_b: HashSet<&str> = lines_b.iter().copied().collect();
@@ -144,7 +155,11 @@ pub fn compare_documents(doc_a: &PdfDocument, doc_b: &PdfDocument) -> Comparison
         let summary = if !has_diff {
             "Identical".to_string()
         } else {
-            format!("+{} additions, -{} deletions", additions.len(), deletions.len())
+            format!(
+                "+{} additions, -{} deletions",
+                additions.len(),
+                deletions.len()
+            )
         };
 
         report.page_diffs.push(PageDiff {
@@ -175,7 +190,10 @@ pub fn generate_comparison_pdf_report(
     md.push_str(&format!("**Modified Document:** {}\n\n", name_b));
     md.push_str(&format!("- Original Page Count: {}\n", report.doc_a_pages));
     md.push_str(&format!("- Modified Page Count: {}\n", report.doc_b_pages));
-    md.push_str(&format!("- Total Differences Identified: {}\n", report.total_differences));
+    md.push_str(&format!(
+        "- Total Differences Identified: {}\n",
+        report.total_differences
+    ));
     let status_str = if report.is_identical() {
         "**Status:** IDENTICAL (No differences found)"
     } else {
@@ -190,7 +208,7 @@ pub fn generate_comparison_pdf_report(
         for m in &report.metadata_diffs {
             md.push_str(&format!("- {}\n", m));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     md.push_str("## Detailed Page Changes\n\n");
@@ -206,7 +224,7 @@ pub fn generate_comparison_pdf_report(
                 for del in &p.deletions {
                     md.push_str(&format!("- **[DEL]** `{}`\n", del));
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
     }
@@ -229,7 +247,8 @@ mod tests {
 
     #[test]
     fn test_compare_documents() {
-        let text_v1 = "Invoice #1001\nDue Date: 2026-01-01\nTotal: $500.00\nThank you for your business!";
+        let text_v1 =
+            "Invoice #1001\nDue Date: 2026-01-01\nTotal: $500.00\nThank you for your business!";
         let text_v2 = "Invoice #1001\nDue Date: 2026-02-01\nTotal: $750.00\nPayment Terms: Net 30\nThank you for your business!";
 
         let opts = TextPdfOptions::default();

@@ -201,7 +201,11 @@ impl FormField {
             id: None,
             field_type: FormFieldType::Radio,
             name: grp.clone(),
-            value: if selected { Some(exp.clone()) } else { Some("Off".into()) },
+            value: if selected {
+                Some(exp.clone())
+            } else {
+                Some("Off".into())
+            },
             default_value: Some("Off".into()),
             rect,
             read_only: false,
@@ -457,7 +461,8 @@ impl FormField {
         }
 
         if let Some(ref dval) = self.default_value {
-            if self.field_type == FormFieldType::Checkbox || self.field_type == FormFieldType::Radio {
+            if self.field_type == FormFieldType::Checkbox || self.field_type == FormFieldType::Radio
+            {
                 dict.insert("DV", PdfName::new(dval.as_str()));
             } else {
                 dict.insert("DV", PdfString::from_str(dval));
@@ -471,7 +476,10 @@ impl FormField {
             if (tc[0] - tc[1]).abs() < 1e-4 && (tc[1] - tc[2]).abs() < 1e-4 {
                 format!("/{} {:.1} Tf {:.2} g", font, size, tc[0])
             } else {
-                format!("/{} {:.1} Tf {:.2} {:.2} {:.2} rg", font, size, tc[0], tc[1], tc[2])
+                format!(
+                    "/{} {:.1} Tf {:.2} {:.2} {:.2} rg",
+                    font, size, tc[0], tc[1], tc[2]
+                )
             }
         } else {
             format!("/{} {:.1} Tf 0 g", font, size)
@@ -536,11 +544,25 @@ impl FormField {
         let mut mk = PdfDictionary::new();
         let mut has_mk = false;
         if let Some(bc) = self.border_color {
-            mk.insert("BC", vec![Object::Real(bc[0] as f64), Object::Real(bc[1] as f64), Object::Real(bc[2] as f64)]);
+            mk.insert(
+                "BC",
+                vec![
+                    Object::Real(bc[0] as f64),
+                    Object::Real(bc[1] as f64),
+                    Object::Real(bc[2] as f64),
+                ],
+            );
             has_mk = true;
         }
         if let Some(bg) = self.background_color {
-            mk.insert("BG", vec![Object::Real(bg[0] as f64), Object::Real(bg[1] as f64), Object::Real(bg[2] as f64)]);
+            mk.insert(
+                "BG",
+                vec![
+                    Object::Real(bg[0] as f64),
+                    Object::Real(bg[1] as f64),
+                    Object::Real(bg[2] as f64),
+                ],
+            );
             has_mk = true;
         }
         if self.field_type == FormFieldType::PushButton {
@@ -736,7 +758,8 @@ pub fn add_form_field(
 
     let field_id = doc.next_object_id();
     let widget_dict = field.to_widget_dictionary(page_id);
-    doc.objects.insert(field_id, Object::Dictionary(widget_dict));
+    doc.objects
+        .insert(field_id, Object::Dictionary(widget_dict));
 
     // 1. Add to page /Annots
     let page_obj = doc
@@ -858,7 +881,10 @@ pub fn set_form_field_value(doc: &mut PdfDocument, field_id: ObjectId, value: &s
     let field_obj = doc
         .objects
         .get_mut(&field_id)
-        .ok_or(PdfError::ObjectNotFound(field_id.number, field_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(
+            field_id.number,
+            field_id.generation,
+        ))?;
     let field_dict = field_obj
         .as_dict_mut()
         .ok_or_else(|| PdfError::InvalidStructure("Expected field dictionary".into()))?;
@@ -927,7 +953,10 @@ pub fn update_form_field_rect(
     let field_obj = doc
         .objects
         .get_mut(&field_id)
-        .ok_or(PdfError::ObjectNotFound(field_id.number, field_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(
+            field_id.number,
+            field_id.generation,
+        ))?;
     let field_dict = field_obj
         .as_dict_mut()
         .ok_or_else(|| PdfError::InvalidStructure("Expected field dictionary".into()))?;
@@ -946,6 +975,7 @@ pub fn update_form_field_rect(
 }
 
 /// Updates the metadata and appearance properties of an existing form field (FR-11.2.1 - FR-11.2.6).
+#[allow(clippy::too_many_arguments)]
 pub fn update_form_field_properties(
     doc: &mut PdfDocument,
     field_id: ObjectId,
@@ -960,7 +990,10 @@ pub fn update_form_field_properties(
     let field_obj = doc
         .objects
         .get_mut(&field_id)
-        .ok_or(PdfError::ObjectNotFound(field_id.number, field_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(
+            field_id.number,
+            field_id.generation,
+        ))?;
     let field_dict = field_obj
         .as_dict_mut()
         .ok_or_else(|| PdfError::InvalidStructure("Expected field dictionary".into()))?;
@@ -1001,7 +1034,10 @@ pub fn update_form_field_properties(
     if font_size.is_some() || text_color.is_some() {
         let size = font_size.unwrap_or(12.0);
         let da_str = if let Some(tc) = text_color {
-            format!("/Helv {:.1} Tf {:.2} {:.2} {:.2} rg", size, tc[0], tc[1], tc[2])
+            format!(
+                "/Helv {:.1} Tf {:.2} {:.2} {:.2} rg",
+                size, tc[0], tc[1], tc[2]
+            )
         } else {
             format!("/Helv {:.1} Tf 0 g", size)
         };

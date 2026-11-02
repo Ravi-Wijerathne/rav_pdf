@@ -227,7 +227,10 @@ pub fn add_bookmark(doc: &mut PdfDocument, title: &str, page_index: usize) -> Re
     let outlines_obj = doc
         .objects
         .get_mut(&outlines_id)
-        .ok_or(PdfError::ObjectNotFound(outlines_id.number, outlines_id.generation))?;
+        .ok_or(PdfError::ObjectNotFound(
+            outlines_id.number,
+            outlines_id.generation,
+        ))?;
     let outlines_dict = outlines_obj
         .as_dict_mut()
         .ok_or_else(|| PdfError::InvalidStructure("Expected outlines dict".into()))?;
@@ -259,6 +262,132 @@ pub fn add_bookmark(doc: &mut PdfDocument, title: &str, page_index: usize) -> Re
     Ok(item_id)
 }
 
+/// Auto-generates hierarchical document bookmarks from headings (FR-19.7).
+///
+/// Analyzes content streams looking for font size changes (headings >= 14pt)
+/// and extracts text tokens to create outline bookmark items.
+pub fn auto_generate_bookmarks_from_headings(doc: &mut PdfDocument) -> Result<usize> {
+    let page_count = doc.page_count();
+    let mut detected_bookmarks: Vec<(String, usize)> = Vec::new();
+
+    for page_idx in 0..page_count {
+        if let Ok(bytes) = doc.get_page_content(page_idx) {
+            let mut lexer = crate::lexer::Lexer::new(&bytes);
+            let mut current_font_size: f64 = 12.0;
+            let mut operands: Vec<crate::object::Object> = Vec::new();
+
+            loop {
+                match lexer.next_token() {
+                    Ok(crate::lexer::Token::Eof) => break,
+                    Ok(crate::lexer::Token::Keyword(op)) => {
+                        match op.as_str() {
+                            "Tf" => {
+                                if operands.len() >= 2 {
+                                    if let Some(sz) = operands[1].as_f64() {
+                                        current_font_size = sz;
+                                    }
+                                }
+                            }
+                            "Tj" | "'" | "\"" => {
+                                if current_font_size >= 14.0 {
+                                    if let Some(text_obj) = operands.last() {
+                                        let text = match text_obj {
+                                            crate::object::Object::String(s) => s.to_string_lossy(),
+                                            _ => String::new(),
+                                        };
+                                        let trimmed = text.trim();
+                                        if !trimmed.is_empty()
+                                            && trimmed.len() <= 120
+                                            && !detected_bookmarks.iter().any(|(b, _)| b == trimmed)
+                                        {
+                                            detected_bookmarks
+                                                .push((trimmed.to_string(), page_idx));
+                                        }
+                                    }
+                                }
+                            }
+                            "TJ" if current_font_size >= 14.0 => {
+                                if let Some(crate::object::Object::Array(arr)) = operands.last() {
+                                    let mut combined = String::new();
+                                    for item in arr {
+                                        if let crate::object::Object::String(s) = item {
+                                            combined.push_str(&s.to_string_lossy());
+                                        }
+                                    }
+                                    let trimmed = combined.trim();
+                                    if !trimmed.is_empty()
+                                        && trimmed.len() <= 120
+                                        && !detected_bookmarks.iter().any(|(b, _)| b == trimmed)
+                                    {
+                                        detected_bookmarks.push((trimmed.to_string(), page_idx));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        operands.clear();
+                    }
+                    Ok(crate::lexer::Token::Integer(i)) => {
+                        operands.push(crate::object::Object::Integer(i))
+                    }
+                    Ok(crate::lexer::Token::Real(r)) => {
+                        operands.push(crate::object::Object::Real(r))
+                    }
+                    Ok(crate::lexer::Token::StringLiteral(s)) => {
+                        operands.push(crate::object::Object::String(
+                            crate::object::PdfString::from_bytes(s),
+                        ));
+                    }
+                    Ok(crate::lexer::Token::HexString(s)) => {
+                        operands.push(crate::object::Object::String(
+                            crate::object::PdfString::from_hex(s),
+                        ));
+                    }
+                    Ok(crate::lexer::Token::Name(n)) => {
+                        operands.push(crate::object::Object::Name(crate::object::PdfName::new(n)));
+                    }
+                    Ok(crate::lexer::Token::ArrayOpen) => {
+                        let mut arr = Vec::new();
+                        loop {
+                            match lexer.next_token() {
+                                Ok(crate::lexer::Token::ArrayClose | crate::lexer::Token::Eof) => {
+                                    break
+                                }
+                                Ok(crate::lexer::Token::Integer(i)) => {
+                                    arr.push(crate::object::Object::Integer(i))
+                                }
+                                Ok(crate::lexer::Token::Real(r)) => {
+                                    arr.push(crate::object::Object::Real(r))
+                                }
+                                Ok(crate::lexer::Token::StringLiteral(s)) => {
+                                    arr.push(crate::object::Object::String(
+                                        crate::object::PdfString::from_bytes(s),
+                                    ));
+                                }
+                                Ok(crate::lexer::Token::HexString(s)) => {
+                                    arr.push(crate::object::Object::String(
+                                        crate::object::PdfString::from_hex(s),
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                        operands.push(crate::object::Object::Array(arr));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let count = detected_bookmarks.len();
+    for (title, page_idx) in detected_bookmarks {
+        let _ = add_bookmark(doc, &title, page_idx);
+    }
+
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +407,20 @@ mod tests {
         assert_eq!(bookmarks[0].page_index, Some(0));
         assert_eq!(bookmarks[1].title, "Chapter 2: Methods");
         assert_eq!(bookmarks[1].page_index, Some(1));
+    }
+
+    #[test]
+    fn test_auto_generate_bookmarks() {
+        let mut doc = PdfDocument::new();
+        let content = b"BT /F1 16 Tf 50 700 Td (Section 1: Setup) Tj ET\nBT /F1 12 Tf 50 650 Td (Body text here) Tj ET\nBT /F1 18 Tf 50 600 Td (Section 2: Results) Tj ET\n";
+        doc.add_page_with_content(612.0, 792.0, content.to_vec());
+
+        let count = auto_generate_bookmarks_from_headings(&mut doc).expect("auto generate");
+        assert_eq!(count, 2);
+
+        let bookmarks = get_document_bookmarks(&doc).expect("get bookmarks");
+        assert_eq!(bookmarks.len(), 2);
+        assert_eq!(bookmarks[0].title, "Section 1: Setup");
+        assert_eq!(bookmarks[1].title, "Section 2: Results");
     }
 }

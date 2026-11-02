@@ -16,9 +16,7 @@
 
 use ravpdf_core::document::PdfDocument;
 use ravpdf_core::error::{PdfError, Result};
-use ravpdf_core::object::{
-    Object, ObjectId, PdfDictionary, PdfName, PdfStream, PdfString,
-};
+use ravpdf_core::object::{Object, ObjectId, PdfDictionary, PdfName, PdfStream, PdfString};
 
 /// Line ending styles conforming to ISO 32000-1 Table 176.
 ///
@@ -111,9 +109,7 @@ pub enum ShapeType {
         end_style: LineEndingStyle,
     },
     /// Closed polygon with 3 or more vertices (FR-09.7).
-    Polygon {
-        vertices: Vec<[f64; 2]>,
-    },
+    Polygon { vertices: Vec<[f64; 2]> },
     /// Open polyline with 2 or more vertices (FR-09.8).
     PolyLine {
         vertices: Vec<[f64; 2]>,
@@ -199,7 +195,9 @@ pub fn add_ink_annotation(
     config: &InkAnnotationConfig,
 ) -> Result<ObjectId> {
     if config.strokes.is_empty() {
-        return Err(PdfError::InvalidStructure("Ink strokes list is empty".into()));
+        return Err(PdfError::InvalidStructure(
+            "Ink strokes list is empty".into(),
+        ));
     }
 
     let page_ids = doc.page_ids();
@@ -215,20 +213,23 @@ pub fn add_ink_annotation(
 
     for stroke in &config.strokes {
         for &[x, y] in stroke {
-            if x < min_x { min_x = x; }
-            if y < min_y { min_y = y; }
-            if x > max_x { max_x = x; }
-            if y > max_y { max_y = y; }
+            if x < min_x {
+                min_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
         }
     }
 
     let pad = (config.stroke_width * 2.0).max(4.0);
-    let rect = [
-        min_x - pad,
-        min_y - pad,
-        max_x + pad,
-        max_y + pad,
-    ];
+    let rect = [min_x - pad, min_y - pad, max_x + pad, max_y + pad];
 
     // Build ISO 32000-1 Clause 12.5.5 Appearance Stream (/AP /N)
     let ap_stream_bytes = generate_ink_appearance_stream(config, &rect);
@@ -351,7 +352,12 @@ pub fn erase_ink_strokes(
 ) -> Result<bool> {
     let annot_dict = match doc.objects.get_mut(&annot_id) {
         Some(Object::Dictionary(d)) => d,
-        _ => return Err(PdfError::ObjectNotFound(annot_id.number, annot_id.generation)),
+        _ => {
+            return Err(PdfError::ObjectNotFound(
+                annot_id.number,
+                annot_id.generation,
+            ))
+        }
     };
 
     if annot_dict.get_name("Subtype") != Some("Ink") {
@@ -469,10 +475,18 @@ pub fn erase_ink_strokes(
 
     for stroke in &remaining_strokes {
         for &[x, y] in stroke {
-            if x < min_x { min_x = x; }
-            if y < min_y { min_y = y; }
-            if x > max_x { max_x = x; }
-            if y > max_y { max_y = y; }
+            if x < min_x {
+                min_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
         }
     }
     let pad = (stroke_width * 2.0).max(4.0);
@@ -669,7 +683,12 @@ pub fn add_shape_annotation(
 
     // Subtype-specific keys
     match &config.shape_type {
-        ShapeType::Line { start, end, start_style, end_style } => {
+        ShapeType::Line {
+            start,
+            end,
+            start_style,
+            end_style,
+        } => {
             annot_dict.insert(
                 "L",
                 vec![
@@ -695,7 +714,11 @@ pub fn add_shape_annotation(
             }
             annot_dict.insert("Vertices", Object::Array(vert_arr));
         }
-        ShapeType::PolyLine { vertices, start_style, end_style } => {
+        ShapeType::PolyLine {
+            vertices,
+            start_style,
+            end_style,
+        } => {
             let mut vert_arr = Vec::new();
             for pt in vertices {
                 vert_arr.push(Object::Real(pt[0]));
@@ -747,10 +770,19 @@ pub fn add_shape_annotation(
 /// Locks or unlocks an annotation to prevent accidental modification (FR-09.12).
 ///
 /// Sets or clears bit 8 (128) in the /F annotation flags according to ISO 32000-1 Table 165.
-pub fn set_annotation_locked(doc: &mut PdfDocument, annot_id: ObjectId, locked: bool) -> Result<()> {
+pub fn set_annotation_locked(
+    doc: &mut PdfDocument,
+    annot_id: ObjectId,
+    locked: bool,
+) -> Result<()> {
     let annot_dict = match doc.objects.get_mut(&annot_id) {
         Some(Object::Dictionary(d)) => d,
-        _ => return Err(PdfError::ObjectNotFound(annot_id.number, annot_id.generation)),
+        _ => {
+            return Err(PdfError::ObjectNotFound(
+                annot_id.number,
+                annot_id.generation,
+            ))
+        }
     };
 
     let mut flags = annot_dict.get_i64("F").unwrap_or(4);
@@ -790,7 +822,11 @@ pub fn snap_node_to_points(
 /// Snaps a line endpoint to horizontal, vertical, or 45-degree angles relative to an anchor point.
 ///
 /// Traceability: FR-09.10.
-pub fn snap_angle_orthogonal(anchor: [f64; 2], target: [f64; 2], angle_tolerance_deg: f64) -> [f64; 2] {
+pub fn snap_angle_orthogonal(
+    anchor: [f64; 2],
+    target: [f64; 2],
+    angle_tolerance_deg: f64,
+) -> [f64; 2] {
     let dx = target[0] - anchor[0];
     let dy = target[1] - anchor[1];
     let dist = (dx * dx + dy * dy).sqrt();
@@ -799,16 +835,17 @@ pub fn snap_angle_orthogonal(anchor: [f64; 2], target: [f64; 2], angle_tolerance
     }
 
     let angle_deg = dy.atan2(dx).to_degrees();
-    let norm_angle = if angle_deg < 0.0 { angle_deg + 360.0 } else { angle_deg };
+    let norm_angle = if angle_deg < 0.0 {
+        angle_deg + 360.0
+    } else {
+        angle_deg
+    };
 
     let snap_angles = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 360.0];
     for &snap_a in &snap_angles {
         if (norm_angle - snap_a).abs() <= angle_tolerance_deg {
             let rad = snap_a.to_radians();
-            return [
-                anchor[0] + dist * rad.cos(),
-                anchor[1] + dist * rad.sin(),
-            ];
+            return [anchor[0] + dist * rad.cos(), anchor[1] + dist * rad.sin()];
         }
     }
 
@@ -844,7 +881,11 @@ fn generate_ink_appearance_stream(config: &InkAnnotationConfig, rect: &[f64; 4])
                 let p_prev = if i == 0 { stroke[0] } else { stroke[i - 1] };
                 let p_curr = stroke[i];
                 let p_next = stroke[i + 1];
-                let p_after = if i + 2 < stroke.len() { stroke[i + 2] } else { p_next };
+                let p_after = if i + 2 < stroke.len() {
+                    stroke[i + 2]
+                } else {
+                    p_next
+                };
 
                 let c1x = (p_curr[0] + (p_next[0] - p_prev[0]) / 6.0) - ox;
                 let c1y = (p_curr[1] + (p_next[1] - p_prev[1]) / 6.0) - oy;
@@ -853,7 +894,10 @@ fn generate_ink_appearance_stream(config: &InkAnnotationConfig, rect: &[f64; 4])
                 let c3x = p_next[0] - ox;
                 let c3y = p_next[1] - oy;
 
-                buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", c1x, c1y, c2x, c2y, c3x, c3y));
+                buf.push_str(&format!(
+                    "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+                    c1x, c1y, c2x, c2y, c3x, c3y
+                ));
             }
         } else {
             for pt in &stroke[1..] {
@@ -933,18 +977,42 @@ fn generate_shape_appearance_stream(config: &ShapeAnnotationConfig, rect: &[f64;
             }
         }
 
-        ShapeType::Line { start, end, start_style, end_style } => {
+        ShapeType::Line {
+            start,
+            end,
+            start_style,
+            end_style,
+        } => {
             let p1 = [start[0] - ox, start[1] - oy];
             let p2 = [end[0] - ox, end[1] - oy];
 
-            buf.push_str(&format!("{:.2} {:.2} m {:.2} {:.2} l S\n", p1[0], p1[1], p2[0], p2[1]));
+            buf.push_str(&format!(
+                "{:.2} {:.2} m {:.2} {:.2} l S\n",
+                p1[0], p1[1], p2[0], p2[1]
+            ));
 
             // Draw line endings
             if *start_style != LineEndingStyle::None {
-                append_line_ending(&mut buf, p1, p2, *start_style, config.stroke_width, config.stroke_color, config.fill_color);
+                append_line_ending(
+                    &mut buf,
+                    p1,
+                    p2,
+                    *start_style,
+                    config.stroke_width,
+                    config.stroke_color,
+                    config.fill_color,
+                );
             }
             if *end_style != LineEndingStyle::None {
-                append_line_ending(&mut buf, p2, p1, *end_style, config.stroke_width, config.stroke_color, config.fill_color);
+                append_line_ending(
+                    &mut buf,
+                    p2,
+                    p1,
+                    *end_style,
+                    config.stroke_width,
+                    config.stroke_color,
+                    config.fill_color,
+                );
             }
         }
 
@@ -965,7 +1033,11 @@ fn generate_shape_appearance_stream(config: &ShapeAnnotationConfig, rect: &[f64;
             }
         }
 
-        ShapeType::PolyLine { vertices, start_style, end_style } => {
+        ShapeType::PolyLine {
+            vertices,
+            start_style,
+            end_style,
+        } => {
             if vertices.len() >= 2 {
                 let v0 = vertices[0];
                 buf.push_str(&format!("{:.2} {:.2} m\n", v0[0] - ox, v0[1] - oy));
@@ -977,13 +1049,29 @@ fn generate_shape_appearance_stream(config: &ShapeAnnotationConfig, rect: &[f64;
                 if *start_style != LineEndingStyle::None {
                     let p1 = [vertices[0][0] - ox, vertices[0][1] - oy];
                     let p2 = [vertices[1][0] - ox, vertices[1][1] - oy];
-                    append_line_ending(&mut buf, p1, p2, *start_style, config.stroke_width, config.stroke_color, config.fill_color);
+                    append_line_ending(
+                        &mut buf,
+                        p1,
+                        p2,
+                        *start_style,
+                        config.stroke_width,
+                        config.stroke_color,
+                        config.fill_color,
+                    );
                 }
                 if *end_style != LineEndingStyle::None {
                     let n = vertices.len();
                     let p1 = [vertices[n - 1][0] - ox, vertices[n - 1][1] - oy];
                     let p2 = [vertices[n - 2][0] - ox, vertices[n - 2][1] - oy];
-                    append_line_ending(&mut buf, p1, p2, *end_style, config.stroke_width, config.stroke_color, config.fill_color);
+                    append_line_ending(
+                        &mut buf,
+                        p1,
+                        p2,
+                        *end_style,
+                        config.stroke_width,
+                        config.stroke_color,
+                        config.fill_color,
+                    );
                 }
             }
         }
@@ -1001,10 +1089,42 @@ fn append_ellipse_path(buf: &mut String, x: f64, y: f64, w: f64, h: f64) {
     let ky = 0.552_284_8 * ry;
 
     buf.push_str(&format!("{:.2} {:.2} m\n", cx, cy - ry));
-    buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy));
-    buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry));
-    buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy));
-    buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry));
+    buf.push_str(&format!(
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+        cx + kx,
+        cy - ry,
+        cx + rx,
+        cy - ky,
+        cx + rx,
+        cy
+    ));
+    buf.push_str(&format!(
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+        cx + rx,
+        cy + ky,
+        cx + kx,
+        cy + ry,
+        cx,
+        cy + ry
+    ));
+    buf.push_str(&format!(
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+        cx - kx,
+        cy + ry,
+        cx - rx,
+        cy + ky,
+        cx - rx,
+        cy
+    ));
+    buf.push_str(&format!(
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+        cx - rx,
+        cy - ky,
+        cx - kx,
+        cy - ry,
+        cx,
+        cy - ry
+    ));
     buf.push_str("h\n");
 }
 
@@ -1027,7 +1147,15 @@ fn append_cloudy_rect_path(buf: &mut String, x: f64, y: f64, w: f64, h: f64, int
         let x1 = x + (i + 1) as f64 * step_w;
         let mx = (x0 + x1) * 0.5;
         let my = y - arc_r * 0.5;
-        buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", x0 + (mx - x0) * 0.5, my, mx + (x1 - mx) * 0.5, my, x1, y));
+        buf.push_str(&format!(
+            "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+            x0 + (mx - x0) * 0.5,
+            my,
+            mx + (x1 - mx) * 0.5,
+            my,
+            x1,
+            y
+        ));
     }
 
     // Right edge (bottom to top, arching rightwards)
@@ -1036,7 +1164,15 @@ fn append_cloudy_rect_path(buf: &mut String, x: f64, y: f64, w: f64, h: f64, int
         let y1 = y + (i + 1) as f64 * step_h;
         let my = (y0 + y1) * 0.5;
         let mx = x + w + arc_r * 0.5;
-        buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", mx, y0 + (my - y0) * 0.5, mx, my + (y1 - my) * 0.5, x + w, y1));
+        buf.push_str(&format!(
+            "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+            mx,
+            y0 + (my - y0) * 0.5,
+            mx,
+            my + (y1 - my) * 0.5,
+            x + w,
+            y1
+        ));
     }
 
     // Top edge (right to left, arching upwards)
@@ -1045,7 +1181,15 @@ fn append_cloudy_rect_path(buf: &mut String, x: f64, y: f64, w: f64, h: f64, int
         let x1 = x + w - (i + 1) as f64 * step_w;
         let mx = (x0 + x1) * 0.5;
         let my = y + h + arc_r * 0.5;
-        buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", x0 + (mx - x0) * 0.5, my, mx + (x1 - mx) * 0.5, my, x1, y + h));
+        buf.push_str(&format!(
+            "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+            x0 + (mx - x0) * 0.5,
+            my,
+            mx + (x1 - mx) * 0.5,
+            my,
+            x1,
+            y + h
+        ));
     }
 
     // Left edge (top to bottom, arching leftwards)
@@ -1054,7 +1198,15 @@ fn append_cloudy_rect_path(buf: &mut String, x: f64, y: f64, w: f64, h: f64, int
         let y1 = y + h - (i + 1) as f64 * step_h;
         let my = (y0 + y1) * 0.5;
         let mx = x - arc_r * 0.5;
-        buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", mx, y0 + (my - y0) * 0.5, mx, my + (y1 - my) * 0.5, x, y1));
+        buf.push_str(&format!(
+            "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+            mx,
+            y0 + (my - y0) * 0.5,
+            mx,
+            my + (y1 - my) * 0.5,
+            x,
+            y1
+        ));
     }
 
     buf.push_str("h\n");
@@ -1084,13 +1236,22 @@ fn append_cloudy_circle_path(buf: &mut String, x: f64, y: f64, w: f64, h: f64, i
         let mid_x = cx + (rx + bump) * am.cos();
         let mid_y = cy + (ry + bump) * am.sin();
 
-        buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", mid_x, mid_y, mid_x, mid_y, end_x, end_y));
+        buf.push_str(&format!(
+            "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+            mid_x, mid_y, mid_x, mid_y, end_x, end_y
+        ));
     }
 
     buf.push_str("h\n");
 }
 
-fn append_cloudy_polygon_path(buf: &mut String, vertices: &[[f64; 2]], ox: f64, oy: f64, intensity: f64) {
+fn append_cloudy_polygon_path(
+    buf: &mut String,
+    vertices: &[[f64; 2]],
+    ox: f64,
+    oy: f64,
+    intensity: f64,
+) {
     let arc_r = (6.0 * intensity).clamp(3.0, 18.0);
     let v0 = vertices[0];
     buf.push_str(&format!("{:.2} {:.2} m\n", v0[0] - ox, v0[1] - oy));
@@ -1120,7 +1281,15 @@ fn append_cloudy_polygon_path(buf: &mut String, vertices: &[[f64; 2]], ox: f64, 
             let mx = (sx + ex) * 0.5 + nx * arc_r * 0.6;
             let my = (sy + ey) * 0.5 + ny * arc_r * 0.6;
 
-            buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n", mx - ox, my - oy, mx - ox, my - oy, ex - ox, ey - oy));
+            buf.push_str(&format!(
+                "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+                mx - ox,
+                my - oy,
+                mx - ox,
+                my - oy,
+                ex - ox,
+                ey - oy
+            ));
         }
     }
 
@@ -1157,7 +1326,10 @@ fn append_line_ending(
             let right_x = tip[0] - arrow_size * ux - arrow_size * 0.5 * perp_x;
             let right_y = tip[1] - arrow_size * uy - arrow_size * 0.5 * perp_y;
 
-            buf.push_str(&format!("{:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l S\n", left_x, left_y, tip[0], tip[1], right_x, right_y));
+            buf.push_str(&format!(
+                "{:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l S\n",
+                left_x, left_y, tip[0], tip[1], right_x, right_y
+            ));
         }
 
         LineEndingStyle::ClosedArrow => {
@@ -1166,7 +1338,10 @@ fn append_line_ending(
             let right_x = tip[0] - arrow_size * ux - arrow_size * 0.5 * perp_x;
             let right_y = tip[1] - arrow_size * uy - arrow_size * 0.5 * perp_y;
 
-            buf.push_str(&format!("{:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l h ", tip[0], tip[1], left_x, left_y, right_x, right_y));
+            buf.push_str(&format!(
+                "{:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l h ",
+                tip[0], tip[1], left_x, left_y, right_x, right_y
+            ));
             if fill_color.is_some() || stroke_color.is_some() {
                 buf.push_str("B\n");
             } else {
@@ -1190,7 +1365,13 @@ fn append_line_ending(
             let half = arrow_size * 0.4;
             let cx = tip[0] - half * ux;
             let cy = tip[1] - half * uy;
-            buf.push_str(&format!("{:.2} {:.2} {:.2} {:.2} re ", cx - half, cy - half, half * 2.0, half * 2.0));
+            buf.push_str(&format!(
+                "{:.2} {:.2} {:.2} {:.2} re ",
+                cx - half,
+                cy - half,
+                half * 2.0,
+                half * 2.0
+            ));
             if fill_color.is_some() {
                 buf.push_str("B\n");
             } else {
@@ -1201,11 +1382,27 @@ fn append_line_ending(
         LineEndingStyle::Diamond => {
             let d = arrow_size * 0.5;
             let p_top = [tip[0], tip[1]];
-            let p_left = [tip[0] - d * ux + d * 0.5 * perp_x, tip[1] - d * uy + d * 0.5 * perp_y];
+            let p_left = [
+                tip[0] - d * ux + d * 0.5 * perp_x,
+                tip[1] - d * uy + d * 0.5 * perp_y,
+            ];
             let p_bot = [tip[0] - d * 2.0 * ux, tip[1] - d * 2.0 * uy];
-            let p_right = [tip[0] - d * ux - d * 0.5 * perp_x, tip[1] - d * uy - d * 0.5 * perp_y];
+            let p_right = [
+                tip[0] - d * ux - d * 0.5 * perp_x,
+                tip[1] - d * uy - d * 0.5 * perp_y,
+            ];
 
-            buf.push_str(&format!("{:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l {:.2} {:.2} l h ", p_top[0], p_top[1], p_left[0], p_left[1], p_bot[0], p_bot[1], p_right[0], p_right[1]));
+            buf.push_str(&format!(
+                "{:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l {:.2} {:.2} l h ",
+                p_top[0],
+                p_top[1],
+                p_left[0],
+                p_left[1],
+                p_bot[0],
+                p_bot[1],
+                p_right[0],
+                p_right[1]
+            ));
             if fill_color.is_some() {
                 buf.push_str("B\n");
             } else {
@@ -1217,7 +1414,10 @@ fn append_line_ending(
             let half = arrow_size * 0.5;
             let p1 = [tip[0] + half * perp_x, tip[1] + half * perp_y];
             let p2 = [tip[0] - half * perp_x, tip[1] - half * perp_y];
-            buf.push_str(&format!("{:.2} {:.2} m {:.2} {:.2} l S\n", p1[0], p1[1], p2[0], p2[1]));
+            buf.push_str(&format!(
+                "{:.2} {:.2} m {:.2} {:.2} l S\n",
+                p1[0], p1[1], p2[0], p2[1]
+            ));
         }
 
         LineEndingStyle::Slash => {
@@ -1226,7 +1426,10 @@ fn append_line_ending(
             let diag_y = (perp_y + uy) * std::f64::consts::FRAC_1_SQRT_2;
             let p1 = [tip[0] + half * diag_x, tip[1] + half * diag_y];
             let p2 = [tip[0] - half * diag_x, tip[1] - half * diag_y];
-            buf.push_str(&format!("{:.2} {:.2} m {:.2} {:.2} l S\n", p1[0], p1[1], p2[0], p2[1]));
+            buf.push_str(&format!(
+                "{:.2} {:.2} m {:.2} {:.2} l S\n",
+                p1[0], p1[1], p2[0], p2[1]
+            ));
         }
 
         _ => {}
@@ -1244,10 +1447,18 @@ fn bounds_of_points(points: &[[f64; 2]], pad: f64) -> (f64, f64, f64, f64) {
     let mut max_y = f64::NEG_INFINITY;
 
     for &[x, y] in points {
-        if x < min_x { min_x = x; }
-        if y < min_y { min_y = y; }
-        if x > max_x { max_x = x; }
-        if y > max_y { max_y = y; }
+        if x < min_x {
+            min_x = x;
+        }
+        if y < min_y {
+            min_y = y;
+        }
+        if x > max_x {
+            max_x = x;
+        }
+        if y > max_y {
+            max_y = y;
+        }
     }
 
     (min_x - pad, min_y - pad, max_x + pad, max_y + pad)
@@ -1269,7 +1480,11 @@ fn point_to_segment_distance(pt: [f64; 2], seg_a: [f64; 2], seg_b: [f64; 2]) -> 
     ((pt[0] - proj_x).powi(2) + (pt[1] - proj_y).powi(2)).sqrt()
 }
 
-fn attach_annot_to_page(doc: &mut PdfDocument, page_id: ObjectId, annot_id: ObjectId) -> Result<()> {
+fn attach_annot_to_page(
+    doc: &mut PdfDocument,
+    page_id: ObjectId,
+    annot_id: ObjectId,
+) -> Result<()> {
     let page_obj = doc
         .objects
         .get_mut(&page_id)
@@ -1291,7 +1506,11 @@ fn attach_annot_to_page(doc: &mut PdfDocument, page_id: ObjectId, annot_id: Obje
     Ok(())
 }
 
-fn remove_annot_from_page(doc: &mut PdfDocument, page_id: ObjectId, annot_id: ObjectId) -> Result<()> {
+fn remove_annot_from_page(
+    doc: &mut PdfDocument,
+    page_id: ObjectId,
+    annot_id: ObjectId,
+) -> Result<()> {
     let page_obj = doc
         .objects
         .get_mut(&page_id)
@@ -1329,11 +1548,7 @@ mod tests {
             [130.0, 150.0],
             [160.0, 180.0],
         ];
-        let stroke2 = vec![
-            [300.0, 300.0],
-            [310.0, 320.0],
-            [330.0, 350.0],
-        ];
+        let stroke2 = vec![[300.0, 300.0], [310.0, 320.0], [330.0, 350.0]];
 
         let config = InkAnnotationConfig {
             strokes: vec![stroke1, stroke2],
@@ -1355,7 +1570,8 @@ mod tests {
         assert!(dict.contains_key("AP"));
 
         // Test eraser on stroke 1
-        let erased = erase_ink_strokes(&mut doc, 0, annot_id, [115.0, 125.0], 15.0).expect("erase stroke");
+        let erased =
+            erase_ink_strokes(&mut doc, 0, annot_id, [115.0, 125.0], 15.0).expect("erase stroke");
         assert!(erased);
 
         // Annotation should still exist with only stroke 2
@@ -1365,7 +1581,8 @@ mod tests {
         assert_eq!(ink_list.len(), 1);
 
         // Test eraser on stroke 2 (all strokes gone => annotation deleted)
-        let erased_all = erase_ink_strokes(&mut doc, 0, annot_id, [315.0, 325.0], 20.0).expect("erase all");
+        let erased_all =
+            erase_ink_strokes(&mut doc, 0, annot_id, [315.0, 325.0], 20.0).expect("erase all");
         assert!(erased_all);
         assert!(!doc.objects.contains_key(&annot_id));
     }
