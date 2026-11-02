@@ -255,12 +255,16 @@ mod tests {
         let mut doc1 = create_pdf_from_text(text_v1, &opts).expect("doc1");
         let mut doc2 = create_pdf_from_text(text_v2, &opts).expect("doc2");
 
-        let mut info1 = DocumentInfo::default();
-        info1.title = Some("Invoice 1001 Original".into());
+        let info1 = DocumentInfo {
+            title: Some("Invoice 1001 Original".into()),
+            ..Default::default()
+        };
         set_document_info(&mut doc1, &info1).expect("info1");
 
-        let mut info2 = DocumentInfo::default();
-        info2.title = Some("Invoice 1001 Revised".into());
+        let info2 = DocumentInfo {
+            title: Some("Invoice 1001 Revised".into()),
+            ..Default::default()
+        };
         set_document_info(&mut doc2, &info2).expect("info2");
 
         let report = compare_documents(&doc1, &doc2);

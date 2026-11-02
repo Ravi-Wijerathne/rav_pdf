@@ -442,9 +442,11 @@ mod tests {
         assert!(rep_before.total_errors > 0);
 
         // Add required title & creator metadata
-        let mut info = DocumentInfo::default();
-        info.title = Some("Annual Report 2026".into());
-        info.creator = Some("RavPDF Standards Engine".into());
+        let info = DocumentInfo {
+            title: Some("Annual Report 2026".into()),
+            creator: Some("RavPDF Standards Engine".into()),
+            ..Default::default()
+        };
         set_document_info(&mut doc, &info).expect("set doc info");
 
         let rep_after = run_preflight(&doc, PreflightProfile::PdfA1b);

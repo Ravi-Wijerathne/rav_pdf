@@ -1,11 +1,20 @@
+use ravpdf_core::destinations::{
+    add_named_destination, get_named_destinations, remove_named_destination, DestinationView,
+};
 use ravpdf_core::document::{paper_sizes, PdfDocument};
+use ravpdf_core::outline::add_bookmark;
 use ravpdf_crypto::{decrypt_document, encrypt_document, Permissions};
-use ravpdf_edit::{merge_documents, rotate_page, split_document};
+use ravpdf_edit::{
+    get_page_boxes, insert_pages_from_document, merge_documents, merge_documents_with_options,
+    replace_page, rotate_page, set_page_box, split_document, split_document_by_bookmarks,
+    split_document_by_size, split_document_into_single_pages, PageBoxType, TextPdfOptions,
+};
 use ravpdf_forms::{add_form_field, flatten_form, get_form_fields, FormField};
 use ravpdf_render::{pixmap_to_png, render_page, RenderOptions};
 use ravpdf_tools::{
-    apply_bates_numbering, apply_text_watermark, extract_all_text, get_document_info,
-    redact_pattern, search_document, set_document_info, DocumentInfo,
+    apply_bates_numbering, apply_text_watermark, create_pdf_from_rtf, export_to_csv_table,
+    export_to_rtf, extract_all_text, get_document_info, redact_pattern, search_document,
+    set_document_info, DocumentInfo,
 };
 
 #[test]
@@ -23,9 +32,11 @@ fn test_full_document_lifecycle() {
     assert_eq!(doc.page_count(), 2);
 
     // 2. Set Metadata
-    let mut info = DocumentInfo::default();
-    info.title = Some("Billing Statement".into());
-    info.author = Some("Finance Dept".into());
+    let info = DocumentInfo {
+        title: Some("Billing Statement".into()),
+        author: Some("Finance Dept".into()),
+        ..Default::default()
+    };
     set_document_info(&mut doc, &info).expect("set info");
 
     let read_info = get_document_info(&doc).expect("read info");
@@ -287,7 +298,7 @@ fn test_js_scan_print_and_plugin_workflows() {
     let mut scan_page2 = RgbaImage::new(120, 160);
     for y in 0..160 {
         for x in 0..120 {
-            let px = if x < 5 || x >= 115 || y < 5 || y >= 155 {
+            let px = if !(5..115).contains(&x) || !(5..155).contains(&y) {
                 image::Rgba([15, 15, 15, 255]) // dark scanner bed border
             } else {
                 image::Rgba([230, 230, 230, 255]) // paper
@@ -747,7 +758,7 @@ fn test_prepress_marks_flattening_and_standards_compliance() {
         black_color_limit: 1.0,
         trap_color_reduction: 0.5,
     };
-    set_trap_presets(&mut doc, &[trap_preset.clone()]).expect("set trap presets");
+    set_trap_presets(&mut doc, std::slice::from_ref(&trap_preset)).expect("set trap presets");
     let retrieved_presets = get_trap_presets(&doc);
     assert_eq!(retrieved_presets.len(), 1);
     assert_eq!(retrieved_presets[0].name, "Commercial Web Press");
@@ -1303,12 +1314,16 @@ fn test_comparison_and_format_conversion_pipeline() {
     let text_v2_content = "Annual Report 2026\nQuarter 1: Revenue $1,200,000\nQuarter 2: Revenue $1,600,000\nQuarter 3: Revenue $1,800,000\nTotal Profit: $620,000";
     let mut doc_v2 = create_pdf_from_text(text_v2_content, &text_opts).expect("create doc_v2");
 
-    let mut info1 = DocumentInfo::default();
-    info1.title = Some("Report Q2 Original".into());
+    let info1 = DocumentInfo {
+        title: Some("Report Q2 Original".into()),
+        ..Default::default()
+    };
     set_document_info(&mut doc_v1, &info1).expect("info1");
 
-    let mut info2 = DocumentInfo::default();
-    info2.title = Some("Report Q3 Revised".into());
+    let info2 = DocumentInfo {
+        title: Some("Report Q3 Revised".into()),
+        ..Default::default()
+    };
     set_document_info(&mut doc_v2, &info2).expect("info2");
 
     // 2. Document Comparison (FR-17.1, FR-17.4)
@@ -1799,4 +1814,128 @@ fn test_xfdf_exchange_headings_and_image_rendering_workflows() {
         render_page(&doc, 0, &RenderOptions::default()).expect("render page with image");
     assert!(rendered_pixmap.width() > 0);
     assert!(rendered_pixmap.height() > 0);
+}
+
+#[test]
+fn test_named_dests_page_boxes_split_and_rtf_workflows() {
+    // 1. Named Destinations Lifecycle (FR-20.4)
+    let mut doc = PdfDocument::new();
+    doc.add_blank_page(612.0, 792.0);
+    doc.add_blank_page(612.0, 792.0);
+    doc.add_blank_page(612.0, 792.0);
+    assert_eq!(doc.page_count(), 3);
+
+    add_named_destination(&mut doc, "Chapter1", 0, &DestinationView::Fit).expect("add dest 1");
+    add_named_destination(
+        &mut doc,
+        "Chapter2",
+        1,
+        &DestinationView::FitH { top: Some(500.0) },
+    )
+    .expect("add dest 2");
+    add_named_destination(
+        &mut doc,
+        "Details",
+        2,
+        &DestinationView::Xyz {
+            left: Some(50.0),
+            top: Some(600.0),
+            zoom: Some(1.5),
+        },
+    )
+    .expect("add dest 3");
+
+    let dests = get_named_destinations(&doc).expect("get dests");
+    assert_eq!(dests.len(), 3);
+    assert_eq!(dests[0].name, "Chapter1");
+    assert_eq!(dests[0].page_index, 0);
+    assert_eq!(dests[0].view, DestinationView::Fit);
+    assert_eq!(dests[1].name, "Chapter2");
+    assert_eq!(dests[1].page_index, 1);
+    assert_eq!(dests[2].name, "Details");
+    assert_eq!(dests[2].page_index, 2);
+
+    let removed = remove_named_destination(&mut doc, "Chapter2").expect("remove dest");
+    assert!(removed);
+    let dests_after = get_named_destinations(&doc).expect("get dests after remove");
+    assert_eq!(dests_after.len(), 2);
+    assert!(!dests_after.iter().any(|d| d.name == "Chapter2"));
+
+    // 2. ISO 32000-1 Page Boundary Boxes (FR-06.8)
+    let initial_boxes = get_page_boxes(&doc, 0).expect("get boxes");
+    assert_eq!(initial_boxes.media_box, [0.0, 0.0, 612.0, 792.0]);
+    assert_eq!(initial_boxes.crop_box, initial_boxes.media_box);
+
+    set_page_box(&mut doc, 0, PageBoxType::CropBox, [10.0, 10.0, 600.0, 780.0])
+        .expect("set crop box");
+    set_page_box(&mut doc, 0, PageBoxType::BleedBox, [5.0, 5.0, 605.0, 785.0])
+        .expect("set bleed box");
+    set_page_box(&mut doc, 0, PageBoxType::TrimBox, [15.0, 15.0, 595.0, 775.0])
+        .expect("set trim box");
+    set_page_box(&mut doc, 0, PageBoxType::ArtBox, [20.0, 20.0, 590.0, 770.0])
+        .expect("set art box");
+
+    let updated_boxes = get_page_boxes(&doc, 0).expect("get boxes updated");
+    assert_eq!(updated_boxes.crop_box, [10.0, 10.0, 600.0, 780.0]);
+    assert_eq!(updated_boxes.bleed_box, [5.0, 5.0, 605.0, 785.0]);
+    assert_eq!(updated_boxes.trim_box, [15.0, 15.0, 595.0, 775.0]);
+    assert_eq!(updated_boxes.art_box, [20.0, 20.0, 590.0, 770.0]);
+
+    // 3. Page Replacement & Insertion (FR-06.3, FR-06.10)
+    let mut donor_doc = PdfDocument::new();
+    donor_doc.add_page_with_content(595.0, 842.0, b"BT /F1 12 Tf (Donor P1) Tj ET".to_vec());
+    donor_doc.add_page_with_content(595.0, 842.0, b"BT /F1 12 Tf (Donor P2) Tj ET".to_vec());
+
+    replace_page(&mut doc, 1, &donor_doc, 0).expect("replace page 1");
+    assert_eq!(doc.page_count(), 3);
+
+    let inserted = insert_pages_from_document(&mut doc, 1, &donor_doc, &[0, 1])
+        .expect("insert pages from doc");
+    assert_eq!(inserted.len(), 2);
+    assert_eq!(doc.page_count(), 5);
+
+    // 4. Split and Combine Operations (FR-07.4, FR-07.5, FR-07.7)
+    let single_pages = split_document_into_single_pages(&doc).expect("split single");
+    assert_eq!(single_pages.len(), 5);
+    for p in &single_pages {
+        assert_eq!(p.page_count(), 1);
+    }
+
+    let mut bm_doc = PdfDocument::new();
+    bm_doc.add_blank_page(612.0, 792.0);
+    bm_doc.add_blank_page(612.0, 792.0);
+    bm_doc.add_blank_page(612.0, 792.0);
+    add_bookmark(&mut bm_doc, "Section A", 0).expect("bm a");
+    add_bookmark(&mut bm_doc, "Section B", 1).expect("bm b");
+
+    let bm_splits = split_document_by_bookmarks(&bm_doc).expect("split bookmarks");
+    assert_eq!(bm_splits.len(), 2);
+    assert_eq!(bm_splits[0].0, "Section A");
+    assert_eq!(bm_splits[0].1.page_count(), 1);
+    assert_eq!(bm_splits[1].0, "Section B");
+    assert_eq!(bm_splits[1].1.page_count(), 2);
+
+    let size_splits = split_document_by_size(&bm_doc, 1000).expect("split size");
+    assert!(!size_splits.is_empty());
+
+    let merged_bm = merge_documents_with_options(&[bm_splits[0].1.clone(), bm_splits[1].1.clone()], true)
+        .expect("merge with options");
+    assert_eq!(merged_bm.page_count(), 3);
+
+    // 5. RTF & CSV Export and RTF to PDF Import (FR-03.1.6, FR-03.2.2, FR-03.2.7)
+    let mut text_doc = PdfDocument::new();
+    let sample_content = b"BT\n/F1 12 Tf\n50 700 Td\n(Header 1   Header 2) Tj\n0 -20 Td\n(Val 1   Val 2) Tj\nET\n";
+    text_doc.add_page_with_content(612.0, 792.0, sample_content.to_vec());
+
+    let rtf = export_to_rtf(&text_doc, None).expect("export rtf");
+    assert!(rtf.starts_with(r"{\rtf1\ansi"));
+    assert!(rtf.contains("Header 1"));
+
+    let csv = export_to_csv_table(&text_doc, None).expect("export csv");
+    assert!(csv.contains("Header 1"));
+
+    let imported_doc = create_pdf_from_rtf(&rtf, &TextPdfOptions::default()).expect("import rtf");
+    assert!(imported_doc.page_count() >= 1);
+    let bytes = imported_doc.to_bytes().expect("serialize imported doc");
+    assert!(bytes.starts_with(b"%PDF-"));
 }

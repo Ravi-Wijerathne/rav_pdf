@@ -10,6 +10,9 @@ use ravpdf_annot::{
     BorderEffect, BorderStyle, CalloutConfig, InkAnnotationConfig, LineEndingStyle,
     ShapeAnnotationConfig, ShapeType, StampConfig, StandardStamp, TypewriterConfig,
 };
+use ravpdf_core::destinations::{
+    add_named_destination, get_named_destinations, remove_named_destination, DestinationView,
+};
 use ravpdf_core::document::PdfDocument;
 use ravpdf_crypto::{
     decrypt_document, encrypt_document_with_algorithm, sign_pdf_document_advanced, DigitalId,
@@ -18,9 +21,11 @@ use ravpdf_crypto::{
 use ravpdf_edit::{
     create_pdf_from_images, create_pdf_from_markdown, create_pdf_from_text, crop_page_image,
     delete_page_image, extract_all_images_to_dir, extract_page_images, extract_page_text_spans,
-    merge_documents, reorder_page_image, replace_page_image_from_file, replace_text_span_in_page,
-    rotate_page, set_page_image_opacity, split_document, transform_page_image, ImagePdfOptions,
-    ImageTransformOptions, MarkdownPdfOptions, TextPdfOptions, ZOrderAction,
+    get_page_boxes, insert_pages_from_document, merge_documents, reorder_page_image, replace_page,
+    replace_page_image_from_file, replace_text_span_in_page, rotate_page, set_page_box,
+    set_page_image_opacity, split_document, split_document_by_bookmarks, split_document_by_size,
+    split_document_into_single_pages, transform_page_image, ImagePdfOptions,
+    ImageTransformOptions, MarkdownPdfOptions, PageBoxType, TextPdfOptions, ZOrderAction,
 };
 use ravpdf_forms::{
     apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields, export_form_data,
@@ -31,20 +36,21 @@ use ravpdf_tools::{
     add_3d_annotation, add_measurement_line_annotation, add_printer_marks,
     add_rich_media_annotation, apply_bates_numbering, apply_text_watermark, audit_accessibility,
     batch_scan_to_pdf, calculate_distance, compare_documents, convert_document_colors,
-    convert_to_standard, create_portfolio, embed_output_intent, execute_all_field_calculations,
-    execute_batch_cancellable, execute_preflight_fixup, execute_script, export_comments_to_csv,
-    export_page_to_image, export_to_html, export_to_plain_text, extract_3d_stream,
-    extract_all_text, extract_portfolio_item, extract_rich_media_content,
-    flatten_document_transparency, generate_comparison_pdf_report, generate_postscript,
-    get_3d_annotations, get_document_comments, get_document_info, get_document_inks,
-    get_document_javascript, get_output_intents, get_portfolio, get_rich_media_annotations,
-    get_trap_presets, linearize_document, optimize_document, perform_ocr_document, redact_pattern,
-    remediate_all_automatic, run_preflight, set_trap_presets, validate_standard_compliance,
-    AccessibilityStatus, ActionSequence, BatchJob, BookletBinding, ExportImageFormat,
-    JsExecutionContext, LinearUnit, MediaContent, NUpCount, NUpOrder, OcrConfig, OcrOutputMode,
-    PluginPermission, PluginRegistry, PortfolioItem, PortfolioLayout, PreflightFixup,
-    PreflightProfile, PrintJobConfig, PrintLayoutMode, PrinterMarksConfig, RichMediaActivation,
-    RichMediaConfig, RichMediaDeactivation, SampleWatermarkPlugin, ScaleRatio, ScannerJobConfig,
+    convert_to_standard, create_pdf_from_rtf, create_portfolio, embed_output_intent,
+    execute_all_field_calculations, execute_batch_cancellable, execute_preflight_fixup,
+    execute_script, export_comments_to_csv, export_page_to_image, export_to_csv_table,
+    export_to_html, export_to_plain_text, export_to_rtf, extract_3d_stream, extract_all_text,
+    extract_portfolio_item, extract_rich_media_content, flatten_document_transparency,
+    generate_comparison_pdf_report, generate_postscript, get_3d_annotations, get_document_comments,
+    get_document_info, get_document_inks, get_document_javascript, get_output_intents,
+    get_portfolio, get_rich_media_annotations, get_trap_presets, linearize_document,
+    optimize_document, perform_ocr_document, redact_pattern, remediate_all_automatic,
+    run_preflight, set_trap_presets, validate_standard_compliance, AccessibilityStatus,
+    ActionSequence, BatchJob, BookletBinding, ExportImageFormat, JsExecutionContext, LinearUnit,
+    MediaContent, NUpCount, NUpOrder, OcrConfig, OcrOutputMode, PluginPermission, PluginRegistry,
+    PortfolioItem, PortfolioLayout, PreflightFixup, PreflightProfile, PrintJobConfig,
+    PrintLayoutMode, PrinterMarksConfig, RichMediaActivation, RichMediaConfig,
+    RichMediaDeactivation, SampleWatermarkPlugin, ScaleRatio, ScannerJobConfig,
     StandardConversionConfig, StandardFormat, StandardIccProfile, ThreeDConfig, ThreeDFormat,
     ThreeDLighting, ThreeDRenderMode, ThreeDView, TransparencyFlattenConfig, TrapPreset,
 };
@@ -85,7 +91,7 @@ enum Commands {
         output: PathBuf,
     },
 
-    #[command(about = "Split a PDF document into multiple documents")]
+    #[command(about = "Split a PDF document into multiple documents (FR-07.4, FR-07.5)")]
     Split {
         #[arg(help = "Input PDF file to split")]
         input: PathBuf,
@@ -99,6 +105,15 @@ enum Commands {
 
         #[arg(short, long, required = true, help = "Output directory")]
         output: PathBuf,
+
+        #[arg(long, help = "Split into individual 1-page documents (FR-07.5)")]
+        single_pages: bool,
+
+        #[arg(long, help = "Split by top-level bookmark section boundaries (FR-07.4)")]
+        by_bookmarks: bool,
+
+        #[arg(long, help = "Split document chunks by maximum serialized bytes (FR-07.4)")]
+        max_size: Option<usize>,
     },
 
     #[command(about = "Rotate pages in a PDF document")]
@@ -241,7 +256,7 @@ enum Commands {
         zoom: f32,
     },
 
-    #[command(about = "Export document to HTML, plain text, or image (FR-03.2)")]
+    #[command(about = "Export document to HTML, plain text, RTF, CSV, or image (FR-03.2)")]
     Export {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
@@ -252,7 +267,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "html",
-            help = "Export format: html, txt, png, jpg"
+            help = "Export format: html, txt, rtf, csv, png, jpg"
         )]
         format: String,
 
@@ -1053,6 +1068,105 @@ enum Commands {
         #[arg(long, default_value_t = 1.0, help = "Opacity (0.0 to 1.0)")]
         opacity: f32,
     },
+
+    #[command(about = "Replace a page in a document with a page from another document (FR-06.10)")]
+    ReplacePage {
+        #[arg(help = "Target PDF document")]
+        input: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "Target 1-based page number to replace")]
+        target_page: usize,
+
+        #[arg(long, required = true, help = "Source PDF document to take page from")]
+        source_doc: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "Source 1-based page number")]
+        source_page: usize,
+
+        #[arg(short, long, required = true, help = "Output PDF file path")]
+        output: PathBuf,
+    },
+
+    #[command(about = "Insert pages from an external document into a target document (FR-06.3)")]
+    InsertPages {
+        #[arg(help = "Target PDF document")]
+        input: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based insertion position index")]
+        target_page: usize,
+
+        #[arg(long, required = true, help = "Source PDF document to take pages from")]
+        source_doc: PathBuf,
+
+        #[arg(long, help = "Comma-separated 1-based source page numbers (e.g. '1,2,3', default all)")]
+        source_pages: Option<String>,
+
+        #[arg(short, long, required = true, help = "Output PDF file path")]
+        output: PathBuf,
+    },
+
+    #[command(about = "Manage ISO 32000-1 Named Destinations (FR-20.4)")]
+    Destinations {
+        #[command(subcommand)]
+        action: DestCommands,
+    },
+
+    #[command(about = "Inspect and configure page boundary boxes: MediaBox, CropBox, BleedBox, TrimBox, ArtBox (FR-06.8)")]
+    PageBoxes {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(long, default_value_t = 1, help = "1-based page index")]
+        page: usize,
+
+        #[arg(long, help = "Box type to set: media, crop, bleed, trim, art")]
+        set_box: Option<String>,
+
+        #[arg(long, help = "Box coordinates 'x1,y1,x2,y2'")]
+        rect: Option<String>,
+
+        #[arg(short, long, help = "Output PDF file (if setting box)")]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DestCommands {
+    #[command(about = "List named destinations defined in document (FR-20.4)")]
+    List {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+    },
+
+    #[command(about = "Add a named destination to a page (FR-20.4)")]
+    Add {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, required = true, help = "Destination name identifier")]
+        name: String,
+
+        #[arg(long, default_value_t = 1, help = "1-based target page index")]
+        page: usize,
+
+        #[arg(long, default_value = "fit", help = "View fit mode: fit, fith, fitv, xyz")]
+        fit: String,
+    },
+
+    #[command(about = "Remove a named destination from document (FR-20.4)")]
+    Remove {
+        #[arg(help = "Input PDF file")]
+        input: PathBuf,
+
+        #[arg(short, long, required = true, help = "Output PDF file")]
+        output: PathBuf,
+
+        #[arg(long, required = true, help = "Destination name identifier to remove")]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1648,43 +1762,81 @@ fn main() -> Result<()> {
             input,
             pages,
             output,
+            single_pages,
+            by_bookmarks,
+            max_size,
         } => {
             let doc = PdfDocument::load_from_file(&input)?;
-            let mut ranges = Vec::new();
+            fs::create_dir_all(&output)?;
 
-            for part in pages.split(',') {
-                let bounds: Vec<&str> = part.split('-').collect();
-                if bounds.len() == 2 {
-                    if let (Ok(s), Ok(e)) = (
-                        bounds[0].trim().parse::<usize>(),
-                        bounds[1].trim().parse::<usize>(),
-                    ) {
-                        if s >= 1 && e >= s {
-                            ranges.push((s - 1, e - 1));
+            let (split_docs, names): (Vec<PdfDocument>, Vec<String>) = if single_pages {
+                let docs = split_document_into_single_pages(&doc)?;
+                let names = (1..=docs.len()).map(|i| format!("page_{}.pdf", i)).collect();
+                (docs, names)
+            } else if by_bookmarks {
+                let named_docs = split_document_by_bookmarks(&doc)?;
+                let mut docs = Vec::new();
+                let mut names = Vec::new();
+                for (i, (title, d)) in named_docs.into_iter().enumerate() {
+                    let sanitized: String = title
+                        .chars()
+                        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                        .collect();
+                    names.push(format!("part_{}_{}.pdf", i + 1, sanitized));
+                    docs.push(d);
+                }
+                (docs, names)
+            } else if let Some(max_bytes) = max_size {
+                let docs = split_document_by_size(&doc, max_bytes)?;
+                let names = (1..=docs.len()).map(|i| format!("part_{}.pdf", i)).collect();
+                (docs, names)
+            } else {
+                let mut ranges = Vec::new();
+                for part in pages.split(',') {
+                    let bounds: Vec<&str> = part.split('-').collect();
+                    if bounds.len() == 2 {
+                        if let (Ok(s), Ok(e)) = (
+                            bounds[0].trim().parse::<usize>(),
+                            bounds[1].trim().parse::<usize>(),
+                        ) {
+                            if s >= 1 && e >= s {
+                                ranges.push((s - 1, e - 1));
+                            }
                         }
-                    }
-                } else if bounds.len() == 1 {
-                    if let Ok(s) = bounds[0].trim().parse::<usize>() {
-                        if s >= 1 {
-                            ranges.push((s - 1, s - 1));
+                    } else if bounds.len() == 1 {
+                        if let Ok(s) = bounds[0].trim().parse::<usize>() {
+                            if s >= 1 {
+                                ranges.push((s - 1, s - 1));
+                            }
                         }
                     }
                 }
-            }
+                let docs = split_document(&doc, &ranges)?;
+                let names = (1..=docs.len()).map(|i| format!("part_{}.pdf", i)).collect();
+                (docs, names)
+            };
 
-            fs::create_dir_all(&output)?;
-            let split_docs = split_document(&doc, &ranges)?;
-
-            for (i, d) in split_docs.iter().enumerate() {
-                let out_file = output.join(format!("part_{}.pdf", i + 1));
+            for (d, filename) in split_docs.iter().zip(names.iter()) {
+                let out_file = output.join(filename);
                 d.save_to_file(&out_file)?;
             }
 
-            println!(
-                "Successfully split document into {} parts in {}",
-                split_docs.len(),
-                output.display()
-            );
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "success",
+                        "parts": split_docs.len(),
+                        "output": output.to_string_lossy(),
+                    })
+                );
+            } else {
+                println!(
+                    "Successfully split document into {} parts in {}",
+                    split_docs.len(),
+                    output.display()
+                );
+            }
         }
 
         Commands::Rotate {
@@ -1868,6 +2020,16 @@ fn main() -> Result<()> {
                     fs::write(&output, txt)?;
                     println!("Exported text to {}", output.display());
                 }
+                "rtf" => {
+                    let rtf = export_to_rtf(&doc, None)?;
+                    fs::write(&output, rtf)?;
+                    println!("Exported RTF to {}", output.display());
+                }
+                "csv" => {
+                    let csv = export_to_csv_table(&doc, None)?;
+                    fs::write(&output, csv)?;
+                    println!("Exported CSV table to {}", output.display());
+                }
                 "png" => {
                     if page == 0 || page > doc.page_count() {
                         eprintln!("Error: page number out of range (1-{})", doc.page_count());
@@ -1898,7 +2060,7 @@ fn main() -> Result<()> {
                 }
                 other => {
                     eprintln!(
-                        "Error: Unsupported export format '{}'. Choose from: html, txt, png, jpg",
+                        "Error: Unsupported export format '{}'. Choose from: html, txt, rtf, csv, png, jpg",
                         other
                     );
                     std::process::exit(1);
@@ -3880,6 +4042,11 @@ fn main() -> Result<()> {
                     };
                     create_pdf_from_markdown(&content, &opts)?
                 }
+                "rtf" => {
+                    let content = fs::read_to_string(&input)?;
+                    let opts = TextPdfOptions::default();
+                    create_pdf_from_rtf(&content, &opts)?
+                }
                 _ => {
                     let content = fs::read_to_string(&input)?;
                     let opts = TextPdfOptions::default();
@@ -4314,6 +4481,257 @@ fn main() -> Result<()> {
                     page,
                     output.display()
                 );
+            }
+        }
+
+        Commands::ReplacePage {
+            input,
+            target_page,
+            source_doc,
+            source_page,
+            output,
+        } => {
+            let mut target = PdfDocument::load_from_file(&input)?;
+            let source = PdfDocument::load_from_file(&source_doc)?;
+            let total_target = target.page_count();
+            let total_source = source.page_count();
+
+            if target_page == 0 || target_page > total_target {
+                return Err(anyhow!("Target page {} out of range (1..={})", target_page, total_target));
+            }
+            if source_page == 0 || source_page > total_source {
+                return Err(anyhow!("Source page {} out of range (1..={})", source_page, total_source));
+            }
+
+            replace_page(&mut target, target_page - 1, &source, source_page - 1)?;
+            target.save_to_file(&output)?;
+
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "success",
+                        "replaced_page": target_page,
+                        "source_page": source_page,
+                        "output": output.to_string_lossy(),
+                    })
+                );
+            } else {
+                println!(
+                    "Replaced page {} with page {} from '{}' -> {}",
+                    target_page,
+                    source_page,
+                    source_doc.display(),
+                    output.display()
+                );
+            }
+        }
+
+        Commands::InsertPages {
+            input,
+            target_page,
+            source_doc,
+            source_pages,
+            output,
+        } => {
+            let mut target = PdfDocument::load_from_file(&input)?;
+            let source = PdfDocument::load_from_file(&source_doc)?;
+            let total_source = source.page_count();
+
+            let pages_vec: Vec<usize> = if let Some(p_str) = source_pages {
+                p_str
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<usize>().ok())
+                    .filter(|&p| p >= 1 && p <= total_source)
+                    .map(|p| p - 1)
+                    .collect()
+            } else {
+                (0..total_source).collect()
+            };
+
+            let at_index = target_page.saturating_sub(1);
+            let count = insert_pages_from_document(&mut target, at_index, &source, &pages_vec)?;
+            target.save_to_file(&output)?;
+
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "success",
+                        "inserted_count": count.len(),
+                        "at_page": target_page,
+                        "output": output.to_string_lossy(),
+                    })
+                );
+            } else {
+                println!(
+                    "Inserted {} page(s) at position {} -> {}",
+                    count.len(),
+                    target_page,
+                    output.display()
+                );
+            }
+        }
+
+        Commands::Destinations { action } => match action {
+            DestCommands::List { input } => {
+                let doc = PdfDocument::load_from_file(&input)?;
+                let dests = get_named_destinations(&doc)?;
+
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&dests)?);
+                } else {
+                    println!("=== Named Destinations ({}) ===", dests.len());
+                    for (i, d) in dests.iter().enumerate() {
+                        let page_str = format!("Page {}", d.page_index + 1);
+                        println!("#{}. \"{}\" -> {} ({:?})", i + 1, d.name, page_str, d.view);
+                    }
+                }
+            }
+
+            DestCommands::Add {
+                input,
+                output,
+                name,
+                page,
+                fit,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let total = doc.page_count();
+                if page == 0 || page > total {
+                    return Err(anyhow!("Page {} out of range (1..={})", page, total));
+                }
+
+                let view = match fit.to_lowercase().as_str() {
+                    "fith" => DestinationView::FitH { top: None },
+                    "fitv" => DestinationView::FitV { left: None },
+                    "xyz" => DestinationView::Xyz {
+                        left: Some(0.0),
+                        top: Some(792.0),
+                        zoom: Some(1.0),
+                    },
+                    _ => DestinationView::Fit,
+                };
+
+                add_named_destination(&mut doc, &name, page - 1, &view)?;
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "success",
+                            "name": name,
+                            "page": page,
+                            "output": output.to_string_lossy(),
+                        })
+                    );
+                } else {
+                    println!(
+                        "Added named destination '{}' on page {} -> {}",
+                        name,
+                        page,
+                        output.display()
+                    );
+                }
+            }
+
+            DestCommands::Remove {
+                input,
+                output,
+                name,
+            } => {
+                let mut doc = PdfDocument::load_from_file(&input)?;
+                let removed = remove_named_destination(&mut doc, &name)?;
+                doc.save_to_file(&output)?;
+
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "success",
+                            "name": name,
+                            "removed": removed,
+                            "output": output.to_string_lossy(),
+                        })
+                    );
+                } else {
+                    println!(
+                        "Removed named destination '{}' (found: {}) -> {}",
+                        name,
+                        removed,
+                        output.display()
+                    );
+                }
+            }
+        },
+
+        Commands::PageBoxes {
+            input,
+            page,
+            set_box,
+            rect,
+            output,
+        } => {
+            let mut doc = PdfDocument::load_from_file(&input)?;
+            let total = doc.page_count();
+            if page == 0 || page > total {
+                return Err(anyhow!("Page {} out of range (1..={})", page, total));
+            }
+            let page_idx = page - 1;
+
+            if let Some(box_name) = set_box {
+                let box_type = match box_name.to_lowercase().as_str() {
+                    "crop" | "cropbox" => PageBoxType::CropBox,
+                    "bleed" | "bleedbox" => PageBoxType::BleedBox,
+                    "trim" | "trimbox" => PageBoxType::TrimBox,
+                    "art" | "artbox" => PageBoxType::ArtBox,
+                    _ => PageBoxType::MediaBox,
+                };
+
+                let coords = rect
+                    .as_deref()
+                    .and_then(parse_rect)
+                    .ok_or_else(|| anyhow!("--rect 'x1,y1,x2,y2' is required when setting a page box"))?;
+
+                set_page_box(&mut doc, page_idx, box_type, coords)?;
+
+                let out_path = output
+                    .ok_or_else(|| anyhow!("--output path is required when setting a page box"))?;
+                doc.save_to_file(&out_path)?;
+
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "success",
+                            "page": page,
+                            "box_type": format!("{:?}", box_type),
+                            "rect": coords,
+                            "output": out_path.to_string_lossy(),
+                        })
+                    );
+                } else {
+                    println!(
+                        "Set {:?} on page {} to {:?} -> {}",
+                        box_type,
+                        page,
+                        coords,
+                        out_path.display()
+                    );
+                }
+            } else {
+                let boxes = get_page_boxes(&doc, page_idx)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&boxes)?);
+                } else {
+                    println!("=== Page {} Boundary Boxes ===", page);
+                    println!("MediaBox: {:?}", boxes.media_box);
+                    println!("CropBox:  {:?}", boxes.crop_box);
+                    println!("BleedBox: {:?}", boxes.bleed_box);
+                    println!("TrimBox:  {:?}", boxes.trim_box);
+                    println!("ArtBox:   {:?}", boxes.art_box);
+                }
             }
         }
     }

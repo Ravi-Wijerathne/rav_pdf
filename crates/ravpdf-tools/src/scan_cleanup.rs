@@ -724,7 +724,7 @@ mod tests {
         let mut img = RgbaImage::new(100, 100);
         for y in 0..100 {
             for x in 0..100 {
-                if x >= 10 && x < 90 && y >= 10 && y < 90 {
+                if (10..90).contains(&x) && (10..90).contains(&y) {
                     img.put_pixel(x, y, Rgba([240, 240, 240, 255]));
                 } else {
                     img.put_pixel(x, y, Rgba([20, 20, 20, 255]));

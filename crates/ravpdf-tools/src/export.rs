@@ -374,6 +374,239 @@ fn escape_html(input: &str) -> String {
     escaped
 }
 
+/// Exports specified pages (or all pages if None) to Rich Text Format (RTF 1.5) preserving text formatting (FR-03.2.7, FR-03.2.9).
+pub fn export_to_rtf(
+    doc: &PdfDocument,
+    page_indices: Option<&[usize]>,
+) -> Result<String> {
+    let total_pages = doc.page_count();
+    let indices: Vec<usize> = match page_indices {
+        Some(list) => list.iter().copied().filter(|&i| i < total_pages).collect(),
+        None => (0..total_pages).collect(),
+    };
+
+    let mut rtf = String::new();
+    rtf.push_str("{\\rtf1\\ansi\\ansicpg1252\\deff0\\deflang1033\n");
+    rtf.push_str("{\\fonttbl{\\f0\\fswiss\\fcharset0 Arial;}{\\f1\\fmodern\\fcharset0 Courier New;}}\n");
+    rtf.push_str("{\\colortbl ;\\red0\\green0\\blue0;\\red0\\green102\\blue204;}\n");
+    rtf.push_str("\\viewkind4\\uc1\\pard\\f0\\fs22\n");
+
+    for (seq, &page_idx) in indices.iter().enumerate() {
+        if seq > 0 {
+            rtf.push_str("\\page\n");
+        }
+
+        let spans = ravpdf_edit::extract_page_text_spans(doc, page_idx).unwrap_or_default();
+        if !spans.is_empty() {
+            let mut last_y: Option<f64> = None;
+            for span in spans {
+                if let Some(prev_y) = last_y {
+                    if (span.y - prev_y).abs() > 4.0 {
+                        rtf.push_str("\\par\n");
+                    } else {
+                        rtf.push(' ');
+                    }
+                }
+                last_y = Some(span.y);
+
+                let is_bold = span.font_name.to_lowercase().contains("bold");
+                let is_italic = span.font_name.to_lowercase().contains("italic") || span.font_name.to_lowercase().contains("oblique");
+                let fs_half_points = ((span.font_size * 2.0).round() as i64).clamp(8, 144);
+
+                rtf.push_str(&format!("\\fs{} ", fs_half_points));
+                if is_bold {
+                    rtf.push_str("\\b ");
+                }
+                if is_italic {
+                    rtf.push_str("\\i ");
+                }
+
+                escape_rtf_text(&span.text, &mut rtf);
+
+                if is_italic {
+                    rtf.push_str("\\i0 ");
+                }
+                if is_bold {
+                    rtf.push_str("\\b0 ");
+                }
+            }
+            rtf.push_str("\\par\n");
+        } else {
+            let raw_text = extract_page_text(doc, page_idx).unwrap_or_default();
+            for line in raw_text.lines() {
+                escape_rtf_text(line, &mut rtf);
+                rtf.push_str("\\par\n");
+            }
+        }
+    }
+
+    rtf.push('}');
+    Ok(rtf)
+}
+
+fn escape_rtf_text(input: &str, output: &mut String) {
+    for c in input.chars() {
+        match c {
+            '\\' => output.push_str("\\\\"),
+            '{' => output.push_str("\\{"),
+            '}' => output.push_str("\\}"),
+            '\n' => output.push_str("\\par\n"),
+            '\r' => {}
+            '\t' => output.push_str("\\tab "),
+            c if (c as u32) > 127 => {
+                output.push_str(&format!("\\u{}?", c as i32));
+            }
+            c => output.push(c),
+        }
+    }
+}
+
+/// Converts Rich Text Format (.rtf) content into an ISO 32000-1 PDF document (FR-03.1.6).
+pub fn create_pdf_from_rtf(
+    rtf_content: &str,
+    options: &ravpdf_edit::TextPdfOptions,
+) -> Result<PdfDocument> {
+    let plain = strip_rtf_to_plain_text(rtf_content);
+    ravpdf_edit::create_pdf_from_text(&plain, options)
+}
+
+/// Strips RTF syntax groups and control words to extract clean plain text for PDF generation.
+fn strip_rtf_to_plain_text(rtf: &str) -> String {
+    let mut output = String::new();
+    let mut group_depth: u32 = 0;
+    let mut skip_group_depth: u32 = 0;
+    let mut chars = rtf.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                group_depth += 1;
+                let mut peek_buf = String::new();
+                let mut iter = chars.clone();
+                for _ in 0..10 {
+                    if let Some(ch) = iter.next() {
+                        peek_buf.push(ch);
+                    }
+                }
+                if peek_buf.starts_with("\\*")
+                    || peek_buf.starts_with("\\fonttbl")
+                    || peek_buf.starts_with("\\colortbl")
+                    || peek_buf.starts_with("\\stylesheet")
+                    || peek_buf.starts_with("\\info")
+                {
+                    skip_group_depth = group_depth;
+                }
+            }
+            '}' => {
+                if group_depth == skip_group_depth {
+                    skip_group_depth = 0;
+                }
+                group_depth = group_depth.saturating_sub(1);
+            }
+            '\\' if skip_group_depth == 0 => {
+                let mut word = String::new();
+                while let Some(&next) = chars.peek() {
+                    if next.is_ascii_alphabetic() || next == '-' || next.is_ascii_digit() {
+                        word.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(&' ') = chars.peek() {
+                    chars.next();
+                }
+
+                match word.as_str() {
+                    "par" | "line" => output.push('\n'),
+                    "page" => output.push_str("\n\n"),
+                    "tab" => output.push('\t'),
+                    "" => {
+                        if let Some(&escaped) = chars.peek() {
+                            if escaped == '{' || escaped == '}' || escaped == '\\' {
+                                output.push(chars.next().unwrap());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {
+                if skip_group_depth == 0 {
+                    output.push(c);
+                }
+            }
+        }
+    }
+
+    output
+}
+
+/// Exports tabular text structure from PDF pages as RFC 4180 CSV spreadsheet format (FR-03.2.2, FR-11.3.2).
+pub fn export_to_csv_table(
+    doc: &PdfDocument,
+    page_indices: Option<&[usize]>,
+) -> Result<String> {
+    let total_pages = doc.page_count();
+    let indices: Vec<usize> = match page_indices {
+        Some(list) => list.iter().copied().filter(|&i| i < total_pages).collect(),
+        None => (0..total_pages).collect(),
+    };
+
+    let mut csv = String::new();
+    csv.push_str("Page,Row,Column_1,Column_2,Column_3,Column_4,Raw_Text\n");
+
+    for &page_idx in &indices {
+        let spans = ravpdf_edit::extract_page_text_spans(doc, page_idx).unwrap_or_default();
+        if spans.is_empty() {
+            continue;
+        }
+
+        let mut rows: Vec<Vec<ravpdf_edit::TextSpan>> = Vec::new();
+        for span in spans {
+            if let Some(row) = rows.iter_mut().find(|r| (r[0].y - span.y).abs() <= 5.0) {
+                row.push(span);
+            } else {
+                rows.push(vec![span]);
+            }
+        }
+
+        rows.sort_by(|a, b| b[0].y.partial_cmp(&a[0].y).unwrap_or(std::cmp::Ordering::Equal));
+
+        for (row_idx, mut row) in rows.into_iter().enumerate() {
+            row.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+
+            let col_texts: Vec<String> = row.iter().map(|s| s.text.clone()).collect();
+            let raw = col_texts.join(" ");
+
+            let col1 = col_texts.first().cloned().unwrap_or_default();
+            let col2 = col_texts.get(1).cloned().unwrap_or_default();
+            let col3 = col_texts.get(2).cloned().unwrap_or_default();
+            let col4 = col_texts.get(3).cloned().unwrap_or_default();
+
+            csv.push_str(&format!(
+                "{},{},{},{},{},{},{}\n",
+                page_idx + 1,
+                row_idx + 1,
+                escape_csv_field(&col1),
+                escape_csv_field(&col2),
+                escape_csv_field(&col3),
+                escape_csv_field(&col4),
+                escape_csv_field(&raw),
+            ));
+        }
+    }
+
+    Ok(csv)
+}
+
+fn escape_csv_field(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +629,20 @@ mod tests {
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("Hello World from RavPDF Export"));
         assert!(html.contains("pdf-page-card"));
+
+        // RTF export (FR-03.2.7)
+        let rtf = export_to_rtf(&doc, None).expect("export rtf");
+        assert!(rtf.starts_with("{\\rtf1"));
+        assert!(rtf.contains("Hello World from RavPDF Export"));
+
+        // RTF import / create PDF (FR-03.1.6)
+        let rtf_doc = create_pdf_from_rtf(&rtf, &ravpdf_edit::TextPdfOptions::default()).expect("create from rtf");
+        assert!(rtf_doc.page_count() >= 1);
+
+        // CSV table export (FR-03.2.2)
+        let csv = export_to_csv_table(&doc, None).expect("export csv");
+        assert!(csv.contains("Page,Row,Column_1"));
+        assert!(csv.contains("Hello World from RavPDF Export"));
     }
 
     #[test]

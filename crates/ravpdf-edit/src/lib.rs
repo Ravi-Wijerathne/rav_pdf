@@ -14,7 +14,10 @@ pub mod image_edit;
 pub mod labels;
 pub mod pages;
 
-pub use combine::{merge_documents, split_document};
+pub use combine::{
+    merge_documents, merge_documents_with_options, split_document, split_document_by_bookmarks,
+    split_document_by_size, split_document_into_single_pages,
+};
 pub use content::{
     append_text_block, extract_page_text_spans, insert_formatted_text_block, insert_image_file,
     insert_raw_image, replace_text_span_in_page, suggest_font_substitute,
@@ -35,7 +38,8 @@ pub use labels::{
     PageLabelStyle,
 };
 pub use pages::{
-    crop_page, delete_page, duplicate_page, extract_pages, insert_blank_page, reorder_pages,
-    rotate_page,
+    crop_page, delete_page, duplicate_page, extract_pages, get_page_boxes, insert_blank_page,
+    insert_pages_from_document, reorder_pages, replace_page, rotate_page, set_page_box,
+    PageBoxType, PageBoxes,
 };
 

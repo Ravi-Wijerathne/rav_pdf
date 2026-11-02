@@ -31,6 +31,9 @@ use ravpdf_annot::{
     BorderStyle, CalloutConfig, InkAnnotationConfig, LineEndingStyle, LinkAction,
     ShapeAnnotationConfig, ShapeType, StampConfig, StandardStamp, TypewriterConfig,
 };
+use ravpdf_core::destinations::{
+    add_named_destination, get_named_destinations, remove_named_destination, DestinationView,
+};
 use ravpdf_core::document::{paper_sizes, PdfDocument};
 use ravpdf_core::object::ObjectId;
 use ravpdf_core::outline::{add_bookmark, Bookmark};
@@ -40,15 +43,16 @@ use ravpdf_crypto::{
     SignatureStatus, SigningOptions,
 };
 use ravpdf_edit::{
-    create_pdf_from_images, create_pdf_from_markdown, create_pdf_from_text, crop_page,
-    crop_page_image, delete_page, delete_page_image, duplicate_page, extract_page_images,
-    extract_page_text_spans, extract_pages, get_page_label, get_page_labels, insert_blank_page,
+    create_pdf_from_images, create_pdf_from_markdown, create_pdf_from_text, crop_page_image,
+    delete_page, delete_page_image, duplicate_page, extract_page_images, extract_page_text_spans,
+    extract_pages, get_page_boxes, get_page_label, get_page_labels, insert_blank_page,
     insert_formatted_text_block, insert_image_file, merge_documents, reorder_page_image,
     reorder_pages, replace_page_image_from_file, replace_text_span_in_page, rotate_page,
-    set_page_image_opacity, set_page_labels, snap_to_alignment_guides, split_document,
-    suggest_font_substitute, transform_page_image, FormattedTextBlockOptions, ImagePdfOptions,
-    ImageTransformOptions, MarkdownPdfOptions, PageImage, PageLabelRange, PageLabelStyle,
-    SnapGuide, TextAlignment, TextPdfOptions, TextSpan, ZOrderAction,
+    set_page_box, set_page_image_opacity, set_page_labels, snap_to_alignment_guides,
+    split_document, suggest_font_substitute, transform_page_image, FormattedTextBlockOptions,
+    ImagePdfOptions, ImageTransformOptions, MarkdownPdfOptions, PageBoxType, PageImage,
+    PageLabelRange, PageLabelStyle, SnapGuide, TextAlignment, TextPdfOptions, TextSpan,
+    ZOrderAction,
 };
 use ravpdf_forms::{
     add_form_field, apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
@@ -63,29 +67,29 @@ use ravpdf_tools::{
     add_rich_media_annotation, apply_batch_redactions, apply_bates_numbering,
     apply_headers_and_footers, apply_ink_manager, apply_text_watermark, audit_accessibility,
     audit_space_usage, batch_scan_to_pdf, calculate_area, calculate_distance, compare_documents,
-    convert_document_colors, convert_to_standard, create_portfolio, embed_output_intent,
-    execute_all_field_calculations, execute_batch, execute_preflight_fixup, execute_script,
-    export_comments_to_csv, export_page_to_image, export_to_html, export_to_plain_text,
-    extract_all_text, find_and_replace, find_and_replace_page, fix_document_language,
-    fix_document_title, fix_ensure_tagged_pdf, fix_tab_order_to_structure,
-    flatten_document_transparency, generate_postscript, generate_print_preview_layout,
-    get_attachments, get_document_comments, get_document_inks, get_page_geospatial_viewports,
-    get_portfolio, get_trap_presets, inspect_page_objects, is_linearized, is_portfolio,
-    linearize_document, merge_reviewer_annotations, optimize_document, redact_pattern,
-    remediate_all_automatic, remove_attachment, run_preflight, sanitize_document, search_document,
-    set_document_info, set_trap_presets, validate_standard_compliance, AccessibilityReport,
-    AccessibilityStatus, AreaUnit, BatchAction, BatchJob, BatchResult, BookletBinding,
-    ComparisonReport, ExportImageFormat, FileAttachment, HeaderFooterConfig, InkManagerConfig,
-    JsExecutionContext, LinearUnit, MediaContent, NUpCount, NUpOrder, ObjectInspectionReport,
-    OcrConfig, OcrDocumentResult, OcrOutputMode, OptimizationStats, PlateSeparationConfig,
-    PluginPermission, PluginRegistry, PortfolioItem, PortfolioLayout, PreflightFixup,
-    PreflightProfile, PreflightReport, PreflightSeverity, PrintJobConfig, PrintLayoutMode,
-    PrinterMarksConfig, RedactionAppearance, RenderingIntent, ReviewComment, RichMediaActivation,
-    RichMediaConfig, RichMediaDeactivation, SampleWatermarkPlugin, SanitizeOptions, SanitizeReport,
-    ScaleRatio, ScannerJobConfig, SearchMatch, SeparationAnalysis, SnapOptions, SoftProofConfig,
-    SpaceAudit, StandardConversionConfig, StandardFormat, StandardIccProfile,
-    StandardValidationReport, ThreeDConfig, ThreeDFormat, ThreeDLighting, ThreeDRenderMode,
-    ThreeDView, TransparencyFlattenConfig, TrapPreset,
+    convert_document_colors, convert_to_standard, create_pdf_from_rtf, create_portfolio,
+    embed_output_intent, execute_all_field_calculations, execute_batch, execute_preflight_fixup,
+    execute_script, export_comments_to_csv, export_page_to_image, export_to_csv_table,
+    export_to_html, export_to_plain_text, export_to_rtf, extract_all_text, find_and_replace,
+    find_and_replace_page, fix_document_language, fix_document_title, fix_ensure_tagged_pdf,
+    fix_tab_order_to_structure, flatten_document_transparency, generate_postscript,
+    generate_print_preview_layout, get_attachments, get_document_comments, get_document_inks,
+    get_page_geospatial_viewports, get_portfolio, get_trap_presets, inspect_page_objects,
+    is_linearized, is_portfolio, linearize_document, merge_reviewer_annotations, optimize_document,
+    redact_pattern, remediate_all_automatic, remove_attachment, run_preflight, sanitize_document,
+    search_document, set_document_info, set_trap_presets, validate_standard_compliance,
+    AccessibilityReport, AccessibilityStatus, AreaUnit, BatchAction, BatchJob, BatchResult,
+    BookletBinding, ComparisonReport, ExportImageFormat, FileAttachment, HeaderFooterConfig,
+    InkManagerConfig, JsExecutionContext, LinearUnit, MediaContent, NUpCount, NUpOrder,
+    ObjectInspectionReport, OcrConfig, OcrDocumentResult, OcrOutputMode, OptimizationStats,
+    PlateSeparationConfig, PluginPermission, PluginRegistry, PortfolioItem, PortfolioLayout,
+    PreflightFixup, PreflightProfile, PreflightReport, PreflightSeverity, PrintJobConfig,
+    PrintLayoutMode, PrinterMarksConfig, RedactionAppearance, RenderingIntent, ReviewComment,
+    RichMediaActivation, RichMediaConfig, RichMediaDeactivation, SampleWatermarkPlugin,
+    SanitizeOptions, SanitizeReport, ScaleRatio, ScannerJobConfig, SearchMatch, SeparationAnalysis,
+    SnapOptions, SoftProofConfig, SpaceAudit, StandardConversionConfig, StandardFormat,
+    StandardIccProfile, StandardValidationReport, ThreeDConfig, ThreeDFormat, ThreeDLighting,
+    ThreeDRenderMode, ThreeDView, TransparencyFlattenConfig, TrapPreset,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -150,6 +154,7 @@ fn parse_page_ranges(input: &str, total_pages: usize) -> Vec<(usize, usize)> {
 enum SidebarTab {
     Thumbnails,
     Bookmarks,
+    Destinations,
     Annotations,
     Attachments,
     Signatures,
@@ -337,6 +342,8 @@ struct RavPdfApp {
 
     // Bookmark creation modal state (FR-19.2)
     new_bookmark_title: String,
+    // Named destination creation state (FR-20.4)
+    new_dest_name: String,
 
     // Annotation drawing state (FR-08, FR-09)
     drag_start_pos: Option<Pos2>,
@@ -358,6 +365,7 @@ struct RavPdfApp {
     // Page Crop Modal (FR-06.8)
     show_crop_dialog: bool,
     crop_target_page: usize,
+    crop_box_type: PageBoxType,
     crop_left: f64,
     crop_bottom: f64,
     crop_right: f64,
@@ -728,6 +736,7 @@ impl Default for RavPdfApp {
 
             show_crop_dialog: false,
             crop_target_page: 0,
+            crop_box_type: PageBoxType::CropBox,
             crop_left: 0.0,
             crop_bottom: 0.0,
             crop_right: 612.0,
@@ -854,6 +863,7 @@ impl Default for RavPdfApp {
             batch_result: None,
 
             new_bookmark_title: String::new(),
+            new_dest_name: String::new(),
 
             drag_start_pos: None,
             drag_current_pos: None,
@@ -1347,6 +1357,40 @@ impl RavPdfApp {
         }
     }
 
+    /// Creates a new PDF from a Rich Text Format (.rtf) file (FR-03.1.6).
+    fn create_pdf_from_rtf_dialog(&mut self) {
+        if let Some(file) = rfd::FileDialog::new()
+            .add_filter("Rich Text Format", &["rtf"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&file) {
+                Ok(content) => match create_pdf_from_rtf(&content, &TextPdfOptions::default()) {
+                    Ok(doc) => {
+                        let id = self.next_tab_id;
+                        self.next_tab_id += 1;
+                        let title = file
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| format!("{}.pdf", n))
+                            .unwrap_or_else(|| "RTF Document.pdf".into());
+                        let mut tab = DocumentTab::new(id, title, doc, None);
+                        tab.is_modified = true;
+                        self.tabs.push(tab);
+                        self.active_tab_idx = Some(self.tabs.len() - 1);
+                        self.status_message =
+                            format!("Created PDF from RTF file '{}'", file.display());
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Failed to create PDF from RTF: {}", e);
+                    }
+                },
+                Err(e) => {
+                    self.status_message = format!("Failed to read RTF file: {}", e);
+                }
+            }
+        }
+    }
+
     /// Opens the in-place text editor dialog and extracts text spans from current page (FR-04.1 - FR-04.5, FR-04.12).
     fn open_text_editor_dialog(&mut self) {
         if let Some(tab) = self.active_tab() {
@@ -1498,6 +1542,52 @@ impl RavPdfApp {
                     }
                     Err(e) => {
                         self.status_message = format!("HTML export error: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exports document to RTF file with structure and embedded styling (FR-03.2.7).
+    fn export_rtf_dialog(&mut self) {
+        if let Some(tab) = self.active_tab() {
+            if let Some(file) = rfd::FileDialog::new()
+                .add_filter("Rich Text Format", &["rtf"])
+                .save_file()
+            {
+                match export_to_rtf(&tab.doc, None) {
+                    Ok(rtf) => {
+                        if std::fs::write(&file, rtf).is_ok() {
+                            self.status_message = format!("Exported RTF to '{}'", file.display());
+                        } else {
+                            self.status_message = "Failed to write RTF export file".into();
+                        }
+                    }
+                    Err(e) => {
+                        self.status_message = format!("RTF export error: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exports document tables to CSV file (FR-03.2.2).
+    fn export_csv_dialog(&mut self) {
+        if let Some(tab) = self.active_tab() {
+            if let Some(file) = rfd::FileDialog::new()
+                .add_filter("CSV Spreadsheet", &["csv"])
+                .save_file()
+            {
+                match export_to_csv_table(&tab.doc, None) {
+                    Ok(csv) => {
+                        if std::fs::write(&file, csv).is_ok() {
+                            self.status_message = format!("Exported CSV to '{}'", file.display());
+                        } else {
+                            self.status_message = "Failed to write CSV export file".into();
+                        }
+                    }
+                    Err(e) => {
+                        self.status_message = format!("CSV export error: {}", e);
                     }
                 }
             }
@@ -1847,6 +1937,10 @@ impl RavPdfApp {
                         self.create_pdf_from_text_dialog();
                         ui.close_menu();
                     }
+                    if ui.button("New PDF from RTF File... (FR-03.1.6)").clicked() {
+                        self.create_pdf_from_rtf_dialog();
+                        ui.close_menu();
+                    }
                     if ui
                         .button("New PDF from Markdown... (FR-02.5, FR-02.6)")
                         .clicked()
@@ -1912,6 +2006,20 @@ impl RavPdfApp {
                             .clicked()
                         {
                             self.export_pages_as_png_dialog();
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_doc, Button::new("Export Rich Text (.rtf)... (FR-03.2.7)"))
+                            .clicked()
+                        {
+                            self.export_rtf_dialog();
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_doc, Button::new("Export Table as CSV (.csv)... (FR-03.2.2)"))
+                            .clicked()
+                        {
+                            self.export_csv_dialog();
                             ui.close_menu();
                         }
                         if ui
@@ -2134,18 +2242,28 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Crop Page... (FR-06.8)"))
+                        .add_enabled(has_doc, Button::new("Page Boundary Boxes / Crop... (FR-06.8)"))
                         .clicked()
                     {
-                        if let Some((page, crop)) = self.active_tab().and_then(|tab| {
-                            let p = tab.doc.get_page(tab.current_page)?;
-                            Some((tab.current_page, p.crop_box))
-                        }) {
-                            self.crop_target_page = page;
-                            self.crop_left = crop[0];
-                            self.crop_bottom = crop[1];
-                            self.crop_right = crop[2];
-                            self.crop_top = crop[3];
+                        let box_data = self.active_tab().and_then(|tab| {
+                            let curr = tab.current_page;
+                            let boxes = get_page_boxes(&tab.doc, curr).ok()?;
+                            Some((curr, boxes))
+                        });
+
+                        if let Some((curr, boxes)) = box_data {
+                            self.crop_target_page = curr;
+                            let rect = match self.crop_box_type {
+                                PageBoxType::CropBox => boxes.crop_box,
+                                PageBoxType::MediaBox => boxes.media_box,
+                                PageBoxType::BleedBox => boxes.bleed_box,
+                                PageBoxType::TrimBox => boxes.trim_box,
+                                PageBoxType::ArtBox => boxes.art_box,
+                            };
+                            self.crop_left = rect[0];
+                            self.crop_bottom = rect[1];
+                            self.crop_right = rect[2];
+                            self.crop_top = rect[3];
                         }
                         self.show_crop_dialog = true;
                         ui.close_menu();
@@ -3349,6 +3467,7 @@ impl RavPdfApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Thumbnails, "Pages");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Bookmarks, "Outline");
+                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Destinations, "Dests");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Annotations, "Notes");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Forms, "Forms");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Attachments, "Files");
@@ -3641,14 +3760,22 @@ impl RavPdfApp {
                                     }
                                 }
                                 PageAction::Crop(idx) => {
+                                    let boxes = self.active_tab().and_then(|tab| {
+                                        get_page_boxes(&tab.doc, idx).ok()
+                                    });
                                     self.crop_target_page = idx;
-                                    if let Some(tab) = self.active_tab() {
-                                        if let Some(p) = tab.doc.get_page(idx) {
-                                            self.crop_left = p.crop_box[0];
-                                            self.crop_bottom = p.crop_box[1];
-                                            self.crop_right = p.crop_box[2];
-                                            self.crop_top = p.crop_box[3];
-                                        }
+                                    if let Some(boxes) = boxes {
+                                        let rect = match self.crop_box_type {
+                                            PageBoxType::CropBox => boxes.crop_box,
+                                            PageBoxType::MediaBox => boxes.media_box,
+                                            PageBoxType::BleedBox => boxes.bleed_box,
+                                            PageBoxType::TrimBox => boxes.trim_box,
+                                            PageBoxType::ArtBox => boxes.art_box,
+                                        };
+                                        self.crop_left = rect[0];
+                                        self.crop_bottom = rect[1];
+                                        self.crop_right = rect[2];
+                                        self.crop_top = rect[3];
                                     }
                                     self.show_crop_dialog = true;
                                 }
@@ -3709,6 +3836,93 @@ impl RavPdfApp {
                                 }
                             }
                         });
+
+                        if let Some(page_idx) = target_page {
+                            if let Some(tab) = self.active_tab_mut() {
+                                tab.current_page = page_idx;
+                                tab.page_input_buffer = (page_idx + 1).to_string();
+                                tab.invalidate_render();
+                            }
+                        }
+                    }
+
+                    SidebarTab::Destinations => {
+                        // FR-20.4: Named Destinations Panel conforming to ISO 32000-1 Section 12.3.2.3
+                        ui.heading("Named Destinations (FR-20.4)");
+                        ui.add_space(4.0);
+
+                        // Destination creation section
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut self.new_dest_name);
+                            if ui
+                                .button("➕ Add")
+                                .on_hover_text("Add named destination to current page")
+                                .clicked()
+                                && !self.new_dest_name.trim().is_empty()
+                            {
+                                let dest_name = self.new_dest_name.clone();
+                                if let Some(tab) = self.active_tab_mut() {
+                                    let curr_page = tab.current_page;
+                                    let view = DestinationView::Fit;
+                                    if let Err(e) = add_named_destination(&mut tab.doc, &dest_name, curr_page, &view) {
+                                        self.status_message = format!("Failed to add destination: {}", e);
+                                    } else {
+                                        tab.is_modified = true;
+                                        self.status_message = format!("Added named destination '{}' (page {})", dest_name, curr_page + 1);
+                                    }
+                                }
+                                self.new_dest_name.clear();
+                            }
+                        });
+
+                        ui.separator();
+
+                        let mut target_page = None;
+                        let mut to_remove: Option<String> = None;
+
+                        ScrollArea::vertical().show(ui, |ui| {
+                            if let Some(tab) = self.active_tab() {
+                                match get_named_destinations(&tab.doc) {
+                                    Ok(dests) => {
+                                        if dests.is_empty() {
+                                            ui.weak("(No named destinations in this document)");
+                                        } else {
+                                            for d in dests {
+                                                ui.horizontal(|ui| {
+                                                    let label = format!("📌 {} (p. {})", d.name, d.page_index + 1);
+                                                    if ui.link(label).on_hover_text(format!("Navigate to page {} with view {:?}", d.page_index + 1, d.view)).clicked() {
+                                                        target_page = Some(d.page_index);
+                                                    }
+                                                    if ui.small_button("🗑").on_hover_text("Remove this destination").clicked() {
+                                                        to_remove = Some(d.name.clone());
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        ui.weak(format!("Error loading destinations: {}", e));
+                                    }
+                                }
+                            }
+                        });
+
+                        if let Some(name) = to_remove {
+                            if let Some(tab) = self.active_tab_mut() {
+                                match remove_named_destination(&mut tab.doc, &name) {
+                                    Ok(true) => {
+                                        tab.is_modified = true;
+                                        self.status_message = format!("Removed destination '{}'", name);
+                                    }
+                                    Ok(false) => {
+                                        self.status_message = format!("Destination '{}' not found", name);
+                                    }
+                                    Err(e) => {
+                                        self.status_message = format!("Failed to remove destination: {}", e);
+                                    }
+                                }
+                            }
+                        }
 
                         if let Some(page_idx) = target_page {
                             if let Some(tab) = self.active_tab_mut() {
@@ -5433,9 +5647,52 @@ impl RavPdfApp {
                                             }
                                         }
                                         LinkAction::Named(ref n) => {
-                                            resp.on_hover_ui(|ui| {
+                                            resp = resp.on_hover_ui(|ui| {
                                                 ui.label(format!("➔ Destination: {}", n));
                                             });
+                                            if resp.clicked() {
+                                                if let Some(tab) = self.active_tab() {
+                                                    if let Ok(dests) = get_named_destinations(&tab.doc) {
+                                                        if let Some(d) = dests.iter().find(|d| d.name == *n) {
+                                                            jump_target_page = Some(d.page_index);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        LinkAction::OpenFile(ref path) => {
+                                            resp = resp.on_hover_ui(|ui| {
+                                                ui.label(format!("📂 Open File: {}", path));
+                                            });
+                                            if resp.clicked() {
+                                                self.status_message = format!("Launch action: '{}'", path);
+                                            }
+                                        }
+                                        LinkAction::JavaScript(ref code) => {
+                                            resp = resp.on_hover_ui(|ui| {
+                                                ui.label("⚡ Execute JavaScript");
+                                            });
+                                            if resp.clicked() {
+                                                let mut ctx_exec = JsExecutionContext::default();
+                                                let _ = execute_script(&mut ctx_exec, code);
+                                                self.status_message = "Executed link JavaScript".into();
+                                            }
+                                        }
+                                        LinkAction::SubmitForm { ref url, .. } => {
+                                            resp = resp.on_hover_ui(|ui| {
+                                                ui.label(format!("📨 Submit Form to: {}", url));
+                                            });
+                                            if resp.clicked() {
+                                                self.status_message = format!("Submit form to: {}", url);
+                                            }
+                                        }
+                                        LinkAction::ResetForm { .. } => {
+                                            resp = resp.on_hover_ui(|ui| {
+                                                ui.label("↺ Reset Form Fields");
+                                            });
+                                            if resp.clicked() {
+                                                self.status_message = "Reset form fields".into();
+                                            }
                                         }
                                     }
                                 }
@@ -7902,18 +8159,38 @@ impl RavPdfApp {
             }
         }
 
-        // Crop Page Dialog (FR-06.8)
+        // Page Boundary Boxes & Crop Dialog (FR-06.8)
         if self.show_crop_dialog {
             let mut close = false;
             let mut apply = false;
-            egui::Window::new(format!("Crop Page {} (FR-06.8)", self.crop_target_page + 1))
+            egui::Window::new(format!("Page Boundary Boxes (FR-06.8) - Page {}", self.crop_target_page + 1))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label("Specify new CropBox boundary coordinates (points):");
+                    ui.label("Configure ISO 32000-1 page boundary box coordinates (points):");
                     ui.add_space(4.0);
 
+                    ui.horizontal(|ui| {
+                        ui.label("Box Type:");
+                        egui::ComboBox::from_id_salt("page_box_type_combo")
+                            .selected_text(match self.crop_box_type {
+                                PageBoxType::CropBox => "CropBox (Visible Page Area)",
+                                PageBoxType::MediaBox => "MediaBox (Physical Medium)",
+                                PageBoxType::BleedBox => "BleedBox (Production Bleed)",
+                                PageBoxType::TrimBox => "TrimBox (Finished Page Trim)",
+                                PageBoxType::ArtBox => "ArtBox (Meaningful Content)",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.crop_box_type, PageBoxType::CropBox, "CropBox (Visible Page Area)");
+                                ui.selectable_value(&mut self.crop_box_type, PageBoxType::MediaBox, "MediaBox (Physical Medium)");
+                                ui.selectable_value(&mut self.crop_box_type, PageBoxType::BleedBox, "BleedBox (Production Bleed)");
+                                ui.selectable_value(&mut self.crop_box_type, PageBoxType::TrimBox, "TrimBox (Finished Page Trim)");
+                                ui.selectable_value(&mut self.crop_box_type, PageBoxType::ArtBox, "ArtBox (Meaningful Content)");
+                            });
+                    });
+
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label("Left (X1):");
                         ui.add(egui::DragValue::new(&mut self.crop_left).speed(1.0));
@@ -7940,12 +8217,12 @@ impl RavPdfApp {
 
                     ui.checkbox(
                         &mut self.crop_all_pages,
-                        "Apply crop to all pages in document",
+                        "Apply box settings to all pages in document",
                     );
 
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        if ui.button("✂ Apply Crop").clicked() {
+                        if ui.button("✂ Apply Box").clicked() {
                             apply = true;
                             close = true;
                         }
@@ -7956,12 +8233,13 @@ impl RavPdfApp {
                 });
 
             if apply {
-                let crop_box = [
+                let rect = [
                     self.crop_left,
                     self.crop_bottom,
                     self.crop_right,
                     self.crop_top,
                 ];
+                let box_type = self.crop_box_type;
                 let all_pages = self.crop_all_pages;
                 let target_page = self.crop_target_page;
                 let mut msg = String::new();
@@ -7970,12 +8248,12 @@ impl RavPdfApp {
                     if all_pages {
                         let total = tab.doc.page_count();
                         for i in 0..total {
-                            let _ = crop_page(&mut tab.doc, i, crop_box);
+                            let _ = set_page_box(&mut tab.doc, i, box_type, rect);
                         }
-                        msg = format!("Cropped all {} pages", total);
+                        msg = format!("Set {:?} for all {} pages", box_type, total);
                     } else {
-                        let _ = crop_page(&mut tab.doc, target_page, crop_box);
-                        msg = format!("Cropped page {}", target_page + 1);
+                        let _ = set_page_box(&mut tab.doc, target_page, box_type, rect);
+                        msg = format!("Set {:?} for page {}", box_type, target_page + 1);
                     }
                     tab.is_modified = true;
                     tab.invalidate_render();

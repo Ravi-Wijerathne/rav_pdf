@@ -9,6 +9,7 @@
 //! - NFR-04.2 / NFR-04.3 (Memory safety, parser input validation)
 //! - NFR-07.1 (Workspace separation of core engine)
 
+pub mod destinations;
 pub mod document;
 pub mod error;
 pub mod filter;
@@ -19,6 +20,10 @@ pub mod parser;
 pub mod writer;
 
 // Re-exports
+pub use destinations::{
+    add_named_destination, get_named_destinations, remove_named_destination, DestinationView,
+    NamedDestination,
+};
 pub use document::{paper_sizes, Page, PdfDocument};
 pub use error::{PdfError, Result};
 pub use object::{ObjectId, Object, PdfDictionary, PdfName, PdfStream, PdfString};

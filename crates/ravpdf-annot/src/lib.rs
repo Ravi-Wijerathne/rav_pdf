@@ -67,8 +67,28 @@ mod tests {
         let goto_id = add_annotation_to_page(&mut doc, 0, &link_goto).expect("add goto link");
         assert!(doc.objects.contains_key(&goto_id));
 
+        // 3. Named Destination Link (FR-20.2, FR-20.4)
+        let link_named = Annotation::new_link_named([100.0, 400.0, 200.0, 420.0], "Chapter1");
+        add_annotation_to_page(&mut doc, 0, &link_named).expect("add named link");
+
+        // 4. Launch File Link (FR-20.2)
+        let link_launch = Annotation::new_link_launch([100.0, 350.0, 200.0, 370.0], "data/report.xlsx");
+        add_annotation_to_page(&mut doc, 0, &link_launch).expect("add launch link");
+
+        // 5. JavaScript Link (FR-20.2, FR-12)
+        let link_js = Annotation::new_link_javascript([100.0, 300.0, 200.0, 320.0], "app.alert('Hello');");
+        add_annotation_to_page(&mut doc, 0, &link_js).expect("add js link");
+
+        // 6. Submit Form Link (FR-20.2)
+        let link_submit = Annotation::new_link_submit_form([100.0, 250.0, 200.0, 270.0], "https://server.com/submit", 4);
+        add_annotation_to_page(&mut doc, 0, &link_submit).expect("add submit link");
+
+        // 7. Reset Form Link (FR-20.2)
+        let link_reset = Annotation::new_link_reset_form([100.0, 200.0, 200.0, 220.0], vec!["Field1".into()], false);
+        add_annotation_to_page(&mut doc, 0, &link_reset).expect("add reset link");
+
         let retrieved = get_page_annotations(&doc, 0).expect("get annotations");
-        assert_eq!(retrieved.len(), 2);
+        assert_eq!(retrieved.len(), 7);
 
         let link1 = &retrieved[0];
         match &link1.annot_type {
@@ -87,6 +107,46 @@ mod tests {
                 assert_eq!(action, &LinkAction::GoToPage(1));
             }
             _ => panic!("Expected goto link annotation"),
+        }
+
+        let link3 = &retrieved[2];
+        match &link3.annot_type {
+            AnnotationType::Link { action, .. } => {
+                assert_eq!(action, &LinkAction::Named("Chapter1".into()));
+            }
+            _ => panic!("Expected named link annotation"),
+        }
+
+        let link4 = &retrieved[3];
+        match &link4.annot_type {
+            AnnotationType::Link { action, .. } => {
+                assert_eq!(action, &LinkAction::OpenFile("data/report.xlsx".into()));
+            }
+            _ => panic!("Expected launch link annotation"),
+        }
+
+        let link5 = &retrieved[4];
+        match &link5.annot_type {
+            AnnotationType::Link { action, .. } => {
+                assert_eq!(action, &LinkAction::JavaScript("app.alert('Hello');".into()));
+            }
+            _ => panic!("Expected js link annotation"),
+        }
+
+        let link6 = &retrieved[5];
+        match &link6.annot_type {
+            AnnotationType::Link { action, .. } => {
+                assert_eq!(action, &LinkAction::SubmitForm { url: "https://server.com/submit".into(), flags: 4 });
+            }
+            _ => panic!("Expected submit link annotation"),
+        }
+
+        let link7 = &retrieved[6];
+        match &link7.annot_type {
+            AnnotationType::Link { action, .. } => {
+                assert_eq!(action, &LinkAction::ResetForm { fields: vec!["Field1".into()], exclude: false });
+            }
+            _ => panic!("Expected reset link annotation"),
         }
 
         // Test URL regex detector (FR-20.5)

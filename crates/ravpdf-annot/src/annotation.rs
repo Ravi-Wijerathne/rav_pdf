@@ -18,6 +18,14 @@ pub enum LinkAction {
     GoToPage(usize),
     /// Jump to named destination (/Dest (name))
     Named(String),
+    /// Open file or application (/S /Launch /F (path))
+    OpenFile(String),
+    /// Execute embedded JavaScript (/S /JavaScript /JS (code))
+    JavaScript(String),
+    /// Submit interactive form data (/S /SubmitForm)
+    SubmitForm { url: String, flags: u32 },
+    /// Reset interactive form fields (/S /ResetForm)
+    ResetForm { fields: Vec<String>, exclude: bool },
 }
 
 /// Visual effect when link annotation is activated conforming to ISO 32000-1 Section 12.5.6.5 Table 173.
@@ -170,6 +178,94 @@ impl Annotation {
         }
     }
 
+    /// Creates a named destination link annotation (FR-20.2, FR-20.4).
+    pub fn new_link_named(rect: [f64; 4], name: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            annot_type: AnnotationType::Link {
+                action: LinkAction::Named(name.into()),
+                border_width: 0.0,
+                highlight: LinkHighlight::Invert,
+            },
+            rect,
+            contents: None,
+            color: Some((0.0, 0.45, 0.85)),
+            opacity: 1.0,
+            author: None,
+        }
+    }
+
+    /// Creates an open/launch file link annotation (FR-20.2).
+    pub fn new_link_launch(rect: [f64; 4], path: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            annot_type: AnnotationType::Link {
+                action: LinkAction::OpenFile(path.into()),
+                border_width: 0.0,
+                highlight: LinkHighlight::Invert,
+            },
+            rect,
+            contents: None,
+            color: Some((0.0, 0.45, 0.85)),
+            opacity: 1.0,
+            author: None,
+        }
+    }
+
+    /// Creates an execute JavaScript link annotation (FR-20.2, FR-12).
+    pub fn new_link_javascript(rect: [f64; 4], code: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            annot_type: AnnotationType::Link {
+                action: LinkAction::JavaScript(code.into()),
+                border_width: 0.0,
+                highlight: LinkHighlight::Invert,
+            },
+            rect,
+            contents: None,
+            color: Some((0.0, 0.45, 0.85)),
+            opacity: 1.0,
+            author: None,
+        }
+    }
+
+    /// Creates a submit form link annotation (FR-20.2, FR-11.8).
+    pub fn new_link_submit_form(rect: [f64; 4], url: impl Into<String>, flags: u32) -> Self {
+        Self {
+            id: None,
+            annot_type: AnnotationType::Link {
+                action: LinkAction::SubmitForm {
+                    url: url.into(),
+                    flags,
+                },
+                border_width: 0.0,
+                highlight: LinkHighlight::Invert,
+            },
+            rect,
+            contents: None,
+            color: Some((0.0, 0.45, 0.85)),
+            opacity: 1.0,
+            author: None,
+        }
+    }
+
+    /// Creates a reset form link annotation (FR-20.2, FR-11.8).
+    pub fn new_link_reset_form(rect: [f64; 4], fields: Vec<String>, exclude: bool) -> Self {
+        Self {
+            id: None,
+            annot_type: AnnotationType::Link {
+                action: LinkAction::ResetForm { fields, exclude },
+                border_width: 0.0,
+                highlight: LinkHighlight::Invert,
+            },
+            rect,
+            contents: None,
+            color: Some((0.0, 0.45, 0.85)),
+            opacity: 1.0,
+            author: None,
+        }
+    }
+
     /// Serializes this annotation into an ISO 32000-1 Section 12.5 annotation dictionary.
     pub fn to_dictionary(&self) -> PdfDictionary {
         let mut dict = PdfDictionary::new();
@@ -251,6 +347,45 @@ impl Annotation {
                 LinkAction::Named(ref name) => {
                     dict.insert("Dest", PdfString::from_str(name));
                 }
+                LinkAction::OpenFile(ref path) => {
+                    let mut action_dict = PdfDictionary::new();
+                    action_dict.insert("Type", PdfName::new("Action"));
+                    action_dict.insert("S", PdfName::new("Launch"));
+                    action_dict.insert("F", PdfString::from_str(path));
+                    dict.insert("A", Object::Dictionary(action_dict));
+                }
+                LinkAction::JavaScript(ref code) => {
+                    let mut action_dict = PdfDictionary::new();
+                    action_dict.insert("Type", PdfName::new("Action"));
+                    action_dict.insert("S", PdfName::new("JavaScript"));
+                    action_dict.insert("JS", PdfString::from_str(code));
+                    dict.insert("A", Object::Dictionary(action_dict));
+                }
+                LinkAction::SubmitForm { ref url, flags } => {
+                    let mut action_dict = PdfDictionary::new();
+                    action_dict.insert("Type", PdfName::new("Action"));
+                    action_dict.insert("S", PdfName::new("SubmitForm"));
+                    let mut f_dict = PdfDictionary::new();
+                    f_dict.insert("FS", PdfName::new("URL"));
+                    f_dict.insert("F", PdfString::from_str(url));
+                    action_dict.insert("F", Object::Dictionary(f_dict));
+                    action_dict.insert("Flags", Object::Integer(*flags as i64));
+                    dict.insert("A", Object::Dictionary(action_dict));
+                }
+                LinkAction::ResetForm { ref fields, exclude } => {
+                    let mut action_dict = PdfDictionary::new();
+                    action_dict.insert("Type", PdfName::new("Action"));
+                    action_dict.insert("S", PdfName::new("ResetForm"));
+                    if !fields.is_empty() {
+                        let arr = fields
+                            .iter()
+                            .map(|f| Object::String(PdfString::from_str(f)))
+                            .collect();
+                        action_dict.insert("Fields", Object::Array(arr));
+                    }
+                    action_dict.insert("Flags", Object::Integer(if *exclude { 1 } else { 0 }));
+                    dict.insert("A", Object::Dictionary(action_dict));
+                }
             }
         }
 
@@ -285,6 +420,31 @@ impl Annotation {
                         0
                     };
                     LinkAction::GoToPage(page_idx)
+                } else if s == "Launch" {
+                    LinkAction::OpenFile(a_dict.get_str("F").unwrap_or_default())
+                } else if s == "JavaScript" {
+                    LinkAction::JavaScript(a_dict.get_str("JS").unwrap_or_default())
+                } else if s == "SubmitForm" {
+                    let url = if let Some(Object::Dictionary(f_dict)) = a_dict.get("F") {
+                        f_dict.get_str("F").unwrap_or_default()
+                    } else {
+                        a_dict.get_str("F").unwrap_or_default()
+                    };
+                    let flags = a_dict.get_i64("Flags").unwrap_or(0).max(0) as u32;
+                    LinkAction::SubmitForm { url, flags }
+                } else if s == "ResetForm" {
+                    let fields = a_dict
+                        .get_array("Fields")
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(Object::as_str)
+                                .map(|s| s.to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let flags = a_dict.get_i64("Flags").unwrap_or(0);
+                    let exclude = (flags & 1) != 0;
+                    LinkAction::ResetForm { fields, exclude }
                 } else {
                     LinkAction::Uri("https://".into())
                 }
