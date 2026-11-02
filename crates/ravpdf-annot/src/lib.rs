@@ -10,9 +10,10 @@ pub mod drawing;
 pub mod stamps;
 
 pub use annotation::{
-    add_annotation_to_page, delete_annotation, detect_urls_in_text, get_page_annotations,
-    update_annotation_color, update_annotation_contents, update_annotation_rect, Annotation,
-    AnnotationType, LinkAction, LinkHighlight,
+    add_annotation_to_page, delete_annotation, detect_urls_in_text, export_annotations_to_xfdf,
+    get_page_annotations, import_annotations_from_xfdf, update_annotation_color,
+    update_annotation_contents, update_annotation_rect, Annotation, AnnotationType, LinkAction,
+    LinkHighlight,
 };
 pub use drawing::{
     add_ink_annotation, add_shape_annotation, erase_ink_strokes, set_annotation_locked,
@@ -34,18 +35,19 @@ mod tests {
         let mut doc = PdfDocument::new();
         doc.add_blank_page(612.0, 792.0);
 
-        let mut sticky_note =
-            Annotation::new(AnnotationType::Text, [50.0, 700.0, 80.0, 730.0]);
+        let mut sticky_note = Annotation::new(AnnotationType::Text, [50.0, 700.0, 80.0, 730.0]);
         sticky_note.contents = Some("Review comments on section 1".into());
         sticky_note.author = Some("Auditor".into());
 
-        let annot_id =
-            add_annotation_to_page(&mut doc, 0, &sticky_note).expect("add annot");
+        let annot_id = add_annotation_to_page(&mut doc, 0, &sticky_note).expect("add annot");
         assert!(doc.objects.contains_key(&annot_id));
 
         let annots = get_page_annotations(&doc, 0).expect("get annots");
         assert_eq!(annots.len(), 1);
-        assert_eq!(annots[0].contents.as_deref(), Some("Review comments on section 1"));
+        assert_eq!(
+            annots[0].contents.as_deref(),
+            Some("Review comments on section 1")
+        );
     }
 
     #[test]
@@ -55,7 +57,8 @@ mod tests {
         doc.add_blank_page(612.0, 792.0);
 
         // 1. Web URL Link
-        let link_uri = Annotation::new_link_uri([100.0, 500.0, 200.0, 520.0], "https://example.com/spec");
+        let link_uri =
+            Annotation::new_link_uri([100.0, 500.0, 200.0, 520.0], "https://example.com/spec");
         let uri_id = add_annotation_to_page(&mut doc, 0, &link_uri).expect("add uri link");
         assert!(doc.objects.contains_key(&uri_id));
 
@@ -69,7 +72,9 @@ mod tests {
 
         let link1 = &retrieved[0];
         match &link1.annot_type {
-            AnnotationType::Link { action, highlight, .. } => {
+            AnnotationType::Link {
+                action, highlight, ..
+            } => {
                 assert_eq!(action, &LinkAction::Uri("https://example.com/spec".into()));
                 assert_eq!(*highlight, LinkHighlight::Invert);
             }
@@ -109,18 +114,24 @@ mod tests {
         assert_eq!(page_annots[0].contents.as_deref(), Some("Original note"));
 
         // 2. Update rectangle
-        update_annotation_rect(&mut doc, annot_id, [200.0, 200.0, 260.0, 260.0]).expect("update rect");
+        update_annotation_rect(&mut doc, annot_id, [200.0, 200.0, 260.0, 260.0])
+            .expect("update rect");
         let updated_annots = get_page_annotations(&doc, 0).expect("get annots");
         assert_eq!(updated_annots[0].rect, [200.0, 200.0, 260.0, 260.0]);
 
         // 3. Update contents & author
-        update_annotation_contents(&mut doc, annot_id, "Updated note text", Some("Bob")).expect("update content");
+        update_annotation_contents(&mut doc, annot_id, "Updated note text", Some("Bob"))
+            .expect("update content");
         let content_annots = get_page_annotations(&doc, 0).expect("get annots");
-        assert_eq!(content_annots[0].contents.as_deref(), Some("Updated note text"));
+        assert_eq!(
+            content_annots[0].contents.as_deref(),
+            Some("Updated note text")
+        );
         assert_eq!(content_annots[0].author.as_deref(), Some("Bob"));
 
         // 4. Update color & opacity
-        update_annotation_color(&mut doc, annot_id, (0.0, 0.5, 1.0), Some(0.8)).expect("update color");
+        update_annotation_color(&mut doc, annot_id, (0.0, 0.5, 1.0), Some(0.8))
+            .expect("update color");
         let color_annots = get_page_annotations(&doc, 0).expect("get annots");
         assert_eq!(color_annots[0].opacity, 0.8);
 
@@ -129,5 +140,39 @@ mod tests {
         let remaining_annots = get_page_annotations(&doc, 0).expect("get annots");
         assert_eq!(remaining_annots.len(), 0);
         assert!(!doc.objects.contains_key(&annot_id));
+    }
+
+    #[test]
+    fn test_xfdf_export_and_import() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(612.0, 792.0);
+
+        let mut annot = Annotation::new(AnnotationType::Highlight, [100.0, 200.0, 300.0, 220.0]);
+        annot.contents = Some("Important section".into());
+        annot.author = Some("Alice".into());
+        annot.color = Some((1.0, 1.0, 0.0));
+        annot.opacity = 0.85;
+
+        add_annotation_to_page(&mut doc, 0, &annot).expect("add annot");
+
+        // Export to XFDF
+        let xfdf = export_annotations_to_xfdf(&doc).expect("export xfdf");
+        assert!(xfdf.contains("<highlight"));
+        assert!(xfdf.contains("Alice"));
+        assert!(xfdf.contains("Important section"));
+
+        // Import into fresh document
+        let mut doc2 = PdfDocument::new();
+        doc2.add_blank_page(612.0, 792.0);
+        let imported_count = import_annotations_from_xfdf(&mut doc2, &xfdf).expect("import xfdf");
+        assert_eq!(imported_count, 1);
+
+        let imported_annots = get_page_annotations(&doc2, 0).expect("get annots");
+        assert_eq!(imported_annots.len(), 1);
+        assert_eq!(
+            imported_annots[0].contents.as_deref(),
+            Some("Important section")
+        );
+        assert_eq!(imported_annots[0].author.as_deref(), Some("Alice"));
     }
 }

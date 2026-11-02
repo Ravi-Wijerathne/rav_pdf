@@ -4,58 +4,59 @@
 
 use anyhow::{anyhow, Result};
 use clap::{Parser as ClapParser, Subcommand};
-use ravpdf_core::document::PdfDocument;
-use ravpdf_crypto::{
-    decrypt_document, encrypt_document_with_algorithm, sign_pdf_document_advanced, DigitalId,
-    DocMdpPermission, EncryptionAlgorithm, Permissions, SigningOptions,
-};
 use ravpdf_annot::{
     add_annotation_to_page, add_callout_annotation, add_ink_annotation, add_shape_annotation,
     add_stamp_annotation, add_typewriter_annotation, erase_ink_strokes, Annotation, AnnotationType,
     BorderEffect, BorderStyle, CalloutConfig, InkAnnotationConfig, LineEndingStyle,
     ShapeAnnotationConfig, ShapeType, StampConfig, StandardStamp, TypewriterConfig,
 };
+use ravpdf_core::document::PdfDocument;
+use ravpdf_crypto::{
+    decrypt_document, encrypt_document_with_algorithm, sign_pdf_document_advanced, DigitalId,
+    DocMdpPermission, EncryptionAlgorithm, Permissions, SigningOptions,
+};
 use ravpdf_edit::{
     create_pdf_from_images, create_pdf_from_markdown, create_pdf_from_text, crop_page_image,
-    delete_page_image, extract_all_images_to_dir, extract_page_images,
-    extract_page_text_spans, merge_documents, reorder_page_image, replace_page_image_from_file,
-    replace_text_span_in_page, rotate_page, set_page_image_opacity, split_document,
-    transform_page_image, ImagePdfOptions, ImageTransformOptions, MarkdownPdfOptions,
-    TextPdfOptions, ZOrderAction,
+    delete_page_image, extract_all_images_to_dir, extract_page_images, extract_page_text_spans,
+    merge_documents, reorder_page_image, replace_page_image_from_file, replace_text_span_in_page,
+    rotate_page, set_page_image_opacity, split_document, transform_page_image, ImagePdfOptions,
+    ImageTransformOptions, MarkdownPdfOptions, TextPdfOptions, ZOrderAction,
 };
 use ravpdf_forms::{
-    apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields,
-    export_form_data, flatten_form, import_form_data, FormDataFormat, TabOrder,
+    apply_auto_detected_fields, apply_page_tab_order, auto_detect_form_fields, export_form_data,
+    flatten_form, import_form_data, FormDataFormat, TabOrder,
 };
 use ravpdf_render::{pixmap_to_png, render_page, Color, RenderOptions};
 use ravpdf_tools::{
-    add_printer_marks, convert_to_standard, flatten_document_transparency,
-    get_document_inks, get_trap_presets, set_trap_presets, validate_standard_compliance,
-    PrinterMarksConfig, StandardConversionConfig, StandardFormat, TransparencyFlattenConfig,
-    TrapPreset,
-    add_3d_annotation, add_measurement_line_annotation, add_rich_media_annotation,
-    apply_bates_numbering, apply_text_watermark, audit_accessibility, batch_scan_to_pdf,
-    calculate_distance, compare_documents, convert_document_colors, create_portfolio,
-    embed_output_intent, execute_all_field_calculations, execute_batch_cancellable,
-    execute_preflight_fixup, execute_script, export_comments_to_csv, export_page_to_image,
-    export_to_html, export_to_plain_text, extract_3d_stream, extract_all_text,
-    extract_portfolio_item, extract_rich_media_content, generate_comparison_pdf_report,
-    generate_postscript, get_3d_annotations, get_document_comments, get_document_info,
+    add_3d_annotation, add_measurement_line_annotation, add_printer_marks,
+    add_rich_media_annotation, apply_bates_numbering, apply_text_watermark, audit_accessibility,
+    batch_scan_to_pdf, calculate_distance, compare_documents, convert_document_colors,
+    convert_to_standard, create_portfolio, embed_output_intent, execute_all_field_calculations,
+    execute_batch_cancellable, execute_preflight_fixup, execute_script, export_comments_to_csv,
+    export_page_to_image, export_to_html, export_to_plain_text, extract_3d_stream,
+    extract_all_text, extract_portfolio_item, extract_rich_media_content,
+    flatten_document_transparency, generate_comparison_pdf_report, generate_postscript,
+    get_3d_annotations, get_document_comments, get_document_info, get_document_inks,
     get_document_javascript, get_output_intents, get_portfolio, get_rich_media_annotations,
-    linearize_document, optimize_document, perform_ocr_document, redact_pattern,
-    remediate_all_automatic, run_preflight, AccessibilityStatus, ActionSequence, BatchJob,
-    BookletBinding, ExportImageFormat, JsExecutionContext, LinearUnit, MediaContent, NUpCount,
-    NUpOrder, OcrConfig, OcrOutputMode, PluginPermission, PluginRegistry, PortfolioItem,
-    PortfolioLayout, PreflightFixup, PreflightProfile, PrintJobConfig, PrintLayoutMode,
-    RichMediaActivation, RichMediaConfig, RichMediaDeactivation, SampleWatermarkPlugin, ScaleRatio,
-    ScannerJobConfig, StandardIccProfile, ThreeDConfig, ThreeDFormat, ThreeDLighting,
-    ThreeDRenderMode, ThreeDView,
+    get_trap_presets, linearize_document, optimize_document, perform_ocr_document, redact_pattern,
+    remediate_all_automatic, run_preflight, set_trap_presets, validate_standard_compliance,
+    AccessibilityStatus, ActionSequence, BatchJob, BookletBinding, ExportImageFormat,
+    JsExecutionContext, LinearUnit, MediaContent, NUpCount, NUpOrder, OcrConfig, OcrOutputMode,
+    PluginPermission, PluginRegistry, PortfolioItem, PortfolioLayout, PreflightFixup,
+    PreflightProfile, PrintJobConfig, PrintLayoutMode, PrinterMarksConfig, RichMediaActivation,
+    RichMediaConfig, RichMediaDeactivation, SampleWatermarkPlugin, ScaleRatio, ScannerJobConfig,
+    StandardConversionConfig, StandardFormat, StandardIccProfile, ThreeDConfig, ThreeDFormat,
+    ThreeDLighting, ThreeDRenderMode, ThreeDView, TransparencyFlattenConfig, TrapPreset,
 };
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(ClapParser)]
-#[command(name = "ravpdf", version = "1.0", about = "RavPDF Command-Line Utility")]
+#[command(
+    name = "ravpdf",
+    version = "1.0",
+    about = "RavPDF Command-Line Utility"
+)]
 struct Cli {
     #[arg(long, global = true, help = "Output results in JSON format")]
     json: bool,
@@ -168,7 +169,11 @@ enum Commands {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
 
-        #[arg(short, long, help = "Output text file path (prints to stdout if omitted)")]
+        #[arg(
+            short,
+            long,
+            help = "Output text file path (prints to stdout if omitted)"
+        )]
         output: Option<PathBuf>,
     },
 
@@ -201,7 +206,11 @@ enum Commands {
         #[arg(long, default_value = "", help = "Owner password (optional)")]
         owner_password: String,
 
-        #[arg(long, default_value = "aes256", help = "Encryption algorithm: aes128, aes256 (FR-14.4, FR-14.5)")]
+        #[arg(
+            long,
+            default_value = "aes256",
+            help = "Encryption algorithm: aes128, aes256 (FR-14.4, FR-14.5)"
+        )]
         algorithm: String,
     },
 
@@ -240,13 +249,25 @@ enum Commands {
         #[arg(short, long, required = true, help = "Output file path")]
         output: PathBuf,
 
-        #[arg(long, default_value = "html", help = "Export format: html, txt, png, jpg")]
+        #[arg(
+            long,
+            default_value = "html",
+            help = "Export format: html, txt, png, jpg"
+        )]
         format: String,
 
-        #[arg(long, default_value_t = 1, help = "1-based page index for image export")]
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "1-based page index for image export"
+        )]
         page: usize,
 
-        #[arg(long, default_value_t = 300.0, help = "Resolution DPI for image export")]
+        #[arg(
+            long,
+            default_value_t = 300.0,
+            help = "Resolution DPI for image export"
+        )]
         dpi: f32,
     },
 
@@ -291,13 +312,21 @@ enum Commands {
         #[arg(long, required = true, help = "End Y coordinate in PDF user points")]
         y2: f64,
 
-        #[arg(long, default_value = "in", help = "Measurement unit: pt, in, cm, mm, ft, m, yd")]
+        #[arg(
+            long,
+            default_value = "in",
+            help = "Measurement unit: pt, in, cm, mm, ft, m, yd"
+        )]
         unit: String,
 
         #[arg(long, help = "Configurable scale ratio e.g. '1:100' or '1in=10ft'")]
         scale: Option<String>,
 
-        #[arg(short, long, help = "Output path to save PDF with dimension line annotation")]
+        #[arg(
+            short,
+            long,
+            help = "Output path to save PDF with dimension line annotation"
+        )]
         output: Option<PathBuf>,
     },
 
@@ -315,7 +344,10 @@ enum Commands {
         #[arg(short, long, required = true, help = "Output PDF file")]
         output: PathBuf,
 
-        #[arg(long, help = "Linearize document for fast web view streaming (FR-02.8)")]
+        #[arg(
+            long,
+            help = "Linearize document for fast web view streaming (FR-02.8)"
+        )]
         linearize: bool,
     },
 
@@ -352,15 +384,26 @@ enum Commands {
         binarize: bool,
     },
 
-    #[command(about = "Generate PostScript or calculate print imposition (Booklet, N-Up, Poster) (FR-35)")]
+    #[command(
+        about = "Generate PostScript or calculate print imposition (Booklet, N-Up, Poster) (FR-35)"
+    )]
     Print {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
 
-        #[arg(short, long, required = true, help = "Output PostScript (.ps) file path")]
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "Output PostScript (.ps) file path"
+        )]
         output: PathBuf,
 
-        #[arg(long, default_value = "all", help = "Page range (e.g. 'all', '1-3, 5')")]
+        #[arg(
+            long,
+            default_value = "all",
+            help = "Page range (e.g. 'all', '1-3, 5')"
+        )]
         pages: String,
 
         #[arg(long, help = "Saddle-stitch booklet imposition")]
@@ -373,7 +416,9 @@ enum Commands {
     #[command(about = "List registered plugins, capabilities, and extension manifests (FR-36)")]
     Plugins {},
 
-    #[command(about = "Manage AcroForm fields, import/export data, autodetect, and tab order (FR-11)")]
+    #[command(
+        about = "Manage AcroForm fields, import/export data, autodetect, and tab order (FR-11)"
+    )]
     Form {
         #[command(subcommand)]
         action: FormCommands,
@@ -397,31 +442,55 @@ enum Commands {
         action: BatchCommands,
     },
 
-    #[command(about = "Perform Optical Character Recognition (OCR) and generate searchable text layer (FR-16)")]
+    #[command(
+        about = "Perform Optical Character Recognition (OCR) and generate searchable text layer (FR-16)"
+    )]
     Ocr {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
 
-        #[arg(short, long, required = true, help = "Output PDF file path with searchable text layer")]
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "Output PDF file path with searchable text layer"
+        )]
         output: PathBuf,
 
-        #[arg(long, default_value = "eng", help = "Recognition language code (e.g. eng, spa, fra, deu) (FR-16.3)")]
+        #[arg(
+            long,
+            default_value = "eng",
+            help = "Recognition language code (e.g. eng, spa, fra, deu) (FR-16.3)"
+        )]
         lang: String,
 
-        #[arg(long, default_value = "searchable-image", help = "Output mode: searchable-image, exact, editable (FR-16.4)")]
+        #[arg(
+            long,
+            default_value = "searchable-image",
+            help = "Output mode: searchable-image, exact, editable (FR-16.4)"
+        )]
         mode: String,
 
-        #[arg(long, default_value_t = 300, help = "Processing DPI resolution (72-600) (FR-16.8)")]
+        #[arg(
+            long,
+            default_value_t = 300,
+            help = "Processing DPI resolution (72-600) (FR-16.8)"
+        )]
         dpi: u32,
 
         #[arg(long, help = "Disable automatic page orientation correction")]
         no_rotate: bool,
 
-        #[arg(long, help = "Page range to process (e.g. '1-3, 5' 1-based, default all)")]
+        #[arg(
+            long,
+            help = "Page range to process (e.g. '1-3, 5' 1-based, default all)"
+        )]
         pages: Option<String>,
     },
 
-    #[command(about = "Digitally sign a PDF using PKCS#7/CMS detached cryptographic signatures (FR-13.1, FR-13.6)")]
+    #[command(
+        about = "Digitally sign a PDF using PKCS#7/CMS detached cryptographic signatures (FR-13.1, FR-13.6)"
+    )]
     Sign {
         #[arg(help = "Input PDF file to sign")]
         input: PathBuf,
@@ -435,7 +504,11 @@ enum Commands {
         #[arg(long, default_value = "RavPDF Authority", help = "Signer organization")]
         org: String,
 
-        #[arg(long, default_value = "signer@ravpdf.org", help = "Signer email address")]
+        #[arg(
+            long,
+            default_value = "signer@ravpdf.org",
+            help = "Signer email address"
+        )]
         email: String,
 
         #[arg(long, default_value = "Document Approval", help = "Reason for signing")]
@@ -444,56 +517,91 @@ enum Commands {
         #[arg(long, default_value = "Headquarters", help = "Location of signing")]
         location: String,
 
-        #[arg(long, default_value_t = 1, help = "1-based page index for visible signature box")]
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "1-based page index for visible signature box"
+        )]
         page: usize,
 
         #[arg(long, help = "Render a visible signature box on the specified page")]
         visible: bool,
 
-        #[arg(long, help = "Author certification signature with DocMDP restrictions (FR-13.3)")]
+        #[arg(
+            long,
+            help = "Author certification signature with DocMDP restrictions (FR-13.3)"
+        )]
         certify: bool,
 
-        #[arg(long, default_value = "no-changes", help = "Certification permission: no-changes, form-filling, annotations")]
+        #[arg(
+            long,
+            default_value = "no-changes",
+            help = "Certification permission: no-changes, form-filling, annotations"
+        )]
         permission: String,
 
-        #[arg(long, help = "Embed Document Security Store (/DSS) for Long-Term Validation (LTV) (FR-13.8)")]
+        #[arg(
+            long,
+            help = "Embed Document Security Store (/DSS) for Long-Term Validation (LTV) (FR-13.8)"
+        )]
         ltv: bool,
     },
 
-    #[command(about = "Preflight standards validation (PDF/A, Print Prepress) and automated fixups (FR-22, FR-23)")]
+    #[command(
+        about = "Preflight standards validation (PDF/A, Print Prepress) and automated fixups (FR-22, FR-23)"
+    )]
     Preflight {
         #[arg(help = "Input PDF file to audit")]
         input: PathBuf,
 
-        #[arg(long, default_value = "pdfa1b", help = "Validation profile: pdfa1b, print, quality")]
+        #[arg(
+            long,
+            default_value = "pdfa1b",
+            help = "Validation profile: pdfa1b, print, quality"
+        )]
         profile: String,
 
-        #[arg(long, help = "Automatically execute preflight fixups on non-compliant documents (FR-23.1.4)")]
+        #[arg(
+            long,
+            help = "Automatically execute preflight fixups on non-compliant documents (FR-23.1.4)"
+        )]
         fix: bool,
 
-        #[arg(short, long, help = "Output path for fixed PDF (required if --fix is set)")]
+        #[arg(
+            short,
+            long,
+            help = "Output path for fixed PDF (required if --fix is set)"
+        )]
         output: Option<PathBuf>,
     },
 
-    #[command(about = "Color management, ICC profiles, Output Intent, and color conversions (FR-24)")]
+    #[command(
+        about = "Color management, ICC profiles, Output Intent, and color conversions (FR-24)"
+    )]
     Color {
         #[command(subcommand)]
         action: ColorCommands,
     },
 
-    #[command(about = "Commercial print production, printer marks, ink management, and trap presets (FR-23.3)")]
+    #[command(
+        about = "Commercial print production, printer marks, ink management, and trap presets (FR-23.3)"
+    )]
     Prepress {
         #[command(subcommand)]
         action: PrepressCommands,
     },
 
-    #[command(about = "Standards compliance conversion and verification for PDF/A, PDF/X, and PDF/E (FR-22)")]
+    #[command(
+        about = "Standards compliance conversion and verification for PDF/A, PDF/X, and PDF/E (FR-22)"
+    )]
     Standards {
         #[command(subcommand)]
         action: StandardsCommands,
     },
 
-    #[command(about = "Extract text spans with coordinates, font, size, and color on a page (FR-04.1, FR-04.3)")]
+    #[command(
+        about = "Extract text spans with coordinates, font, size, and color on a page (FR-04.1, FR-04.3)"
+    )]
     TextSpans {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
@@ -502,7 +610,9 @@ enum Commands {
         page: usize,
     },
 
-    #[command(about = "In-place text editing and font/color replacement on a page (FR-04.1, FR-04.3, FR-04.12)")]
+    #[command(
+        about = "In-place text editing and font/color replacement on a page (FR-04.1, FR-04.3, FR-04.12)"
+    )]
     EditText {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
@@ -519,7 +629,10 @@ enum Commands {
         #[arg(long, required = true, help = "Replacement text")]
         replace: String,
 
-        #[arg(long, help = "New font name (e.g. Helvetica-Bold, Times-Roman, Courier)")]
+        #[arg(
+            long,
+            help = "New font name (e.g. Helvetica-Bold, Times-Roman, Courier)"
+        )]
         font: Option<String>,
 
         #[arg(long, help = "New font size in points")]
@@ -529,7 +642,9 @@ enum Commands {
         color: Option<String>,
     },
 
-    #[command(about = "Create a multi-page PDF document from Markdown with headings, lists, quotes, and code blocks (FR-02.5, FR-02.6, FR-03.1.6)")]
+    #[command(
+        about = "Create a multi-page PDF document from Markdown with headings, lists, quotes, and code blocks (FR-02.5, FR-02.6, FR-03.1.6)"
+    )]
     FromMarkdown {
         #[arg(help = "Input Markdown file path")]
         input: PathBuf,
@@ -547,7 +662,9 @@ enum Commands {
         margin: f64,
     },
 
-    #[command(about = "Inspect and list image XObjects on a page or document (FR-05.1 - FR-05.12)")]
+    #[command(
+        about = "Inspect and list image XObjects on a page or document (FR-05.1 - FR-05.12)"
+    )]
     Images {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
@@ -556,7 +673,9 @@ enum Commands {
         page: Option<usize>,
     },
 
-    #[command(about = "Edit, transform, replace, crop, or delete images on a page (FR-05.2 - FR-05.11)")]
+    #[command(
+        about = "Edit, transform, replace, crop, or delete images on a page (FR-05.2 - FR-05.11)"
+    )]
     EditImage {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
@@ -597,7 +716,10 @@ enum Commands {
         #[arg(long, help = "Opacity from 0.0 to 1.0 (FR-05.10)")]
         opacity: Option<f32>,
 
-        #[arg(long, help = "Z-order adjustment: front, back, forward, backward (FR-05.11)")]
+        #[arg(
+            long,
+            help = "Z-order adjustment: front, back, forward, backward (FR-05.11)"
+        )]
         z_order: Option<String>,
     },
 
@@ -612,7 +734,11 @@ enum Commands {
         #[arg(long, default_value_t = 1, help = "1-based page index")]
         page: usize,
 
-        #[arg(long, default_value = "Approved", help = "Stamp type: Approved, Draft, Confidential, Void, SignHere, etc.")]
+        #[arg(
+            long,
+            default_value = "Approved",
+            help = "Stamp type: Approved, Draft, Confidential, Void, SignHere, etc."
+        )]
         stamp_type: String,
 
         #[arg(long, help = "Author / reviewer identity name")]
@@ -624,7 +750,11 @@ enum Commands {
         #[arg(long, help = "Custom stamp text override")]
         text: Option<String>,
 
-        #[arg(long, default_value = "72,650,180,56", help = "Stamp rectangle: 'x,y,w,h'")]
+        #[arg(
+            long,
+            default_value = "72,650,180,56",
+            help = "Stamp rectangle: 'x,y,w,h'"
+        )]
         rect: String,
 
         #[arg(long, default_value_t = -8.0, help = "Tilt rotation in degrees (e.g. -8.0)")]
@@ -637,7 +767,9 @@ enum Commands {
         note: Option<String>,
     },
 
-    #[command(about = "Compare two PDF documents and generate a difference report (FR-17, FR-37.2)")]
+    #[command(
+        about = "Compare two PDF documents and generate a difference report (FR-17, FR-37.2)"
+    )]
     Compare {
         #[arg(help = "Path to original / reference PDF document")]
         original: PathBuf,
@@ -645,23 +777,39 @@ enum Commands {
         #[arg(help = "Path to modified / revised PDF document")]
         modified: PathBuf,
 
-        #[arg(short, long, help = "Output path for difference report (.pdf or .json)")]
+        #[arg(
+            short,
+            long,
+            help = "Output path for difference report (.pdf or .json)"
+        )]
         output: Option<PathBuf>,
     },
 
-    #[command(about = "Extract embedded image XObjects from a PDF into an output directory (FR-05.9, FR-37.2)")]
+    #[command(
+        about = "Extract embedded image XObjects from a PDF into an output directory (FR-05.9, FR-37.2)"
+    )]
     ExtractImages {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
 
-        #[arg(short, long, required = true, help = "Output directory for extracted images")]
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "Output directory for extracted images"
+        )]
         output: PathBuf,
 
-        #[arg(long, help = "1-based page number to extract from (extracts all pages if omitted)")]
+        #[arg(
+            long,
+            help = "1-based page number to extract from (extracts all pages if omitted)"
+        )]
         page: Option<usize>,
     },
 
-    #[command(about = "Convert an external document or image (TXT, MD, HTML, PNG, JPG, BMP) to PDF (FR-02.2, FR-03.1, FR-37.2)")]
+    #[command(
+        about = "Convert an external document or image (TXT, MD, HTML, PNG, JPG, BMP) to PDF (FR-02.2, FR-03.1, FR-37.2)"
+    )]
     Convert {
         #[arg(help = "Input file to convert (.txt, .md, .html, .png, .jpg, etc.)")]
         input: PathBuf,
@@ -673,16 +821,24 @@ enum Commands {
         title: Option<String>,
     },
 
-    #[command(about = "Validate document against ISO standard profile (pdfa-1b, pdfa-2b, pdfx-1a, pdfx-4, pdfe-1, etc.) (FR-22.4, FR-37.2)")]
+    #[command(
+        about = "Validate document against ISO standard profile (pdfa-1b, pdfa-2b, pdfx-1a, pdfx-4, pdfe-1, etc.) (FR-22.4, FR-37.2)"
+    )]
     Validate {
         #[arg(help = "Input PDF file to validate")]
         input: PathBuf,
 
-        #[arg(long, default_value = "pdfa-1b", help = "ISO Standard: pdfa-1b, pdfa-2b, pdfa-3b, pdfx-1a, pdfx-3, pdfx-4, pdfe-1")]
+        #[arg(
+            long,
+            default_value = "pdfa-1b",
+            help = "ISO Standard: pdfa-1b, pdfa-2b, pdfa-3b, pdfx-1a, pdfx-3, pdfx-4, pdfe-1"
+        )]
         standard: String,
     },
 
-    #[command(about = "Add vector shapes (Rectangle, Circle, Line, Arrow, Polygon, Polyline) to a page (FR-09, FR-37.2)")]
+    #[command(
+        about = "Add vector shapes (Rectangle, Circle, Line, Arrow, Polygon, Polyline) to a page (FR-09, FR-37.2)"
+    )]
     Shape {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
@@ -693,16 +849,28 @@ enum Commands {
         #[arg(long, default_value_t = 1, help = "1-based page index")]
         page: usize,
 
-        #[arg(long, default_value = "rect", help = "Shape type: rect, circle, line, arrow, polygon, polyline")]
+        #[arg(
+            long,
+            default_value = "rect",
+            help = "Shape type: rect, circle, line, arrow, polygon, polyline"
+        )]
         shape: String,
 
-        #[arg(long, default_value = "72,600,200,700", help = "Bounding box: 'x1,y1,x2,y2' (or line start/end: 'x1,y1,x2,y2')")]
+        #[arg(
+            long,
+            default_value = "72,600,200,700",
+            help = "Bounding box: 'x1,y1,x2,y2' (or line start/end: 'x1,y1,x2,y2')"
+        )]
         rect: String,
 
         #[arg(long, help = "Polygon/polyline vertices: 'x1,y1;x2,y2;x3,y3'")]
         vertices: Option<String>,
 
-        #[arg(long, default_value = "0.8,0.1,0.1", help = "Stroke RGB color: 'r,g,b'")]
+        #[arg(
+            long,
+            default_value = "0.8,0.1,0.1",
+            help = "Stroke RGB color: 'r,g,b'"
+        )]
         color: String,
 
         #[arg(long, help = "Fill RGB color: 'r,g,b'")]
@@ -732,7 +900,11 @@ enum Commands {
         #[arg(long, default_value_t = 1, help = "1-based page index")]
         page: usize,
 
-        #[arg(long, required = true, help = "Strokes coordinates: 'x1,y1;x2,y2;... | x3,y3;x4,y4'")]
+        #[arg(
+            long,
+            required = true,
+            help = "Strokes coordinates: 'x1,y1;x2,y2;... | x3,y3;x4,y4'"
+        )]
         strokes: String,
 
         #[arg(long, default_value = "0.1,0.3,0.8", help = "Ink RGB color: 'r,g,b'")]
@@ -772,7 +944,9 @@ enum Commands {
         radius: f64,
     },
 
-    #[command(about = "Add a callout annotation with text box and leader line pointing to an area (FR-08.1.3, FR-37.2)")]
+    #[command(
+        about = "Add a callout annotation with text box and leader line pointing to an area (FR-08.1.3, FR-37.2)"
+    )]
     Callout {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
@@ -786,20 +960,37 @@ enum Commands {
         #[arg(long, required = true, help = "Callout text content")]
         text: String,
 
-        #[arg(long, default_value = "200,600,160,40", help = "Text box rectangle: 'x,y,w,h'")]
+        #[arg(
+            long,
+            default_value = "200,600,160,40",
+            help = "Text box rectangle: 'x,y,w,h'"
+        )]
         rect: String,
 
-        #[arg(long, default_value = "100,500", help = "Leader line target point: 'x,y'")]
+        #[arg(
+            long,
+            default_value = "100,500",
+            help = "Leader line target point: 'x,y'"
+        )]
         leader: String,
 
-        #[arg(long, help = "Leader line knee point: 'x,y' (optional intermediate bend)")]
+        #[arg(
+            long,
+            help = "Leader line knee point: 'x,y' (optional intermediate bend)"
+        )]
         knee: Option<String>,
 
-        #[arg(long, default_value = "0.2,0.5,0.8", help = "Border & line RGB color: 'r,g,b'")]
+        #[arg(
+            long,
+            default_value = "0.2,0.5,0.8",
+            help = "Border & line RGB color: 'r,g,b'"
+        )]
         color: String,
     },
 
-    #[command(about = "Add a typewriter text annotation directly onto a page (FR-08.1.4, FR-37.2)")]
+    #[command(
+        about = "Add a typewriter text annotation directly onto a page (FR-08.1.4, FR-37.2)"
+    )]
     Typewriter {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
@@ -823,7 +1014,9 @@ enum Commands {
         color: String,
     },
 
-    #[command(about = "Add standard text annotations and markups (Note, Highlight, Underline, StrikeOut, Square, Circle) (FR-08, FR-09, FR-37.2)")]
+    #[command(
+        about = "Add standard text annotations and markups (Note, Highlight, Underline, StrikeOut, Square, Circle) (FR-08, FR-09, FR-37.2)"
+    )]
     Annot {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
@@ -834,10 +1027,18 @@ enum Commands {
         #[arg(long, default_value_t = 1, help = "1-based page index")]
         page: usize,
 
-        #[arg(long, default_value = "highlight", help = "Annotation subtype: note, highlight, underline, strikeout, square, circle")]
+        #[arg(
+            long,
+            default_value = "highlight",
+            help = "Annotation subtype: note, highlight, underline, strikeout, square, circle"
+        )]
         annot_type: String,
 
-        #[arg(long, default_value = "72,700,200,720", help = "Annotation rectangle: 'x1,y1,x2,y2'")]
+        #[arg(
+            long,
+            default_value = "72,700,200,720",
+            help = "Annotation rectangle: 'x1,y1,x2,y2'"
+        )]
         rect: String,
 
         #[arg(long, help = "Text content / comment string")]
@@ -856,12 +1057,19 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum PrepressCommands {
-    #[command(about = "Add prepress printer marks (trim, bleed, registration bullseyes, color bars, page info) (FR-23.3.4)")]
+    #[command(
+        about = "Add prepress printer marks (trim, bleed, registration bullseyes, color bars, page info) (FR-23.3.4)"
+    )]
     Marks {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
 
-        #[arg(short, long, required = true, help = "Output PDF file with printer marks")]
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "Output PDF file with printer marks"
+        )]
         output: PathBuf,
 
         #[arg(long, default_value_t = true, help = "Include trim corner ticks")]
@@ -870,19 +1078,39 @@ enum PrepressCommands {
         #[arg(long, default_value_t = true, help = "Include bleed corner ticks")]
         bleed: bool,
 
-        #[arg(long, default_value_t = true, help = "Include registration bullseye targets")]
+        #[arg(
+            long,
+            default_value_t = true,
+            help = "Include registration bullseye targets"
+        )]
         registration: bool,
 
-        #[arg(long, default_value_t = true, help = "Include CMYK tint step color bars")]
+        #[arg(
+            long,
+            default_value_t = true,
+            help = "Include CMYK tint step color bars"
+        )]
         color_bars: bool,
 
-        #[arg(long, default_value_t = true, help = "Include page title and numbering info in slug")]
+        #[arg(
+            long,
+            default_value_t = true,
+            help = "Include page title and numbering info in slug"
+        )]
         info: bool,
 
-        #[arg(long, default_value_t = 36.0, help = "Slug margin in points added outside the page (default: 36.0 pt = 0.5 in)")]
+        #[arg(
+            long,
+            default_value_t = 36.0,
+            help = "Slug margin in points added outside the page (default: 36.0 pt = 0.5 in)"
+        )]
         slug_margin: f64,
 
-        #[arg(long, default_value_t = 9.0, help = "Bleed offset in points (default: 9.0 pt = 1/8 in)")]
+        #[arg(
+            long,
+            default_value_t = 9.0,
+            help = "Bleed offset in points (default: 9.0 pt = 1/8 in)"
+        )]
         bleed_offset: f64,
     },
 
@@ -892,15 +1120,26 @@ enum PrepressCommands {
         input: PathBuf,
     },
 
-    #[command(about = "Flatten document transparency across ExtGState and page groups (FR-23.3.3)")]
+    #[command(
+        about = "Flatten document transparency across ExtGState and page groups (FR-23.3.3)"
+    )]
     Flatten {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
 
-        #[arg(short, long, required = true, help = "Output PDF file with flattened transparency")]
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "Output PDF file with flattened transparency"
+        )]
         output: PathBuf,
 
-        #[arg(long, default_value_t = 75, help = "Raster/Vector balance from 0 (all raster) to 100 (keep vectors)")]
+        #[arg(
+            long,
+            default_value_t = 75,
+            help = "Raster/Vector balance from 0 (all raster) to 100 (keep vectors)"
+        )]
         balance: u8,
     },
 
@@ -925,7 +1164,9 @@ enum PrepressCommands {
 
 #[derive(Subcommand)]
 enum StandardsCommands {
-    #[command(about = "Convert document to ISO standard format (PDF/A, PDF/X, PDF/E) (FR-22.1, FR-22.2, FR-22.3, FR-22.5)")]
+    #[command(
+        about = "Convert document to ISO standard format (PDF/A, PDF/X, PDF/E) (FR-22.1, FR-22.2, FR-22.3, FR-22.5)"
+    )]
     Convert {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
@@ -933,10 +1174,18 @@ enum StandardsCommands {
         #[arg(short, long, required = true, help = "Output conformant PDF file")]
         output: PathBuf,
 
-        #[arg(long, default_value = "pdfa-1b", help = "Target format: pdfa-1b, pdfa-2b, pdfa-3b, pdfx-1a, pdfx-3, pdfx-4, pdfe-1")]
+        #[arg(
+            long,
+            default_value = "pdfa-1b",
+            help = "Target format: pdfa-1b, pdfa-2b, pdfa-3b, pdfx-1a, pdfx-3, pdfx-4, pdfe-1"
+        )]
         format: String,
 
-        #[arg(long, default_value = "srgb", help = "ICC profile for OutputIntent: srgb, swop, fogra39, gracol, japancolor")]
+        #[arg(
+            long,
+            default_value = "srgb",
+            help = "ICC profile for OutputIntent: srgb, swop, fogra39, gracol, japancolor"
+        )]
         icc: String,
     },
 
@@ -945,7 +1194,11 @@ enum StandardsCommands {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
 
-        #[arg(long, default_value = "pdfa-1b", help = "Target format to validate: pdfa-1b, pdfa-2b, pdfa-3b, pdfx-1a, pdfx-3, pdfx-4, pdfe-1")]
+        #[arg(
+            long,
+            default_value = "pdfa-1b",
+            help = "Target format to validate: pdfa-1b, pdfa-2b, pdfa-3b, pdfx-1a, pdfx-3, pdfx-4, pdfe-1"
+        )]
         format: String,
     },
 }
@@ -960,10 +1213,18 @@ enum ColorCommands {
         #[arg(short, long, required = true, help = "Output PDF file")]
         output: PathBuf,
 
-        #[arg(long, default_value = "swop", help = "ICC Profile: srgb, adobergb, p3, swop, fogra39, gracol, japancolor, dotgain20")]
+        #[arg(
+            long,
+            default_value = "swop",
+            help = "ICC Profile: srgb, adobergb, p3, swop, fogra39, gracol, japancolor, dotgain20"
+        )]
         profile: String,
 
-        #[arg(long, default_value = "U.S. Web Coated (SWOP) v2", help = "Output condition identifier")]
+        #[arg(
+            long,
+            default_value = "U.S. Web Coated (SWOP) v2",
+            help = "Output condition identifier"
+        )]
         condition: String,
 
         #[arg(long, default_value = "http://www.color.org", help = "Registry name")]
@@ -984,7 +1245,11 @@ enum ColorCommands {
         #[arg(short, long, required = true, help = "Output PDF file")]
         output: PathBuf,
 
-        #[arg(long, default_value = "DeviceCMYK", help = "Target color space: DeviceCMYK, DeviceRGB, DeviceGray")]
+        #[arg(
+            long,
+            default_value = "DeviceCMYK",
+            help = "Target color space: DeviceCMYK, DeviceRGB, DeviceGray"
+        )]
         target: String,
     },
 }
@@ -999,7 +1264,11 @@ enum FormCommands {
         #[arg(short, long, required = true, help = "Output data file path")]
         output: PathBuf,
 
-        #[arg(long, default_value = "json", help = "Data format: fdf, xfdf, csv, xml, json")]
+        #[arg(
+            long,
+            default_value = "json",
+            help = "Data format: fdf, xfdf, csv, xml, json"
+        )]
         format: String,
     },
 
@@ -1014,7 +1283,10 @@ enum FormCommands {
         #[arg(short, long, required = true, help = "Output PDF file path")]
         output: PathBuf,
 
-        #[arg(long, help = "Data format: fdf, xfdf, csv, xml, json (inferred from extension if omitted)")]
+        #[arg(
+            long,
+            help = "Data format: fdf, xfdf, csv, xml, json (inferred from extension if omitted)"
+        )]
         format: Option<String>,
     },
 
@@ -1023,10 +1295,18 @@ enum FormCommands {
         #[arg(help = "Input PDF file")]
         input: PathBuf,
 
-        #[arg(short, long, required = true, help = "Output PDF file with fields applied")]
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "Output PDF file with fields applied"
+        )]
         output: PathBuf,
 
-        #[arg(long, help = "1-based page number to detect on (or all pages if omitted)")]
+        #[arg(
+            long,
+            help = "1-based page number to detect on (or all pages if omitted)"
+        )]
         page: Option<usize>,
     },
 
@@ -1038,7 +1318,11 @@ enum FormCommands {
         #[arg(short, long, required = true, help = "Output PDF file")]
         output: PathBuf,
 
-        #[arg(long, default_value = "row", help = "Tab order strategy: row, column, structure, manual")]
+        #[arg(
+            long,
+            default_value = "row",
+            help = "Tab order strategy: row, column, structure, manual"
+        )]
         order: String,
 
         #[arg(long, help = "1-based page number (or all pages if omitted)")]
@@ -1056,13 +1340,21 @@ enum MediaCommands {
         #[arg(short, long, required = true, help = "Output PDF file")]
         output: PathBuf,
 
-        #[arg(long, required = true, help = "Media file path (MP4, MP3, MOV, AAC) or streaming URL")]
+        #[arg(
+            long,
+            required = true,
+            help = "Media file path (MP4, MP3, MOV, AAC) or streaming URL"
+        )]
         media: String,
 
         #[arg(long, default_value_t = 1, help = "1-based page index")]
         page: usize,
 
-        #[arg(long, default_value = "72,400,360,600", help = "Annotation bounding box: x1,y1,x2,y2")]
+        #[arg(
+            long,
+            default_value = "72,400,360,600",
+            help = "Annotation bounding box: x1,y1,x2,y2"
+        )]
         rect: String,
 
         #[arg(long, help = "Auto-play on activation")]
@@ -1095,7 +1387,11 @@ enum MediaCommands {
         #[arg(long, default_value_t = 1, help = "1-based page index")]
         page: usize,
 
-        #[arg(long, default_value_t = 0, help = "0-based annotation index on the page")]
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "0-based annotation index on the page"
+        )]
         index: usize,
 
         #[arg(short, long, required = true, help = "Output media file path")]
@@ -1119,13 +1415,25 @@ enum ThreeDCommands {
         #[arg(long, default_value_t = 1, help = "1-based page index")]
         page: usize,
 
-        #[arg(long, default_value = "72,300,400,600", help = "Annotation bounding box: x1,y1,x2,y2")]
+        #[arg(
+            long,
+            default_value = "72,300,400,600",
+            help = "Annotation bounding box: x1,y1,x2,y2"
+        )]
         rect: String,
 
-        #[arg(long, default_value = "solid", help = "Render mode: solid, wireframe, transparent, shaded, etc.")]
+        #[arg(
+            long,
+            default_value = "solid",
+            help = "Render mode: solid, wireframe, transparent, shaded, etc."
+        )]
         render_mode: String,
 
-        #[arg(long, default_value = "day", help = "Lighting preset: day, night, white, cad, headlamp, etc.")]
+        #[arg(
+            long,
+            default_value = "day",
+            help = "Lighting preset: day, night, white, cad, headlamp, etc."
+        )]
         lighting: String,
     },
 
@@ -1146,31 +1454,58 @@ enum ThreeDCommands {
         #[arg(long, default_value_t = 1, help = "1-based page index")]
         page: usize,
 
-        #[arg(long, default_value_t = 0, help = "0-based annotation index on the page")]
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "0-based annotation index on the page"
+        )]
         index: usize,
 
-        #[arg(short, long, required = true, help = "Output model file path (.u3d or .prc)")]
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "Output model file path (.u3d or .prc)"
+        )]
         output: PathBuf,
     },
 }
 
 #[derive(Subcommand)]
 enum BatchCommands {
-    #[command(about = "Execute a multi-step Action Wizard sequence across PDF files (FR-30.1, FR-30.2)")]
+    #[command(
+        about = "Execute a multi-step Action Wizard sequence across PDF files (FR-30.1, FR-30.2)"
+    )]
     Run {
         #[arg(required = true, help = "Input PDF files to process")]
         inputs: Vec<PathBuf>,
 
-        #[arg(short, long, required = true, help = "Path to ActionSequence JSON recipe file")]
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "Path to ActionSequence JSON recipe file"
+        )]
         sequence: PathBuf,
 
-        #[arg(short, long, required = true, help = "Output directory for processed files")]
+        #[arg(
+            short,
+            long,
+            required = true,
+            help = "Output directory for processed files"
+        )]
         output: PathBuf,
     },
 
-    #[command(about = "Generate a predefined Action Wizard sequence template JSON (FR-30.3, FR-30.7)")]
+    #[command(
+        about = "Generate a predefined Action Wizard sequence template JSON (FR-30.3, FR-30.7)"
+    )]
     Template {
-        #[arg(long, default_value = "distribute", help = "Template name: distribute, archive, web")]
+        #[arg(
+            long,
+            default_value = "distribute",
+            help = "Template name: distribute, archive, web"
+        )]
         name: String,
 
         #[arg(short, long, required = true, help = "Output JSON file path")]
@@ -1224,8 +1559,14 @@ fn parse_scale_ratio(s: &str) -> ScaleRatio {
         }
     } else if let Some((left, right)) = s.split_once('=') {
         let parse_val_unit = |text: &str| -> (f64, LinearUnit) {
-            let num_str: String = text.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-            let unit_str: String = text.chars().skip_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            let num_str: String = text
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            let unit_str: String = text
+                .chars()
+                .skip_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
             let val = num_str.parse::<f64>().unwrap_or(1.0);
             let unit = LinearUnit::parse_str(&unit_str).unwrap_or(LinearUnit::Inches);
             (val, unit)
@@ -1314,7 +1655,10 @@ fn main() -> Result<()> {
             for part in pages.split(',') {
                 let bounds: Vec<&str> = part.split('-').collect();
                 if bounds.len() == 2 {
-                    if let (Ok(s), Ok(e)) = (bounds[0].trim().parse::<usize>(), bounds[1].trim().parse::<usize>()) {
+                    if let (Ok(s), Ok(e)) = (
+                        bounds[0].trim().parse::<usize>(),
+                        bounds[1].trim().parse::<usize>(),
+                    ) {
                         if s >= 1 && e >= s {
                             ranges.push((s - 1, e - 1));
                         }
@@ -1368,7 +1712,11 @@ fn main() -> Result<()> {
             }
 
             doc.save_to_file(&output)?;
-            println!("Rotated pages by {}° and saved to {}", angle, output.display());
+            println!(
+                "Rotated pages by {}° and saved to {}",
+                angle,
+                output.display()
+            );
         }
 
         Commands::Watermark {
@@ -1450,9 +1798,19 @@ fn main() -> Result<()> {
                 "aes128" | "128" => EncryptionAlgorithm::Aes128,
                 _ => EncryptionAlgorithm::Aes256,
             };
-            encrypt_document_with_algorithm(&mut doc, &password, owner, Permissions::all_permitted(), algo)?;
+            encrypt_document_with_algorithm(
+                &mut doc,
+                &password,
+                owner,
+                Permissions::all_permitted(),
+                algo,
+            )?;
             doc.save_to_file(&output)?;
-            println!("Document encrypted with {}: {}", algo.display_name(), output.display());
+            println!(
+                "Document encrypted with {}: {}",
+                algo.display_name(),
+                output.display()
+            );
         }
 
         Commands::Decrypt {
@@ -1517,7 +1875,12 @@ fn main() -> Result<()> {
                     }
                     let bytes = export_page_to_image(&doc, page - 1, dpi, ExportImageFormat::Png)?;
                     fs::write(&output, bytes)?;
-                    println!("Exported page {} as PNG ({:.0} DPI) to {}", page, dpi, output.display());
+                    println!(
+                        "Exported page {} as PNG ({:.0} DPI) to {}",
+                        page,
+                        dpi,
+                        output.display()
+                    );
                 }
                 "jpg" | "jpeg" => {
                     if page == 0 || page > doc.page_count() {
@@ -1526,10 +1889,18 @@ fn main() -> Result<()> {
                     }
                     let bytes = export_page_to_image(&doc, page - 1, dpi, ExportImageFormat::Jpeg)?;
                     fs::write(&output, bytes)?;
-                    println!("Exported page {} as JPEG ({:.0} DPI) to {}", page, dpi, output.display());
+                    println!(
+                        "Exported page {} as JPEG ({:.0} DPI) to {}",
+                        page,
+                        dpi,
+                        output.display()
+                    );
                 }
                 other => {
-                    eprintln!("Error: Unsupported export format '{}'. Choose from: html, txt, png, jpg", other);
+                    eprintln!(
+                        "Error: Unsupported export format '{}'. Choose from: html, txt, png, jpg",
+                        other
+                    );
                     std::process::exit(1);
                 }
             }
@@ -1542,7 +1913,10 @@ fn main() -> Result<()> {
         } => {
             let mut doc = PdfDocument::load_from_file(&input)?;
             let report = if auto_fix {
-                let default_title = input.file_stem().and_then(|s| s.to_str()).unwrap_or("Accessible Document");
+                let default_title = input
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Accessible Document");
                 let remediated = remediate_all_automatic(&mut doc, default_title, "en-US")?;
                 if let Some(ref out_path) = output {
                     doc.save_to_file(out_path)?;
@@ -1558,9 +1932,18 @@ fn main() -> Result<()> {
             } else {
                 println!("=== PDF/UA & WCAG 2.1 Accessibility Audit ===");
                 println!("Document: {}", input.display());
-                println!("Status: {}", if report.is_compliant { "COMPLIANT" } else { "NON-COMPLIANT" });
-                println!("Results: {} Passed, {} Failed, {} Needs Manual Check\n",
-                    report.passed_count, report.failed_count, report.manual_check_count);
+                println!(
+                    "Status: {}",
+                    if report.is_compliant {
+                        "COMPLIANT"
+                    } else {
+                        "NON-COMPLIANT"
+                    }
+                );
+                println!(
+                    "Results: {} Passed, {} Failed, {} Needs Manual Check\n",
+                    report.passed_count, report.failed_count, report.manual_check_count
+                );
 
                 for rule in &report.rules {
                     let tag = match rule.status {
@@ -1573,24 +1956,34 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Comments {
-            input,
-            output,
-        } => {
+        Commands::Comments { input, output } => {
             let doc = PdfDocument::load_from_file(&input)?;
             let comments = get_document_comments(&doc)?;
 
             if let Some(ref out_path) = output {
                 let csv = export_comments_to_csv(&comments);
                 fs::write(out_path, csv)?;
-                println!("Exported {} comments to CSV: {}", comments.len(), out_path.display());
+                println!(
+                    "Exported {} comments to CSV: {}",
+                    comments.len(),
+                    out_path.display()
+                );
             } else if cli.json {
                 println!("{}", serde_json::to_string_pretty(&comments).unwrap());
             } else {
-                println!("=== Document Review Comments (Total: {}) ===", comments.len());
+                println!(
+                    "=== Document Review Comments (Total: {}) ===",
+                    comments.len()
+                );
                 for (i, c) in comments.iter().enumerate() {
-                    println!("#{}. [Page {}] {}: {} - \"{}\"",
-                        i + 1, c.page_index + 1, c.comment_type, c.author, c.contents);
+                    println!(
+                        "#{}. [Page {}] {}: {} - \"{}\"",
+                        i + 1,
+                        c.page_index + 1,
+                        c.comment_type,
+                        c.author,
+                        c.contents
+                    );
                 }
             }
         }
@@ -1628,7 +2021,10 @@ fn main() -> Result<()> {
                 println!("=== RavPDF Dimension Measurement ===");
                 println!("Document: {}", input.display());
                 println!("Page: {}", page);
-                println!("From: ({:.1}, {:.1}) pt -> To: ({:.1}, {:.1}) pt", x1, y1, x2, y2);
+                println!(
+                    "From: ({:.1}, {:.1}) pt -> To: ({:.1}, {:.1}) pt",
+                    x1, y1, x2, y2
+                );
                 println!("Scale: {}", scale_ratio.to_display_string());
                 println!("Raw Distance: {:.2} pt", dist_res.points_distance);
                 println!("Measured Result: {}", dist_res.formatted);
@@ -1656,7 +2052,11 @@ fn main() -> Result<()> {
 
                 let doc = create_portfolio(&items, port_layout, &title, None)?;
                 doc.save_to_file(&output)?;
-                println!("Created PDF Portfolio with {} files: {}", items.len(), output.display());
+                println!(
+                    "Created PDF Portfolio with {} files: {}",
+                    items.len(),
+                    output.display()
+                );
             }
 
             PortfolioCommands::List { input } => {
@@ -1675,7 +2075,13 @@ fn main() -> Result<()> {
                     for (i, item) in portfolio.items.iter().enumerate() {
                         let size_kb = (item.size as f64) / 1024.0;
                         let desc_str = item.description.as_deref().unwrap_or("-");
-                        println!("#{}. {} | {:.1} KB | {}", i + 1, item.filename, size_kb, desc_str);
+                        println!(
+                            "#{}. {} | {:.1} KB | {}",
+                            i + 1,
+                            item.filename,
+                            size_kb,
+                            desc_str
+                        );
                     }
                 }
             }
@@ -1705,7 +2111,11 @@ fn main() -> Result<()> {
                         fs::write(&target_path, &item.data)?;
                         extracted_count += 1;
                     }
-                    println!("Extracted all {} files to {}", extracted_count, output.display());
+                    println!(
+                        "Extracted all {} files to {}",
+                        extracted_count,
+                        output.display()
+                    );
                 }
             }
         },
@@ -1721,7 +2131,10 @@ fn main() -> Result<()> {
             if linearize {
                 let lin_bytes = linearize_document(&doc)?;
                 fs::write(&output, lin_bytes)?;
-                println!("Optimized and linearized PDF written to {}", output.display());
+                println!(
+                    "Optimized and linearized PDF written to {}",
+                    output.display()
+                );
             } else {
                 doc.save_to_file(&output)?;
                 println!("Optimized PDF written to {}", output.display());
@@ -1733,7 +2146,11 @@ fn main() -> Result<()> {
                 println!("=== Optimization Summary ===");
                 println!("Original Size: {} bytes", stats.original_bytes);
                 println!("Optimized Size: {} bytes", stats.optimized_bytes);
-                println!("Saved: {} bytes ({:.1}% reduction)", stats.saved_bytes(), stats.reduction_percent());
+                println!(
+                    "Saved: {} bytes ({:.1}% reduction)",
+                    stats.saved_bytes(),
+                    stats.reduction_percent()
+                );
                 println!("Streams Compressed: {}", stats.streams_compressed);
                 println!("Dead Objects Pruned: {}", stats.objects_removed);
             }
@@ -1805,7 +2222,11 @@ fn main() -> Result<()> {
 
             let doc = batch_scan_to_pdf(&images, &config)?;
             doc.save_to_file(&output)?;
-            println!("Processed {} scanned page(s) -> {}", inputs.len(), output.display());
+            println!(
+                "Processed {} scanned page(s) -> {}",
+                inputs.len(),
+                output.display()
+            );
         }
 
         Commands::Print {
@@ -1866,7 +2287,10 @@ fn main() -> Result<()> {
                 for p in plugins {
                     println!("ID: {}", p.manifest.id);
                     println!("Name: {}", p.manifest.name);
-                    println!("Version: {} (Min RavPDF: {})", p.manifest.version, p.manifest.min_ravpdf_version);
+                    println!(
+                        "Version: {} (Min RavPDF: {})",
+                        p.manifest.version, p.manifest.min_ravpdf_version
+                    );
                     println!("Author: {}", p.manifest.author);
                     println!("Description: {}", p.manifest.description);
                     println!("Enabled: {}", p.enabled);
@@ -1887,11 +2311,14 @@ fn main() -> Result<()> {
                 let exported = export_form_data(&doc, fmt)?;
                 fs::write(&output, exported)?;
                 if cli.json {
-                    println!("{}", serde_json::json!({
-                        "status": "success",
-                        "format": format!("{:?}", fmt),
-                        "output": output.to_string_lossy(),
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "success",
+                            "format": format!("{:?}", fmt),
+                            "output": output.to_string_lossy(),
+                        })
+                    );
                 } else {
                     println!("Exported form data ({:?}) to {}", fmt, output.display());
                 }
@@ -1916,14 +2343,22 @@ fn main() -> Result<()> {
                 let updated = import_form_data(&mut doc, &raw_data, fmt)?;
                 doc.save_to_file(&output)?;
                 if cli.json {
-                    println!("{}", serde_json::json!({
-                        "status": "success",
-                        "fields_updated": updated,
-                        "format": format!("{:?}", fmt),
-                        "output": output.to_string_lossy(),
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "success",
+                            "fields_updated": updated,
+                            "format": format!("{:?}", fmt),
+                            "output": output.to_string_lossy(),
+                        })
+                    );
                 } else {
-                    println!("Imported {} form field(s) ({:?}) -> {}", updated, fmt, output.display());
+                    println!(
+                        "Imported {} form field(s) ({:?}) -> {}",
+                        updated,
+                        fmt,
+                        output.display()
+                    );
                 }
             }
 
@@ -1955,13 +2390,20 @@ fn main() -> Result<()> {
                 doc.save_to_file(&output)?;
 
                 if cli.json {
-                    println!("{}", serde_json::json!({
-                        "status": "success",
-                        "fields_detected": detected_count,
-                        "output": output.to_string_lossy(),
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "success",
+                            "fields_detected": detected_count,
+                            "output": output.to_string_lossy(),
+                        })
+                    );
                 } else {
-                    println!("Auto-detected and applied {} form field(s) -> {}", detected_count, output.display());
+                    println!(
+                        "Auto-detected and applied {} form field(s) -> {}",
+                        detected_count,
+                        output.display()
+                    );
                 }
             }
 
@@ -1991,13 +2433,20 @@ fn main() -> Result<()> {
                 doc.save_to_file(&output)?;
 
                 if cli.json {
-                    println!("{}", serde_json::json!({
-                        "status": "success",
-                        "tab_order": format!("{:?}", tab_order),
-                        "output": output.to_string_lossy(),
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "success",
+                            "tab_order": format!("{:?}", tab_order),
+                            "output": output.to_string_lossy(),
+                        })
+                    );
                 } else {
-                    println!("Applied {:?} tab order and saved to {}", tab_order, output.display());
+                    println!(
+                        "Applied {:?} tab order and saved to {}",
+                        tab_order,
+                        output.display()
+                    );
                 }
             }
         },
@@ -2074,12 +2523,15 @@ fn main() -> Result<()> {
                 doc.save_to_file(&output)?;
 
                 if cli.json {
-                    println!("{}", serde_json::json!({
-                        "status": "success",
-                        "annotation_id": format!("{} {}", annot_id.number, annot_id.generation),
-                        "page": page,
-                        "output": output.to_string_lossy(),
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "success",
+                            "annotation_id": format!("{} {}", annot_id.number, annot_id.generation),
+                            "page": page,
+                            "output": output.to_string_lossy(),
+                        })
+                    );
                 } else {
                     println!(
                         "Embedded rich media annotation ({:?}) on page {} -> {}",
@@ -2132,7 +2584,10 @@ fn main() -> Result<()> {
                         .collect();
                     println!("{}", serde_json::to_string_pretty(&json)?);
                 } else {
-                    println!("=== Rich Media Annotations (Total: {}) ===", all_media.len());
+                    println!(
+                        "=== Rich Media Annotations (Total: {}) ===",
+                        all_media.len()
+                    );
                     for (p, a) in all_media {
                         let src = if a.is_embedded {
                             "Embedded Stream"
@@ -2219,13 +2674,16 @@ fn main() -> Result<()> {
                 doc.save_to_file(&output)?;
 
                 if cli.json {
-                    println!("{}", serde_json::json!({
-                        "status": "success",
-                        "annotation_id": format!("{} {}", annot_id.number, annot_id.generation),
-                        "format": format!("{:?}", fmt),
-                        "page": page,
-                        "output": output.to_string_lossy(),
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "success",
+                            "annotation_id": format!("{} {}", annot_id.number, annot_id.generation),
+                            "format": format!("{:?}", fmt),
+                            "page": page,
+                            "output": output.to_string_lossy(),
+                        })
+                    );
                 } else {
                     println!(
                         "Embedded 3D model ({:?}) annotation ({:?}) on page {} -> {}",
@@ -2339,7 +2797,11 @@ fn main() -> Result<()> {
                     println!("=== Action Wizard Batch Runner ===");
                     println!("Sequence: \"{}\"", seq.name);
                     println!("Description: {}", seq.description);
-                    println!("Files: {} -> Destination: {}", inputs.len(), output.display());
+                    println!(
+                        "Files: {} -> Destination: {}",
+                        inputs.len(),
+                        output.display()
+                    );
                 }
 
                 let result = execute_batch_cancellable(
@@ -2364,7 +2826,11 @@ fn main() -> Result<()> {
                         println!("Status: CANCELLED");
                     }
                     for item in &result.details {
-                        let fname = item.path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                        let fname = item
+                            .path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("?");
                         if item.success {
                             println!("  [OK] {}", fname);
                         } else {
@@ -2387,13 +2853,20 @@ fn main() -> Result<()> {
                 let json = serde_json::to_string_pretty(&template)?;
                 fs::write(&output, json)?;
                 if cli.json {
-                    println!("{}", serde_json::json!({
-                        "status": "success",
-                        "template": template.name,
-                        "output": output.to_string_lossy(),
-                    }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "success",
+                            "template": template.name,
+                            "output": output.to_string_lossy(),
+                        })
+                    );
                 } else {
-                    println!("Saved \"{}\" template recipe to {}", template.name, output.display());
+                    println!(
+                        "Saved \"{}\" template recipe to {}",
+                        template.name,
+                        output.display()
+                    );
                 }
             }
         },
@@ -2438,7 +2911,10 @@ fn main() -> Result<()> {
                 println!("Successfully performed OCR on '{}'", input.display());
                 println!("  Processed pages: {}", result.pages.len());
                 println!("  Total words recognized: {}", result.total_words);
-                println!("  Average confidence: {:.1}%", result.average_confidence * 100.0);
+                println!(
+                    "  Average confidence: {:.1}%",
+                    result.average_confidence * 100.0
+                );
                 println!("  Uncertain words: {}", result.total_uncertain_words);
                 println!("  Saved searchable PDF to '{}'", output.display());
             }
@@ -2484,12 +2960,7 @@ fn main() -> Result<()> {
                 embed_ltv: ltv,
             };
 
-            let signed_bytes = sign_pdf_document_advanced(
-                doc,
-                curr_page,
-                &digital_id,
-                &opts,
-            )?;
+            let signed_bytes = sign_pdf_document_advanced(doc, curr_page, &digital_id, &opts)?;
             fs::write(&output, &signed_bytes)?;
 
             if cli.json {
@@ -2509,13 +2980,26 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&info)?);
             } else {
-                println!("Successfully digitally signed document '{}'", input.display());
+                println!(
+                    "Successfully digitally signed document '{}'",
+                    input.display()
+                );
                 println!("  Signer: {}", signer);
                 println!("  Organization: {}", org);
                 println!("  Reason: {}", reason);
                 println!("  Location: {}", location);
-                println!("  Certification (DocMDP): {}", if certify { doc_mdp_perm.description() } else { "None (Approval Signature)" });
-                println!("  Long-Term Validation (LTV /DSS): {}", if ltv { "Embedded" } else { "No" });
+                println!(
+                    "  Certification (DocMDP): {}",
+                    if certify {
+                        doc_mdp_perm.description()
+                    } else {
+                        "None (Approval Signature)"
+                    }
+                );
+                println!(
+                    "  Long-Term Validation (LTV /DSS): {}",
+                    if ltv { "Embedded" } else { "No" }
+                );
                 println!("  Standard: ISO 32000-1 Section 12.8 / PKCS#7 detached");
                 println!("  Saved signed PDF to '{}'", output.display());
             }
@@ -2538,7 +3022,8 @@ fn main() -> Result<()> {
 
             let mut fixup_summary = None;
             if fix {
-                let out_path = output.ok_or_else(|| anyhow!("--output path is required when --fix is specified"))?;
+                let out_path = output
+                    .ok_or_else(|| anyhow!("--output path is required when --fix is specified"))?;
                 let summary = execute_preflight_fixup(&mut doc, PreflightFixup::FixAll)?;
                 doc.save_to_file(&out_path)?;
                 fixup_summary = Some(summary);
@@ -2551,9 +3036,23 @@ fn main() -> Result<()> {
                 }
                 println!("{}", serde_json::to_string_pretty(&val)?);
             } else {
-                println!("Preflight Audit for '{}' [{}]", input.display(), p_enum.display_name());
-                println!("  Status: {}", if report.is_compliant { "✓ COMPLIANT" } else { "✗ NON-COMPLIANT" });
-                println!("  Passed: {}, Warnings: {}, Errors: {}", report.total_passed, report.total_warnings, report.total_errors);
+                println!(
+                    "Preflight Audit for '{}' [{}]",
+                    input.display(),
+                    p_enum.display_name()
+                );
+                println!(
+                    "  Status: {}",
+                    if report.is_compliant {
+                        "✓ COMPLIANT"
+                    } else {
+                        "✗ NON-COMPLIANT"
+                    }
+                );
+                println!(
+                    "  Passed: {}, Warnings: {}, Errors: {}",
+                    report.total_passed, report.total_warnings, report.total_errors
+                );
                 for c in &report.checks {
                     let mark = if c.passed { "✓" } else { "✗" };
                     println!("    {} [{}] {}: {}", mark, c.category, c.title, c.details);
@@ -2598,7 +3097,10 @@ fn main() -> Result<()> {
                     });
                     println!("{}", serde_json::to_string_pretty(&info)?);
                 } else {
-                    println!("Successfully embedded Output Intent in '{}'", input.display());
+                    println!(
+                        "Successfully embedded Output Intent in '{}'",
+                        input.display()
+                    );
                     println!("  Profile: {}", p_enum.display_name());
                     println!("  Condition: {}", condition);
                     println!("  Registry: {}", registry);
@@ -2693,7 +3195,10 @@ fn main() -> Result<()> {
                 } else {
                     println!("Added prepress printer marks to '{}'", input.display());
                     println!("  Pages Marked: {}", pages_marked);
-                    println!("  Slug Margin: {} pt, Bleed Offset: {} pt", slug_margin, bleed_offset);
+                    println!(
+                        "  Slug Margin: {} pt, Bleed Offset: {} pt",
+                        slug_margin, bleed_offset
+                    );
                     println!("  Saved marked PDF to '{}'", output.display());
                 }
             }
@@ -2707,10 +3212,20 @@ fn main() -> Result<()> {
                 } else {
                     println!("Document Ink Plates in '{}':", input.display());
                     for (i, ink) in inks.iter().enumerate() {
-                        let kind = if ink.is_spot { "Spot Plate" } else { "Process Plate" };
+                        let kind = if ink.is_spot {
+                            "Spot Plate"
+                        } else {
+                            "Process Plate"
+                        };
                         println!(
                             "  {}. {} [{}] CMYK: ({:.2}, {:.2}, {:.2}, {:.2})",
-                            i + 1, ink.name, kind, ink.process_cmyk.0, ink.process_cmyk.1, ink.process_cmyk.2, ink.process_cmyk.3
+                            i + 1,
+                            ink.name,
+                            kind,
+                            ink.process_cmyk.0,
+                            ink.process_cmyk.1,
+                            ink.process_cmyk.2,
+                            ink.process_cmyk.3
                         );
                     }
                 }
@@ -2768,7 +3283,10 @@ fn main() -> Result<()> {
                     } else {
                         println!("Configured trap preset in '{}'", input.display());
                         println!("  Name: {}", preset.name);
-                        println!("  Trap Width: {} pt, Black Width: {} pt", preset.trap_width, preset.black_width);
+                        println!(
+                            "  Trap Width: {} pt, Black Width: {} pt",
+                            preset.trap_width, preset.black_width
+                        );
                         println!("  Saved PDF to '{}'", out.display());
                     }
                 } else {
@@ -2778,7 +3296,13 @@ fn main() -> Result<()> {
                     } else {
                         println!("Trap Presets in '{}':", input.display());
                         for (i, p) in presets.iter().enumerate() {
-                            println!("  {}. '{}': trap_width={} pt, black_width={} pt", i + 1, p.name, p.trap_width, p.black_width);
+                            println!(
+                                "  {}. '{}': trap_width={} pt, black_width={} pt",
+                                i + 1,
+                                p.name,
+                                p.trap_width,
+                                p.black_width
+                            );
                         }
                     }
                 }
@@ -2824,8 +3348,14 @@ fn main() -> Result<()> {
                 if cli.json {
                     println!("{}", serde_json::to_string_pretty(&rep)?);
                 } else {
-                    println!("Converted document to standard '{}'", std_enum.display_name());
-                    println!("  Version: %PDF-{}.{}", rep.target_version.0, rep.target_version.1);
+                    println!(
+                        "Converted document to standard '{}'",
+                        std_enum.display_name()
+                    );
+                    println!(
+                        "  Version: %PDF-{}.{}",
+                        rep.target_version.0, rep.target_version.1
+                    );
                     for a in &rep.actions_applied {
                         println!("  • {}", a);
                     }
@@ -2851,8 +3381,16 @@ fn main() -> Result<()> {
                 if cli.json {
                     println!("{}", serde_json::to_string_pretty(&rep)?);
                 } else {
-                    let status = if rep.is_compliant { "COMPLIANT" } else { "NON-COMPLIANT" };
-                    println!("Standards Compliance Audit for '{}': {}", std_enum.display_name(), status);
+                    let status = if rep.is_compliant {
+                        "COMPLIANT"
+                    } else {
+                        "NON-COMPLIANT"
+                    };
+                    println!(
+                        "Standards Compliance Audit for '{}': {}",
+                        std_enum.display_name(),
+                        status
+                    );
                     for check in &rep.checks {
                         let sym = if check.passed { "✓ PASS" } else { "✗ FAIL" };
                         println!("  {} [{}]: {}", sym, check.code, check.description);
@@ -2957,7 +3495,10 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
-                println!("Replaced {} occurrence(s) of '{}' with '{}' on page {}.", count, find, replace, page);
+                println!(
+                    "Replaced {} occurrence(s) of '{}' with '{}' on page {}.",
+                    count, find, replace, page
+                );
                 println!("Saved updated document to: {}", output.display());
             }
         }
@@ -2991,7 +3532,11 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
-                println!("Generated {} page(s) PDF document from Markdown: {}", count, output.display());
+                println!(
+                    "Generated {} page(s) PDF document from Markdown: {}",
+                    count,
+                    output.display()
+                );
             }
         }
 
@@ -3083,7 +3628,8 @@ fn main() -> Result<()> {
 
                 let parsed_pos = position.as_deref().and_then(|s| {
                     s.split_once(',').and_then(|(x, y)| {
-                        if let (Ok(px), Ok(py)) = (x.trim().parse::<f64>(), y.trim().parse::<f64>()) {
+                        if let (Ok(px), Ok(py)) = (x.trim().parse::<f64>(), y.trim().parse::<f64>())
+                        {
                             Some((px, py))
                         } else {
                             None
@@ -3093,7 +3639,8 @@ fn main() -> Result<()> {
 
                 let parsed_size = size.as_deref().and_then(|s| {
                     s.split_once(',').and_then(|(w, h)| {
-                        if let (Ok(pw), Ok(ph)) = (w.trim().parse::<f64>(), h.trim().parse::<f64>()) {
+                        if let (Ok(pw), Ok(ph)) = (w.trim().parse::<f64>(), h.trim().parse::<f64>())
+                        {
                             Some((pw, ph))
                         } else {
                             None
@@ -3101,7 +3648,12 @@ fn main() -> Result<()> {
                     })
                 });
 
-                if parsed_pos.is_some() || parsed_size.is_some() || rotate.is_some() || flip_h || flip_v {
+                if parsed_pos.is_some()
+                    || parsed_size.is_some()
+                    || rotate.is_some()
+                    || flip_h
+                    || flip_v
+                {
                     let transform_opts = ImageTransformOptions {
                         position: parsed_pos,
                         size: parsed_size,
@@ -3183,7 +3735,11 @@ fn main() -> Result<()> {
                 stamp_type: s_type.clone(),
                 rect: parsed_rect,
                 author,
-                dynamic_date: if dynamic { Some(chrono::Utc::now()) } else { None },
+                dynamic_date: if dynamic {
+                    Some(chrono::Utc::now())
+                } else {
+                    None
+                },
                 custom_text: text,
                 color: None,
                 opacity,
@@ -3224,7 +3780,10 @@ fn main() -> Result<()> {
             let report = compare_documents(&doc_a, &doc_b);
 
             if let Some(out_path) = &output {
-                if out_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
+                if out_path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+                {
                     let name_a = original.file_name().unwrap_or_default().to_string_lossy();
                     let name_b = modified.file_name().unwrap_or_default().to_string_lossy();
                     let rep_doc = generate_comparison_pdf_report(&report, &name_a, &name_b)?;
@@ -3232,7 +3791,10 @@ fn main() -> Result<()> {
                     if !cli.json {
                         println!("Comparison report PDF generated: {}", out_path.display());
                     }
-                } else if out_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+                } else if out_path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                {
                     let json = serde_json::to_string_pretty(&report)?;
                     fs::write(out_path, json)?;
                     if !cli.json {
@@ -3243,12 +3805,21 @@ fn main() -> Result<()> {
 
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
-            } else if output.as_ref().map_or(true, |p| !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))) {
+            } else if output.as_ref().map_or(true, |p| {
+                !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+            }) {
                 println!("=== RavPDF Document Comparison ===");
                 println!("Original: {}", original.display());
                 println!("Modified: {}", modified.display());
                 println!("Total Differences: {}", report.total_differences);
-                println!("Status: {}", if report.is_identical() { "Identical" } else { "Differences Found" });
+                println!(
+                    "Status: {}",
+                    if report.is_identical() {
+                        "Identical"
+                    } else {
+                        "Differences Found"
+                    }
+                );
                 for m in &report.metadata_diffs {
                     println!("Metadata: {}", m);
                 }
@@ -3278,7 +3849,11 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
-                println!("Extracted {} images into '{}'", saved.len(), output.display());
+                println!(
+                    "Extracted {} images into '{}'",
+                    saved.len(),
+                    output.display()
+                );
             }
         }
 
@@ -3287,11 +3862,16 @@ fn main() -> Result<()> {
             output,
             title,
         } => {
-            let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let ext = input
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             let doc = match ext.as_str() {
-                "png" | "jpg" | "jpeg" | "bmp" | "webp" | "gif" | "tiff" => {
-                    create_pdf_from_images(&[input.clone()], &ImagePdfOptions::default())?
-                }
+                "png" | "jpg" | "jpeg" | "bmp" | "webp" | "gif" | "tiff" => create_pdf_from_images(
+                    std::slice::from_ref(&input),
+                    &ImagePdfOptions::default(),
+                )?,
                 "md" | "markdown" => {
                     let content = fs::read_to_string(&input)?;
                     let opts = MarkdownPdfOptions {
@@ -3318,7 +3898,12 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
-                println!("Converted '{}' -> '{}' ({} pages)", input.display(), output.display(), doc.page_count());
+                println!(
+                    "Converted '{}' -> '{}' ({} pages)",
+                    input.display(),
+                    output.display(),
+                    doc.page_count()
+                );
             }
         }
 
@@ -3339,8 +3924,15 @@ fn main() -> Result<()> {
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&rep)?);
             } else {
-                let status = if rep.is_compliant { "COMPLIANT" } else { "NON-COMPLIANT" };
-                println!("=== ISO Standard Validation ({}) ===", std_enum.display_name());
+                let status = if rep.is_compliant {
+                    "COMPLIANT"
+                } else {
+                    "NON-COMPLIANT"
+                };
+                println!(
+                    "=== ISO Standard Validation ({}) ===",
+                    std_enum.display_name()
+                );
                 println!("File: {}", input.display());
                 println!("Status: {}", status);
                 for c in &rep.checks {
@@ -3396,13 +3988,20 @@ fn main() -> Result<()> {
                 },
                 "polygon" => {
                     let verts = vertices.as_deref().map(parse_vertices).unwrap_or_else(|| {
-                        vec![[parsed_rect[0], parsed_rect[1]], [(parsed_rect[0] + parsed_rect[2]) * 0.5, parsed_rect[3]], [parsed_rect[2], parsed_rect[1]]]
+                        vec![
+                            [parsed_rect[0], parsed_rect[1]],
+                            [(parsed_rect[0] + parsed_rect[2]) * 0.5, parsed_rect[3]],
+                            [parsed_rect[2], parsed_rect[1]],
+                        ]
                     });
                     ShapeType::Polygon { vertices: verts }
                 }
                 "polyline" => {
                     let verts = vertices.as_deref().map(parse_vertices).unwrap_or_else(|| {
-                        vec![[parsed_rect[0], parsed_rect[1]], [parsed_rect[2], parsed_rect[3]]]
+                        vec![
+                            [parsed_rect[0], parsed_rect[1]],
+                            [parsed_rect[2], parsed_rect[3]],
+                        ]
                     });
                     ShapeType::PolyLine {
                         vertices: verts,
@@ -3440,7 +4039,12 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
-                println!("Added shape '{}' on page {} -> {}", shape, page, output.display());
+                println!(
+                    "Added shape '{}' on page {} -> {}",
+                    shape,
+                    page,
+                    output.display()
+                );
             }
         }
 
@@ -3464,7 +4068,10 @@ fn main() -> Result<()> {
 
             let parsed_strokes = parse_strokes(&strokes);
             if parsed_strokes.is_empty() {
-                return Err(anyhow!("No valid stroke coordinates parsed from: {}", strokes));
+                return Err(anyhow!(
+                    "No valid stroke coordinates parsed from: {}",
+                    strokes
+                ));
             }
 
             let ink_col = parse_rgb(&color).unwrap_or((0.1, 0.3, 0.8));
@@ -3492,7 +4099,11 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
-                println!("Added freehand ink on page {} -> {}", page, output.display());
+                println!(
+                    "Added freehand ink on page {} -> {}",
+                    page,
+                    output.display()
+                );
             }
         }
 
@@ -3534,7 +4145,14 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
-                println!("Erased ink strokes at ({}, {}) on page {} (modified: {}) -> {}", x, y, page, erased_any, output.display());
+                println!(
+                    "Erased ink strokes at ({}, {}) on page {} (modified: {}) -> {}",
+                    x,
+                    y,
+                    page,
+                    erased_any,
+                    output.display()
+                );
             }
         }
 
@@ -3584,7 +4202,12 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
-                println!("Added callout '{}' on page {} -> {}", text, page, output.display());
+                println!(
+                    "Added callout '{}' on page {} -> {}",
+                    text,
+                    page,
+                    output.display()
+                );
             }
         }
 
@@ -3627,7 +4250,12 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
-                println!("Added typewriter text '{}' on page {} -> {}", text, page, output.display());
+                println!(
+                    "Added typewriter text '{}' on page {} -> {}",
+                    text,
+                    page,
+                    output.display()
+                );
             }
         }
 
@@ -3680,7 +4308,12 @@ fn main() -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
-                println!("Added '{}' annotation on page {} -> {}", annot_type, page, output.display());
+                println!(
+                    "Added '{}' annotation on page {} -> {}",
+                    annot_type,
+                    page,
+                    output.display()
+                );
             }
         }
     }
@@ -3755,7 +4388,10 @@ fn parse_lighting(s: &str) -> ThreeDLighting {
 fn parse_point(s: &str) -> Option<(f64, f64)> {
     let parts: Vec<&str> = s.split(',').collect();
     if parts.len() == 2 {
-        if let (Ok(x), Ok(y)) = (parts[0].trim().parse::<f64>(), parts[1].trim().parse::<f64>()) {
+        if let (Ok(x), Ok(y)) = (
+            parts[0].trim().parse::<f64>(),
+            parts[1].trim().parse::<f64>(),
+        ) {
             return Some((x, y));
         }
     }

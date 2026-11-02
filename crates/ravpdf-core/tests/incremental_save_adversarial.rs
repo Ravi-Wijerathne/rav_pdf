@@ -75,7 +75,10 @@ fn test_byte_invariance_no_trailing_newline() {
 
     let mut doc = PdfDocument::load_from_bytes(&stripped).expect("load stripped base");
     let new_obj_id = doc.next_object_id();
-    doc.set_object(new_obj_id, Object::String(PdfString::from_str("InvarianceTest")));
+    doc.set_object(
+        new_obj_id,
+        Object::String(PdfString::from_str("InvarianceTest")),
+    );
 
     let updated_bytes = doc.save_incremental().expect("save incremental");
 
@@ -124,10 +127,17 @@ fn test_multi_generation_chaining_10_revisions() {
     let mut startxref_history: Vec<usize> = Vec::new();
 
     let initial_parser = Parser::new(&base_bytes);
-    startxref_history.push(initial_parser.find_startxref().expect("find startxref gen 0"));
+    startxref_history.push(
+        initial_parser
+            .find_startxref()
+            .expect("find startxref gen 0"),
+    );
 
     // Add custom trailer key in Gen 0
-    current_doc.trailer.insert("DocumentTitle", PdfString::from_str("OriginalDocumentTitle"));
+    current_doc.trailer.insert(
+        "DocumentTitle",
+        PdfString::from_str("OriginalDocumentTitle"),
+    );
 
     // Perform 10 sequential incremental updates
     for gen in 1..=10 {
@@ -154,7 +164,9 @@ fn test_multi_generation_chaining_10_revisions() {
         }
 
         // Save incremental update
-        let updated_bytes = current_doc.save_incremental().expect("save incremental gen");
+        let updated_bytes = current_doc
+            .save_incremental()
+            .expect("save incremental gen");
 
         // Verify byte invariance for this generation against previous generation
         assert!(updated_bytes.len() > prev_len);
@@ -168,7 +180,10 @@ fn test_multi_generation_chaining_10_revisions() {
         // Record history
         let parser = Parser::new(&updated_bytes);
         let startxref = parser.find_startxref().expect("find startxref");
-        assert!(startxref >= prev_len, "XRef offset must be in the newly appended slice");
+        assert!(
+            startxref >= prev_len,
+            "XRef offset must be in the newly appended slice"
+        );
         startxref_history.push(startxref);
         gen_bytes_history.push(updated_bytes.clone());
 
@@ -181,7 +196,11 @@ fn test_multi_generation_chaining_10_revisions() {
         assert!(reloaded.get_object(page_id).is_some());
 
         // Verify latest values resolved
-        assert!(reloaded.get_object(new_id).is_some(), "Object added in gen {} must resolve", gen);
+        assert!(
+            reloaded.get_object(new_id).is_some(),
+            "Object added in gen {} must resolve",
+            gen
+        );
         if gen % 2 == 0 {
             let cat = reloaded.catalog().expect("catalog");
             assert_eq!(
@@ -191,7 +210,9 @@ fn test_multi_generation_chaining_10_revisions() {
                 gen
             );
         } else {
-            let mod_obj = reloaded.get_object(ObjectId::new(100, 0)).expect("mod obj 100");
+            let mod_obj = reloaded
+                .get_object(ObjectId::new(100, 0))
+                .expect("mod obj 100");
             assert_eq!(mod_obj.as_i64(), Some(gen as i64 * 100));
         }
 
@@ -237,15 +258,17 @@ fn test_multi_generation_chaining_10_revisions() {
         } else {
             // Reached base generation
             assert_eq!(
-                current_startxref,
-                startxref_history[0],
+                current_startxref, startxref_history[0],
                 "Earliest /Prev must resolve to Generation 0 startxref"
             );
             break;
         }
     }
 
-    assert_eq!(hops, 10, "Expected exactly 10 hops backwards through /Prev chain");
+    assert_eq!(
+        hops, 10,
+        "Expected exactly 10 hops backwards through /Prev chain"
+    );
 }
 
 #[test]
@@ -259,7 +282,8 @@ fn test_cyclic_prev_does_not_lock_up() {
 
     // Formatted with fixed-width Prev offset for exact calculation:
     // "xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 10 /Prev 1234567890 /Root 1 0 R >>\n" = 80 bytes
-    let template = "xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 10 /Prev 0000000000 /Root 1 0 R >>\n";
+    let template =
+        "xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 10 /Prev 0000000000 /Root 1 0 R >>\n";
     let expected_b_pos = xref_a_pos + template.len();
 
     let xref_a_str = format!(
@@ -290,7 +314,10 @@ fn test_cyclic_prev_does_not_lock_up() {
         elapsed
     );
     // The parser successfully breaks the cycle and returns
-    assert!(res.is_ok(), "Parser gracefully recovers without cyclic lockup");
+    assert!(
+        res.is_ok(),
+        "Parser gracefully recovers without cyclic lockup"
+    );
 }
 
 // =========================================================================
@@ -333,7 +360,10 @@ fn test_deletion_tombstoning_gen1_iso32000_fails() {
     let mut doc0 = PdfDocument::load_from_bytes(&base_bytes).expect("load base");
 
     let custom_id = doc0.next_object_id();
-    doc0.set_object(custom_id, Object::String(PdfString::from_str("ConfidentialNote")));
+    doc0.set_object(
+        custom_id,
+        Object::String(PdfString::from_str("ConfidentialNote")),
+    );
     let rev0_bytes = doc0.to_bytes().expect("serialize rev0");
 
     let parser = Parser::new(&rev0_bytes);
@@ -372,7 +402,10 @@ fn test_deletion_tombstoning_gen65535_fails() {
     let mut doc0 = PdfDocument::load_from_bytes(&base_bytes).expect("load base");
 
     let custom_id = doc0.next_object_id();
-    doc0.set_object(custom_id, Object::String(PdfString::from_str("RedactedSSN")));
+    doc0.set_object(
+        custom_id,
+        Object::String(PdfString::from_str("RedactedSSN")),
+    );
     let rev0_bytes = doc0.to_bytes().expect("serialize rev0");
 
     let parser = Parser::new(&rev0_bytes);
@@ -404,7 +437,10 @@ fn test_deletion_tombstoning_xref_stream_gen1_fails() {
     let mut doc0 = PdfDocument::load_from_bytes(&base_bytes).expect("load base");
 
     let custom_id = doc0.next_object_id();
-    doc0.set_object(custom_id, Object::String(PdfString::from_str("ConfidentialContract")));
+    doc0.set_object(
+        custom_id,
+        Object::String(PdfString::from_str("ConfidentialContract")),
+    );
     let rev0_bytes = doc0.to_bytes().expect("serialize rev0");
 
     let parser = Parser::new(&rev0_bytes);
@@ -447,7 +483,10 @@ fn test_deletion_tombstoning_multi_revision_chaining() {
     let mut doc0 = PdfDocument::load_from_bytes(&base_bytes).expect("load base");
 
     let custom_id = doc0.next_object_id();
-    doc0.set_object(custom_id, Object::String(PdfString::from_str("DeletedInRev1")));
+    doc0.set_object(
+        custom_id,
+        Object::String(PdfString::from_str("DeletedInRev1")),
+    );
     let rev0_bytes = doc0.to_bytes().expect("serialize rev0");
 
     let parser0 = Parser::new(&rev0_bytes);
@@ -463,7 +502,10 @@ fn test_deletion_tombstoning_multi_revision_chaining() {
     rev1_bytes.extend_from_slice(rev1_str.as_bytes());
 
     let doc1 = PdfDocument::load_from_bytes(&rev1_bytes).expect("load rev1");
-    assert!(doc1.get_object(custom_id).is_none(), "Must be deleted in rev1");
+    assert!(
+        doc1.get_object(custom_id).is_none(),
+        "Must be deleted in rev1"
+    );
 
     // Gen 2: Add Obj 10 (Obj 4 is NOT mentioned in Gen 2 xref table!)
     let mut doc1_mut = doc1;
@@ -473,7 +515,10 @@ fn test_deletion_tombstoning_multi_revision_chaining() {
 
     // Load Gen 2: Does Obj 4 stay deleted, or does Gen 2 resurrect Obj 4 from Gen 0?
     let doc2 = PdfDocument::load_from_bytes(&rev2_bytes).expect("load rev2");
-    assert!(doc2.get_object(obj10_id).is_some(), "Obj 10 must exist in rev2");
+    assert!(
+        doc2.get_object(obj10_id).is_some(),
+        "Obj 10 must exist in rev2"
+    );
     assert!(
         doc2.get_object(custom_id).is_none(),
         "Obj 4 was deleted in Rev 1; Rev 2 MUST NOT resurrect Obj 4 from Rev 0"
@@ -506,7 +551,7 @@ fn test_synthetic_signature_byterange_preservation() {
 
     // Simple robust hash over slices: FNV-1a 64-bit and 32-bit checksums
     fn compute_digest(s1: &[u8], s2: &[u8]) -> u128 {
-        let mut hash: u128 = 0xcbf29ce484222325_100000001b3;
+        let mut hash: u128 = 0x0cbf_29ce_4842_2232_5100_0000_01b3;
         for &b in s1.iter().chain(s2.iter()) {
             hash ^= b as u128;
             hash = hash.wrapping_mul(0x100000001b3);
@@ -519,7 +564,10 @@ fn test_synthetic_signature_byterange_preservation() {
     // 2. Perform an incremental update
     let mut doc = PdfDocument::load_from_bytes(&base_bytes).expect("load base");
     let annot_id = doc.next_object_id();
-    doc.set_object(annot_id, Object::String(PdfString::from_str("AnnotationAfterSignature")));
+    doc.set_object(
+        annot_id,
+        Object::String(PdfString::from_str("AnnotationAfterSignature")),
+    );
 
     let updated_bytes = doc.save_incremental().expect("save incremental");
 

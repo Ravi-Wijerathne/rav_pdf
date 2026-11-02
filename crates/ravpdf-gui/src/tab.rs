@@ -11,8 +11,8 @@ use ravpdf_core::document::PdfDocument;
 use ravpdf_core::outline::{get_document_bookmarks, Bookmark};
 use ravpdf_render::{render_page, Color, RenderOptions};
 use ravpdf_tools::{
-    apply_plate_separations, apply_soft_proof, get_document_info, DocumentInfo, PlateSeparationConfig,
-    SeparationAnalysis, SoftProofConfig,
+    apply_plate_separations, apply_soft_proof, get_document_info, DocumentInfo,
+    PlateSeparationConfig, SeparationAnalysis, SoftProofConfig,
 };
 use std::path::PathBuf;
 
@@ -111,7 +111,10 @@ impl DocumentTab {
             };
 
             let tex = ctx.load_texture(
-                format!("cont_tab_{}_{}_z{:.2}_r{}", self.id, page_idx, self.zoom, self.rotation),
+                format!(
+                    "cont_tab_{}_{}_z{:.2}_r{}",
+                    self.id, page_idx, self.zoom, self.rotation
+                ),
                 color_image,
                 TextureOptions::LINEAR,
             );
@@ -220,7 +223,8 @@ impl DocumentTab {
 
                 // Apply soft-proofing simulation if enabled (FR-24.5)
                 if let Some(sp_cfg) = soft_proof_config {
-                    processed_data = apply_soft_proof(&processed_data, width as u32, height as u32, sp_cfg);
+                    processed_data =
+                        apply_soft_proof(&processed_data, width as u32, height as u32, sp_cfg);
                 }
 
                 let pixels: Vec<Color32> = processed_data

@@ -29,11 +29,7 @@ impl PdfColor {
                 let val = g.clamp(0.0, 1.0);
                 (val, val, val)
             }
-            PdfColor::Rgb(r, g, b) => (
-                r.clamp(0.0, 1.0),
-                g.clamp(0.0, 1.0),
-                b.clamp(0.0, 1.0),
-            ),
+            PdfColor::Rgb(r, g, b) => (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)),
             PdfColor::Cmyk(c, m, y, k) => {
                 // ISO 32000-1 standard formula for DeviceCMYK to DeviceRGB conversion:
                 // R = 1.0 - min(1.0, C + K)

@@ -73,6 +73,7 @@ impl Default for RenderOptions {
 
 pub struct ContentInterpreter<'a> {
     pixmap: &'a mut Pixmap,
+    doc: Option<&'a ravpdf_core::document::PdfDocument>,
     state: GraphicsState,
     state_stack: Vec<GraphicsState>,
     path_builder: Option<PathBuilder>,
@@ -80,12 +81,11 @@ pub struct ContentInterpreter<'a> {
     in_text_object: bool,
     pub crop_box: [f64; 4],
     pub zoom: f32,
+    resources: Option<&'a PdfDictionary>,
 }
 
 impl<'a> ContentInterpreter<'a> {
     pub fn new(pixmap: &'a mut Pixmap, crop_box: [f64; 4], zoom: f32) -> Self {
-        // Initial transformation mapping PDF user space (origin bottom-left)
-        // to Pixmap pixel space (origin top-left).
         let ctm = Transform::from_row(
             zoom,
             0.0,
@@ -102,6 +102,7 @@ impl<'a> ContentInterpreter<'a> {
 
         Self {
             pixmap,
+            doc: None,
             state: initial_state,
             state_stack: Vec::new(),
             path_builder: None,
@@ -109,15 +110,29 @@ impl<'a> ContentInterpreter<'a> {
             in_text_object: false,
             crop_box,
             zoom,
+            resources: None,
         }
+    }
+
+    /// Creates an interpreter with access to the underlying `PdfDocument` for resolving indirect resources.
+    pub fn with_doc(
+        pixmap: &'a mut Pixmap,
+        doc: &'a ravpdf_core::document::PdfDocument,
+        crop_box: [f64; 4],
+        zoom: f32,
+    ) -> Self {
+        let mut interp = Self::new(pixmap, crop_box, zoom);
+        interp.doc = Some(doc);
+        interp
     }
 
     /// Interprets raw page content stream instructions and rasterizes them onto the Pixmap.
     pub fn interpret(
         &mut self,
         content: &[u8],
-        _resources: Option<&PdfDictionary>,
+        resources: Option<&'a PdfDictionary>,
     ) -> Result<()> {
+        self.resources = resources;
         let mut lexer = Lexer::new(content);
         let mut operands = Vec::new();
 
@@ -126,9 +141,9 @@ impl<'a> ContentInterpreter<'a> {
                 Token::Eof => break,
                 Token::Integer(i) => operands.push(Object::Integer(i)),
                 Token::Real(r) => operands.push(Object::Real(r)),
-                Token::StringLiteral(s) => {
-                    operands.push(Object::String(ravpdf_core::object::PdfString::from_bytes(s)))
-                }
+                Token::StringLiteral(s) => operands.push(Object::String(
+                    ravpdf_core::object::PdfString::from_bytes(s),
+                )),
                 Token::HexString(s) => {
                     operands.push(Object::String(ravpdf_core::object::PdfString::from_hex(s)))
                 }
@@ -141,12 +156,11 @@ impl<'a> ContentInterpreter<'a> {
                             Token::ArrayClose | Token::Eof => break,
                             Token::Integer(i) => arr.push(Object::Integer(i)),
                             Token::Real(r) => arr.push(Object::Real(r)),
-                            Token::StringLiteral(s) => {
-                                arr.push(Object::String(ravpdf_core::object::PdfString::from_bytes(s)))
-                            }
-                            Token::HexString(s) => {
-                                arr.push(Object::String(ravpdf_core::object::PdfString::from_hex(s)))
-                            }
+                            Token::StringLiteral(s) => arr.push(Object::String(
+                                ravpdf_core::object::PdfString::from_bytes(s),
+                            )),
+                            Token::HexString(s) => arr
+                                .push(Object::String(ravpdf_core::object::PdfString::from_hex(s))),
                             _ => {}
                         }
                     }
@@ -431,8 +445,7 @@ impl<'a> ContentInterpreter<'a> {
             }
             "T*" => {
                 let move_matrix = Transform::from_translate(0.0, -self.state.text_leading);
-                self.state.text_line_matrix =
-                    self.state.text_line_matrix.pre_concat(move_matrix);
+                self.state.text_line_matrix = self.state.text_line_matrix.pre_concat(move_matrix);
                 self.state.text_matrix = self.state.text_line_matrix;
             }
             "TL" => {
@@ -460,6 +473,22 @@ impl<'a> ContentInterpreter<'a> {
                     self.draw_text_string(&text);
                 }
             }
+            // XObject Invocation (FR-01.1.1, FR-05.1 - FR-05.12)
+            "Do" => {
+                if let Some(name_obj) = args.first() {
+                    if let Some(xobj_name) = name_obj.as_name() {
+                        let _ = self.render_xobject(xobj_name);
+                    }
+                }
+            }
+            // Extended Graphics State (FR-01.1.5, FR-05.10)
+            "gs" => {
+                if let Some(name_obj) = args.first() {
+                    if let Some(gs_name) = name_obj.as_name() {
+                        self.apply_extgstate(gs_name);
+                    }
+                }
+            }
             _ => {
                 // Ignore unrecognized operators gracefully (NFR-03.3)
             }
@@ -475,12 +504,15 @@ impl<'a> ContentInterpreter<'a> {
                     let mut paint = Paint::default();
                     paint.set_color(self.state.fill_color.to_skia_color(self.state.fill_alpha));
                     paint.anti_alias = true;
-                    self.pixmap.fill_path(&path, &paint, rule, self.state.ctm, None);
+                    self.pixmap
+                        .fill_path(&path, &paint, rule, self.state.ctm, None);
                 }
                 if stroke {
                     let mut paint = Paint::default();
                     paint.set_color(
-                        self.state.stroke_color.to_skia_color(self.state.stroke_alpha),
+                        self.state
+                            .stroke_color
+                            .to_skia_color(self.state.stroke_alpha),
                     );
                     paint.anti_alias = true;
 
@@ -499,44 +531,311 @@ impl<'a> ContentInterpreter<'a> {
         }
     }
 
+    fn render_xobject(&mut self, name: &str) -> Result<()> {
+        let doc = match self.doc {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+        let resources = match self.resources {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+        let xobj_dict = match resources.get("XObject") {
+            Some(Object::Dictionary(d)) => Some(d),
+            Some(Object::Reference(id)) => doc.objects.get(id).and_then(Object::as_dict),
+            _ => None,
+        };
+        let xobj_dict = match xobj_dict {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        let stream = match xobj_dict.get(name) {
+            Some(Object::Stream(s)) => Some(s),
+            Some(Object::Reference(id)) => doc.objects.get(id).and_then(Object::as_stream),
+            _ => None,
+        };
+        let stream = match stream {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let subtype = stream.dict.get_name("Subtype").unwrap_or("");
+        if subtype == "Image" {
+            self.render_image_xobject(stream)?;
+        } else if subtype == "Form" {
+            self.render_form_xobject(stream)?;
+        }
+
+        Ok(())
+    }
+
+    fn render_image_xobject(&mut self, stream: &'a ravpdf_core::object::PdfStream) -> Result<()> {
+        let width = stream.dict.get_i64("Width").unwrap_or(0).max(1) as u32;
+        let height = stream.dict.get_i64("Height").unwrap_or(0).max(1) as u32;
+        let color_space = stream.dict.get_name("ColorSpace").unwrap_or("DeviceRGB");
+
+        let is_jpeg = stream.dict.get_name("Filter") == Some("DCTDecode")
+            || (stream.raw_data.len() >= 2
+                && stream.raw_data[0] == 0xFF
+                && stream.raw_data[1] == 0xD8);
+
+        let decoded_bytes = if is_jpeg {
+            if let Ok(dyn_img) = image::load_from_memory(&stream.raw_data) {
+                let rgba = dyn_img.to_rgba8();
+                return self.draw_rgba_image(rgba.width(), rgba.height(), &rgba.into_raw());
+            }
+            stream.decode().unwrap_or_default()
+        } else {
+            stream.decode().unwrap_or_default()
+        };
+
+        if decoded_bytes.is_empty() {
+            return Ok(());
+        }
+
+        if let Ok(dyn_img) = image::load_from_memory(&decoded_bytes) {
+            let rgba = dyn_img.to_rgba8();
+            return self.draw_rgba_image(rgba.width(), rgba.height(), &rgba.into_raw());
+        }
+
+        let mut rgba_pixels = Vec::with_capacity((width * height * 4) as usize);
+        match color_space {
+            "DeviceGray" => {
+                for &g in &decoded_bytes {
+                    rgba_pixels.extend_from_slice(&[g, g, g, 255]);
+                }
+            }
+            "DeviceCMYK" => {
+                for chunk in decoded_bytes.chunks_exact(4) {
+                    let (c, m, y, k) = (
+                        chunk[0] as f32 / 255.0,
+                        chunk[1] as f32 / 255.0,
+                        chunk[2] as f32 / 255.0,
+                        chunk[3] as f32 / 255.0,
+                    );
+                    let (r, g, b) = PdfColor::Cmyk(c, m, y, k).to_rgb();
+                    rgba_pixels.extend_from_slice(&[
+                        (r * 255.0).round() as u8,
+                        (g * 255.0).round() as u8,
+                        (b * 255.0).round() as u8,
+                        255,
+                    ]);
+                }
+            }
+            _ => {
+                for chunk in decoded_bytes.chunks_exact(3) {
+                    rgba_pixels.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+                }
+            }
+        }
+
+        if rgba_pixels.len() >= (width * height * 4) as usize {
+            self.draw_rgba_image(width, height, &rgba_pixels[..(width * height * 4) as usize])?;
+        }
+
+        Ok(())
+    }
+
+    fn draw_rgba_image(&mut self, img_w: u32, img_h: u32, rgba_bytes: &[u8]) -> Result<()> {
+        if img_w == 0 || img_h == 0 {
+            return Ok(());
+        }
+
+        let mut img_pixmap = match Pixmap::new(img_w, img_h) {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        let pixels = img_pixmap.pixels_mut();
+        for (i, chunk) in rgba_bytes.chunks_exact(4).enumerate() {
+            if i >= pixels.len() {
+                break;
+            }
+            let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+            if let Some(c) = tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, a) {
+                pixels[i] = c;
+            }
+        }
+
+        let img_to_unit = Transform::from_row(
+            1.0 / (img_w as f32),
+            0.0,
+            0.0,
+            -1.0 / (img_h as f32),
+            0.0,
+            1.0,
+        );
+
+        let final_transform = self.state.ctm.pre_concat(img_to_unit);
+        let paint = tiny_skia::PixmapPaint {
+            quality: tiny_skia::FilterQuality::Bicubic,
+            opacity: self.state.fill_alpha,
+            ..Default::default()
+        };
+
+        self.pixmap
+            .draw_pixmap(0, 0, img_pixmap.as_ref(), &paint, final_transform, None);
+
+        Ok(())
+    }
+
+    fn render_form_xobject(&mut self, stream: &'a ravpdf_core::object::PdfStream) -> Result<()> {
+        self.state_stack.push(self.state.clone());
+
+        if let Some(m_arr) = stream.dict.get_array("Matrix") {
+            if m_arr.len() >= 6 {
+                let a = m_arr[0].as_f64().unwrap_or(1.0) as f32;
+                let b = m_arr[1].as_f64().unwrap_or(0.0) as f32;
+                let c = m_arr[2].as_f64().unwrap_or(0.0) as f32;
+                let d = m_arr[3].as_f64().unwrap_or(1.0) as f32;
+                let e = m_arr[4].as_f64().unwrap_or(0.0) as f32;
+                let f = m_arr[5].as_f64().unwrap_or(0.0) as f32;
+                let matrix = Transform::from_row(a, b, c, d, e, f);
+                self.state.ctm = self.state.ctm.pre_concat(matrix);
+            }
+        }
+
+        let form_content = stream.decode()?;
+        let form_res = stream.dict.get_dict("Resources").or(self.resources);
+        let _ = self.interpret(&form_content, form_res);
+
+        if let Some(prev) = self.state_stack.pop() {
+            self.state = prev;
+        }
+
+        Ok(())
+    }
+
+    fn apply_extgstate(&mut self, name: &str) {
+        let doc = match self.doc {
+            Some(d) => d,
+            None => return,
+        };
+        let resources = match self.resources {
+            Some(r) => r,
+            None => return,
+        };
+        let extg_dict = match resources.get("ExtGState") {
+            Some(Object::Dictionary(d)) => Some(d),
+            Some(Object::Reference(id)) => doc.objects.get(id).and_then(Object::as_dict),
+            _ => None,
+        };
+        if let Some(dict) = extg_dict {
+            let gs_obj = match dict.get(name) {
+                Some(Object::Dictionary(d)) => Some(d),
+                Some(Object::Reference(id)) => doc.objects.get(id).and_then(Object::as_dict),
+                _ => None,
+            };
+            if let Some(gs) = gs_obj {
+                if let Some(ca) = gs.get_f64("ca") {
+                    self.state.fill_alpha = (ca as f32).clamp(0.0, 1.0);
+                }
+                if let Some(ca_stroke) = gs.get_f64("CA") {
+                    self.state.stroke_alpha = (ca_stroke as f32).clamp(0.0, 1.0);
+                }
+                if let Some(lw) = gs.get_f64("LW") {
+                    self.state.line_width = (lw as f32).max(0.1);
+                }
+            }
+        }
+    }
+
     fn draw_text_string(&mut self, text: &str) {
-        // Approximate character cell rendering for preview / display
-        // Standard typography: advance width is roughly font_size * 0.6 per glyph
-        let char_width = self.state.font_size * 0.55;
-        let font_height = self.state.font_size;
+        let font_bytes = if self.state.font_name.to_lowercase().contains("courier")
+            || self.state.font_name.to_lowercase().contains("mono")
+        {
+            epaint_default_fonts::HACK_REGULAR
+        } else {
+            epaint_default_fonts::UBUNTU_LIGHT
+        };
 
-        for ch in text.chars() {
-            if ch.is_control() {
-                continue;
+        let font_px_scale = (self.state.font_size * self.zoom).max(4.0);
+        let combined = self.state.ctm.pre_concat(self.state.text_matrix);
+        let mut pt = tiny_skia::Point::from_xy(0.0, 0.0);
+        combined.map_point(&mut pt);
+        let (base_x, base_y) = (pt.x, pt.y);
+
+        if let Ok(font) = ab_glyph::FontRef::try_from_slice(font_bytes) {
+            use ab_glyph::{Font, ScaleFont};
+            let scaled_font = font.as_scaled(font_px_scale);
+            let mut cur_x = base_x;
+            let baseline_y = base_y;
+
+            let fill_col = self.state.fill_color.to_skia_color(self.state.fill_alpha);
+            let (r, g, b, a_base) = (
+                fill_col.red(),
+                fill_col.green(),
+                fill_col.blue(),
+                fill_col.alpha(),
+            );
+
+            let pixmap_w = self.pixmap.width() as i32;
+            let pixmap_h = self.pixmap.height() as i32;
+
+            for ch in text.chars() {
+                if ch.is_control() {
+                    continue;
+                }
+
+                let glyph_id = scaled_font.glyph_id(ch);
+                let h_advance = scaled_font.h_advance(glyph_id);
+
+                let glyph = glyph_id.with_scale_and_position(
+                    font_px_scale,
+                    ab_glyph::Point {
+                        x: cur_x,
+                        y: baseline_y - scaled_font.ascent(),
+                    },
+                );
+
+                if let Some(outlined) = font.outline_glyph(glyph) {
+                    let bounds = outlined.px_bounds();
+                    let pixels = self.pixmap.pixels_mut();
+
+                    outlined.draw(|gx, gy, coverage| {
+                        let px = bounds.min.x as i32 + gx as i32;
+                        let py = bounds.min.y as i32 + gy as i32;
+                        if px >= 0 && px < pixmap_w && py >= 0 && py < pixmap_h {
+                            let idx = (py * pixmap_w + px) as usize;
+                            let eff_a = coverage * a_base;
+                            if eff_a > 0.005 {
+                                let existing = pixels[idx];
+                                let inv_a = 1.0 - eff_a;
+                                let new_r = ((r * eff_a + (existing.red() as f32 / 255.0) * inv_a)
+                                    * 255.0)
+                                    .round() as u8;
+                                let new_g = ((g * eff_a
+                                    + (existing.green() as f32 / 255.0) * inv_a)
+                                    * 255.0)
+                                    .round() as u8;
+                                let new_b = ((b * eff_a + (existing.blue() as f32 / 255.0) * inv_a)
+                                    * 255.0)
+                                    .round() as u8;
+                                let new_a = ((eff_a + (existing.alpha() as f32 / 255.0) * inv_a)
+                                    * 255.0)
+                                    .round() as u8;
+                                if let Some(c) = tiny_skia::PremultipliedColorU8::from_rgba(
+                                    new_r, new_g, new_b, new_a,
+                                ) {
+                                    pixels[idx] = c;
+                                }
+                            }
+                        }
+                    });
+                }
+
+                cur_x += h_advance;
+                let user_advance = h_advance / self.zoom;
+                let adv_m = Transform::from_translate(user_advance, 0.0);
+                self.state.text_matrix = self.state.text_matrix.pre_concat(adv_m);
             }
-
-            // Combine CTM with TextMatrix
-            let combined = self.state.ctm.pre_concat(self.state.text_matrix);
-
-            // Rasterize basic glyph outline / block representation for text rendering
-            let mut pb = PathBuilder::new();
-            pb.move_to(0.0, 0.0);
-            pb.line_to(char_width * 0.8, 0.0);
-            pb.line_to(char_width * 0.8, font_height * 0.8);
-            pb.line_to(0.0, font_height * 0.8);
-            pb.close();
-
-            if let Some(path) = pb.finish() {
-                let mut paint = Paint::default();
-                paint.set_color(self.state.fill_color.to_skia_color(self.state.fill_alpha));
-                paint.anti_alias = true;
-
-                // Subtle glyph stroke
-                let stroke = Stroke {
-                    width: (self.state.font_size * 0.08).max(0.5),
-                    ..Default::default()
-                };
-                self.pixmap.stroke_path(&path, &paint, &stroke, combined, None);
+        } else {
+            let char_width = self.state.font_size * 0.55;
+            for _ in text.chars() {
+                let advance = Transform::from_translate(char_width, 0.0);
+                self.state.text_matrix = self.state.text_matrix.pre_concat(advance);
             }
-
-            // Advance text matrix
-            let advance = Transform::from_translate(char_width, 0.0);
-            self.state.text_matrix = self.state.text_matrix.pre_concat(advance);
         }
     }
 }
