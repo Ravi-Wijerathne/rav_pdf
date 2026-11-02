@@ -19,12 +19,15 @@ pub mod paper_sizes {
     pub const A3: (f64, f64) = (841.89, 1190.55);
 }
 
-/// A high-level view of a single PDF page.
+/// A high-level view of a single PDF page conforming to ISO 32000-1 Clause 7.7.3.3 and 14.11.2.
 #[derive(Debug, Clone)]
 pub struct Page {
     pub id: ObjectId,
     pub media_box: [f64; 4],
     pub crop_box: [f64; 4],
+    pub bleed_box: Option<[f64; 4]>,
+    pub trim_box: Option<[f64; 4]>,
+    pub art_box: Option<[f64; 4]>,
     pub rotate: i64,
     pub contents_ids: Vec<ObjectId>,
     pub resources: Option<PdfDictionary>,
@@ -285,6 +288,11 @@ impl PdfDocument {
             }
         }
 
+        // Resolve page boundary boxes per ISO 32000-1 Clause 14.11.2
+        let bleed_box = self.resolve_box(page_dict, "BleedBox");
+        let trim_box = self.resolve_box(page_dict, "TrimBox");
+        let art_box = self.resolve_box(page_dict, "ArtBox");
+
         // Resolve /Resources (inherited if not present on page)
         let resources = self.resolve_resources(page_dict);
 
@@ -292,6 +300,9 @@ impl PdfDocument {
             id: page_id,
             media_box,
             crop_box,
+            bleed_box,
+            trim_box,
+            art_box,
             rotate,
             contents_ids,
             resources,

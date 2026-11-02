@@ -61,7 +61,8 @@ pub use comments::{
 };
 pub use compare::{compare_documents, generate_comparison_pdf_report, ComparisonReport, PageDiff};
 pub use export::{
-    export_page_to_image, export_to_html, export_to_plain_text, ExportImageFormat,
+    create_pdf_from_rtf, export_page_to_image, export_to_csv_table, export_to_html,
+    export_to_plain_text, export_to_rtf, ExportImageFormat,
 };
 pub use header_footer::{apply_headers_and_footers, HeaderFooterConfig};
 pub use js::{
@@ -151,9 +152,11 @@ mod tests {
         let mut doc = PdfDocument::new();
         doc.add_blank_page(612.0, 792.0);
 
-        let mut info = DocumentInfo::default();
-        info.title = Some("Confidential Agreement".into());
-        info.author = Some("Legal Counsel".into());
+        let info = DocumentInfo {
+            title: Some("Confidential Agreement".into()),
+            author: Some("Legal Counsel".into()),
+            ..Default::default()
+        };
         set_document_info(&mut doc, &info).expect("set doc info");
 
         let read_info = get_document_info(&doc).expect("get doc info");

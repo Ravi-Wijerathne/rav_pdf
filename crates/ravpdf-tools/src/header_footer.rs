@@ -202,9 +202,11 @@ mod tests {
         doc.add_blank_page(612.0, 792.0);
         doc.add_blank_page(612.0, 792.0);
 
-        let mut config = HeaderFooterConfig::default();
-        config.center_header = Some("CONFIDENTIAL - <<Title>>".into());
-        config.center_footer = Some("Page <<Page>> of <<TotalPages>>".into());
+        let config = HeaderFooterConfig {
+            center_header: Some("CONFIDENTIAL - <<Title>>".into()),
+            center_footer: Some("Page <<Page>> of <<TotalPages>>".into()),
+            ..Default::default()
+        };
 
         apply_headers_and_footers(&mut doc, &config, Some("Project Plan"), None).expect("apply");
 

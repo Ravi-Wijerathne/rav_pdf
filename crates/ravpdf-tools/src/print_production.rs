@@ -835,9 +835,11 @@ mod tests {
             255, 0, 0, 255,     // Pure red (M=1, Y=1 -> TAC=200%)
         ];
 
-        let mut config = PlateSeparationConfig::default();
-        config.show_tac_warning = true;
-        config.tac_threshold = 3.0; // 300%
+        let mut config = PlateSeparationConfig {
+            show_tac_warning: true,
+            tac_threshold: 3.0,
+            ..Default::default()
+        };
 
         let (out, analysis) = apply_plate_separations(&pixels, 2, 2, &config);
         assert_eq!(out.len(), 16);
@@ -867,7 +869,7 @@ mod tests {
         assert!(p_dict.get_array("BleedBox").is_some());
         assert_eq!(page.media_box, [-36.0, -36.0, 648.0, 828.0]);
         // Contents should contain the printer marks stream
-        assert!(page.contents_ids.len() >= 1);
+        assert!(!page.contents_ids.is_empty());
     }
 
     #[test]
