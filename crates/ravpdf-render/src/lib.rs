@@ -90,6 +90,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_render_real_cids_pdf() {
+        let path = std::path::Path::new("/Users/ravi/Library/CloudStorage/OneDrive-SriLankaInstituteofInformationTechnology/GenAI tools for your Studies.pdf");
+        if path.exists() {
+            let doc = PdfDocument::load_from_file(path).expect("load real doc");
+            let options = RenderOptions::default();
+            let pixmap = render_page(&doc, 0, &options).expect("render real page");
+            assert!(pixmap.width() > 0);
+        }
+    }
+
+    #[test]
     fn test_render_blank_page() {
         let mut doc = PdfDocument::new();
         doc.add_blank_page(612.0, 792.0);

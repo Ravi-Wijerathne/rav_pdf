@@ -3,9 +3,11 @@
 //! Traceability: FR-01.1.1-7, FR-01.3.1-7, DR-02.2, NFR-01.2.
 
 use crate::color::PdfColor;
+use ravpdf_core::cmap::FontEncodingInfo;
 use ravpdf_core::error::Result;
 use ravpdf_core::lexer::{Lexer, Token};
 use ravpdf_core::object::{Object, PdfDictionary};
+use std::collections::HashMap;
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform,
 };
@@ -82,6 +84,7 @@ pub struct ContentInterpreter<'a> {
     pub crop_box: [f64; 4],
     pub zoom: f32,
     resources: Option<&'a PdfDictionary>,
+    fonts: HashMap<String, FontEncodingInfo>,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -111,6 +114,7 @@ impl<'a> ContentInterpreter<'a> {
             crop_box,
             zoom,
             resources: None,
+            fonts: HashMap::new(),
         }
     }
 
@@ -126,6 +130,25 @@ impl<'a> ContentInterpreter<'a> {
         interp
     }
 
+    fn load_fonts(&mut self, resources: Option<&'a PdfDictionary>) {
+        if let Some(doc) = self.doc {
+            self.fonts = FontEncodingInfo::load_page_fonts(doc, resources);
+        }
+    }
+
+    fn decode_string_bytes(&self, bytes: &[u8]) -> String {
+        let font_key = self
+            .state
+            .font_name
+            .strip_prefix('/')
+            .unwrap_or(&self.state.font_name);
+        if let Some(info) = self.fonts.get(font_key) {
+            info.decode_string(bytes)
+        } else {
+            FontEncodingInfo::default().decode_string(bytes)
+        }
+    }
+
     /// Interprets raw page content stream instructions and rasterizes them onto the Pixmap.
     pub fn interpret(
         &mut self,
@@ -133,6 +156,7 @@ impl<'a> ContentInterpreter<'a> {
         resources: Option<&'a PdfDictionary>,
     ) -> Result<()> {
         self.resources = resources;
+        self.load_fonts(resources);
         let mut lexer = Lexer::new(content);
         let mut operands = Vec::new();
 
@@ -455,22 +479,35 @@ impl<'a> ContentInterpreter<'a> {
             }
             "Tj" => {
                 if let Some(str_obj) = args.first() {
-                    let text = match str_obj {
-                        Object::String(s) => s.to_string_lossy(),
-                        _ => String::new(),
+                    let bytes = match str_obj {
+                        Object::String(s) => s.bytes.as_slice(),
+                        _ => &[],
                     };
+                    let text = self.decode_string_bytes(bytes);
                     self.draw_text_string(&text);
                 }
             }
             "TJ" => {
                 if let Some(Object::Array(items)) = args.first() {
-                    let mut text = String::new();
                     for item in items {
-                        if let Object::String(s) = item {
-                            text.push_str(&s.to_string_lossy());
+                        match item {
+                            Object::String(s) => {
+                                let text = self.decode_string_bytes(&s.bytes);
+                                self.draw_text_string(&text);
+                            }
+                            Object::Real(n) => {
+                                let adj = (-*n as f32 / 1000.0) * self.state.font_size;
+                                let trans = Transform::from_translate(adj, 0.0);
+                                self.state.text_matrix = self.state.text_matrix.pre_concat(trans);
+                            }
+                            Object::Integer(n) => {
+                                let adj = (-*n as f32 / 1000.0) * self.state.font_size;
+                                let trans = Transform::from_translate(adj, 0.0);
+                                self.state.text_matrix = self.state.text_matrix.pre_concat(trans);
+                            }
+                            _ => {}
                         }
                     }
-                    self.draw_text_string(&text);
                 }
             }
             // XObject Invocation (FR-01.1.1, FR-05.1 - FR-05.12)
@@ -774,12 +811,15 @@ impl<'a> ContentInterpreter<'a> {
             let pixmap_h = self.pixmap.height() as i32;
 
             for ch in text.chars() {
-                if ch.is_control() {
+                if ch.is_control() && ch != '\t' && ch != '\n' && ch != '\r' {
                     continue;
                 }
 
                 let glyph_id = scaled_font.glyph_id(ch);
-                let h_advance = scaled_font.h_advance(glyph_id);
+                let mut h_advance = scaled_font.h_advance(glyph_id);
+                if h_advance <= 0.0 {
+                    h_advance = font_px_scale * 0.28;
+                }
 
                 let glyph = glyph_id.with_scale_and_position(
                     font_px_scale,
@@ -789,7 +829,21 @@ impl<'a> ContentInterpreter<'a> {
                     },
                 );
 
-                if let Some(outlined) = font.outline_glyph(glyph) {
+                let outlined = font.outline_glyph(glyph).or_else(|| {
+                    ab_glyph::FontRef::try_from_slice(epaint_default_fonts::NOTO_EMOJI_REGULAR).ok().and_then(|f2| {
+                        let sf2 = f2.as_scaled(font_px_scale);
+                        let g2 = sf2.glyph_id(ch).with_scale_and_position(
+                            font_px_scale,
+                            ab_glyph::Point {
+                                x: cur_x,
+                                y: baseline_y - sf2.ascent(),
+                            },
+                        );
+                        f2.outline_glyph(g2)
+                    })
+                });
+
+                if let Some(outlined) = outlined {
                     let bounds = outlined.px_bounds();
                     let pixels = self.pixmap.pixels_mut();
 

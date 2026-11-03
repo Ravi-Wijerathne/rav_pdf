@@ -1852,52 +1852,67 @@ impl RavPdfApp {
         let mut create_new = false;
 
         egui::TopBottomPanel::top("tab_bar")
-            .min_height(28.0)
+            .min_height(30.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+                    ui.spacing_mut().item_spacing = Vec2::new(3.0, 0.0);
 
                     for (idx, tab) in self.tabs.iter().enumerate() {
                         let is_active = self.active_tab_idx == Some(idx);
-                        let mod_mark = if tab.is_modified { "* " } else { "" };
-                        let label_text = format!("{}📄 {}", mod_mark, tab.title);
-
-                        let (bg_color, stroke_color) = if is_active {
-                            (
-                                Color32::from_rgb(45, 55, 72),
-                                Color32::from_rgb(66, 153, 225),
-                            )
+                        let mod_mark = if tab.is_modified { "● " } else { "" };
+                        let display_title = if tab.title.len() > 26 {
+                            format!("{}…", &tab.title[..24])
                         } else {
-                            (Color32::from_rgb(26, 32, 44), Color32::from_gray(60))
+                            tab.title.clone()
                         };
 
-                        let frame = egui::Frame::none()
+                        let (bg_color, stroke_color, text_color) = if is_active {
+                            (
+                                Color32::from_rgb(37, 99, 235), // Accent blue
+                                Color32::from_rgb(59, 130, 246),
+                                Color32::WHITE,
+                            )
+                        } else {
+                            (
+                                Color32::from_rgb(34, 34, 39),
+                                Color32::from_rgb(55, 55, 63),
+                                Color32::from_rgb(180, 180, 188),
+                            )
+                        };
+
+                        egui::Frame::none()
                             .fill(bg_color)
                             .stroke(Stroke::new(1.0_f32, stroke_color))
-                            .rounding(4.0)
-                            .inner_margin(egui::Margin::symmetric(8.0, 4.0));
-
-                        frame.show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let label = ui.selectable_label(is_active, label_text);
-                                if label.clicked() {
-                                    tab_to_select = Some(idx);
-                                }
-
-                                if ui
-                                    .small_button("✕")
-                                    .on_hover_text("Close tab (Ctrl+W)")
-                                    .clicked()
-                                {
-                                    tab_to_close = Some(idx);
-                                }
+                            .rounding(egui::Rounding {
+                                nw: 5.0,
+                                ne: 5.0,
+                                sw: 0.0,
+                                se: 0.0,
+                            })
+                            .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let label = egui::RichText::new(format!("📄 {}{}", mod_mark, display_title))
+                                        .color(text_color)
+                                        .size(12.0);
+                                    let resp = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+                                    if resp.clicked() {
+                                        tab_to_select = Some(idx);
+                                    }
+                                    if ui
+                                        .small_button("✕")
+                                        .on_hover_text("Close tab (Ctrl+W)")
+                                        .clicked()
+                                    {
+                                        tab_to_close = Some(idx);
+                                    }
+                                });
                             });
-                        });
                     }
 
                     // Plus button to open new tab
                     if ui
-                        .button("➕")
+                        .button(" ➕ ")
                         .on_hover_text("New blank document (Ctrl+N)")
                         .clicked()
                     {
@@ -1929,20 +1944,20 @@ impl RavPdfApp {
                         self.create_new_blank_document();
                         ui.close_menu();
                     }
-                    if ui.button("New PDF from Images... (FR-02.4)").clicked() {
+                    if ui.button("New PDF from Images...").clicked() {
                         self.create_pdf_from_images_dialog();
                         ui.close_menu();
                     }
-                    if ui.button("New PDF from Text File... (FR-02.5)").clicked() {
+                    if ui.button("New PDF from Text File...").clicked() {
                         self.create_pdf_from_text_dialog();
                         ui.close_menu();
                     }
-                    if ui.button("New PDF from RTF File... (FR-03.1.6)").clicked() {
+                    if ui.button("New PDF from RTF File...").clicked() {
                         self.create_pdf_from_rtf_dialog();
                         ui.close_menu();
                     }
                     if ui
-                        .button("New PDF from Markdown... (FR-02.5, FR-02.6)")
+                        .button("New PDF from Markdown...")
                         .clicked()
                     {
                         self.show_markdown_dialog = true;
@@ -1953,7 +1968,7 @@ impl RavPdfApp {
                         self.open_file_dialog();
                         ui.close_menu();
                     }
-                    if ui.button("Combine / Merge Files... (FR-07.1)").clicked() {
+                    if ui.button("Combine / Merge Files...").clicked() {
                         self.show_combine_dialog = true;
                         ui.close_menu();
                     }
@@ -1983,11 +1998,11 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    ui.menu_button("Export (FR-03.2)", |ui| {
+                    ui.menu_button("Export", |ui| {
                         if ui
                             .add_enabled(
                                 has_doc,
-                                Button::new("Export Document / Pages... (FR-03.2)"),
+                                Button::new("Export Document / Pages..."),
                             )
                             .clicked()
                         {
@@ -1995,35 +2010,35 @@ impl RavPdfApp {
                             ui.close_menu();
                         }
                         if ui
-                            .add_enabled(has_doc, Button::new("Export HTML (.html)... (FR-03.2.6)"))
+                            .add_enabled(has_doc, Button::new("Export HTML (.html)..."))
                             .clicked()
                         {
                             self.export_html_dialog();
                             ui.close_menu();
                         }
                         if ui
-                            .add_enabled(has_doc, Button::new("Export Pages as PNG... (FR-03.2.4)"))
+                            .add_enabled(has_doc, Button::new("Export Pages as PNG..."))
                             .clicked()
                         {
                             self.export_pages_as_png_dialog();
                             ui.close_menu();
                         }
                         if ui
-                            .add_enabled(has_doc, Button::new("Export Rich Text (.rtf)... (FR-03.2.7)"))
+                            .add_enabled(has_doc, Button::new("Export Rich Text (.rtf)..."))
                             .clicked()
                         {
                             self.export_rtf_dialog();
                             ui.close_menu();
                         }
                         if ui
-                            .add_enabled(has_doc, Button::new("Export Table as CSV (.csv)... (FR-03.2.2)"))
+                            .add_enabled(has_doc, Button::new("Export Table as CSV (.csv)..."))
                             .clicked()
                         {
                             self.export_csv_dialog();
                             ui.close_menu();
                         }
                         if ui
-                            .add_enabled(has_doc, Button::new("Export Text (.txt)... (FR-03.2.5)"))
+                            .add_enabled(has_doc, Button::new("Export Text (.txt)..."))
                             .clicked()
                         {
                             self.export_text_dialog();
@@ -2039,32 +2054,32 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Reduce File Size... (FR-25.1)"))
+                        .add_enabled(has_doc, Button::new("Reduce File Size..."))
                         .clicked()
                     {
                         self.show_optimize_dialog = true;
                         ui.close_menu();
                     }
-                    if ui.button("Create PDF Portfolio... (FR-29.2)").clicked() {
+                    if ui.button("Create PDF Portfolio...").clicked() {
                         self.show_portfolio_dialog = true;
                         ui.close_menu();
                     }
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Linearize for Fast Web View... (FR-02.8)"),
+                            Button::new("Linearize for Fast Web View..."),
                         )
                         .clicked()
                     {
                         self.show_linearize_dialog = true;
                         ui.close_menu();
                     }
-                    if ui.button("Scan Documents to PDF... (FR-32)").clicked() {
+                    if ui.button("Scan Documents to PDF...").clicked() {
                         self.show_scan_dialog = true;
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Print... (Ctrl+P) (FR-35)"))
+                        .add_enabled(has_doc, Button::new("Print... (Ctrl+P)"))
                         .clicked()
                     {
                         self.show_print_dialog = true;
@@ -2090,7 +2105,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             !self.text_selection.selected_text.is_empty(),
-                            Button::new("Copy Selected Text (Ctrl+C) (FR-04.7)"),
+                            Button::new("Copy Selected Text (Ctrl+C)"),
                         )
                         .clicked()
                     {
@@ -2106,7 +2121,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Select All Text on Page (Ctrl+A) (FR-04.6)"),
+                            Button::new("Select All Text on Page (Ctrl+A)"),
                         )
                         .clicked()
                     {
@@ -2129,7 +2144,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             self.selected_annotation.is_some(),
-                            Button::new("Delete Selected Annotation (Del) (FR-08.3)"),
+                            Button::new("Delete Selected Annotation (Del)"),
                         )
                         .clicked()
                     {
@@ -2153,7 +2168,7 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Find & Replace... (Ctrl+H) (FR-04.8)"))
+                        .add_enabled(has_doc, Button::new("Find & Replace... (Ctrl+H)"))
                         .clicked()
                     {
                         self.search_bar_open = true;
@@ -2163,7 +2178,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("In-Place Text Editor... (FR-04.1 - FR-04.5)"),
+                            Button::new("In-Place Text Editor..."),
                         )
                         .clicked()
                     {
@@ -2171,7 +2186,7 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Insert Image File... (FR-05.1)"))
+                        .add_enabled(has_doc, Button::new("Insert Image File..."))
                         .clicked()
                     {
                         self.insert_image_dialog();
@@ -2180,7 +2195,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("🖼️ Edit & Transform Images... (FR-05)"),
+                            Button::new("🖼️ Edit & Transform Images..."),
                         )
                         .clicked()
                     {
@@ -2190,7 +2205,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("🏷️ Rubber Stamps & Sign Here... (FR-10)"),
+                            Button::new("🏷️ Rubber Stamps & Sign Here..."),
                         )
                         .clicked()
                     {
@@ -2198,7 +2213,7 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("📐 Drawing & Shape Tools... (FR-09)"))
+                        .add_enabled(has_doc, Button::new("📐 Drawing & Shape Tools..."))
                         .clicked()
                     {
                         self.show_drawing_dialog = true;
@@ -2226,7 +2241,7 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Duplicate Current Page (FR-06.11)"))
+                        .add_enabled(has_doc, Button::new("Duplicate Current Page"))
                         .clicked()
                     {
                         if let Some(tab) = self.active_tab_mut() {
@@ -2242,7 +2257,7 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Page Boundary Boxes / Crop... (FR-06.8)"))
+                        .add_enabled(has_doc, Button::new("Page Boundary Boxes / Crop..."))
                         .clicked()
                     {
                         let box_data = self.active_tab().and_then(|tab| {
@@ -2287,7 +2302,7 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Page Numbering & Labels... (FR-06.9)"))
+                        .add_enabled(has_doc, Button::new("Page Numbering & Labels..."))
                         .clicked()
                     {
                         if let Some(tab) = self.active_tab() {
@@ -2297,7 +2312,7 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Add Hyperlink... (FR-20.1)"))
+                        .add_enabled(has_doc, Button::new("Add Hyperlink..."))
                         .clicked()
                     {
                         if let Some(tab) = self.active_tab() {
@@ -2308,7 +2323,7 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Add Form Field... (FR-11.1)"))
+                        .add_enabled(has_doc, Button::new("Add Form Field..."))
                         .clicked()
                     {
                         self.show_add_form_field_dialog = true;
@@ -2316,7 +2331,7 @@ impl RavPdfApp {
                     }
                     ui.separator();
                     if ui
-                        .add_enabled(has_doc, Button::new("Split Document... (FR-07.3)"))
+                        .add_enabled(has_doc, Button::new("Split Document..."))
                         .clicked()
                     {
                         self.show_split_dialog = true;
@@ -2369,7 +2384,7 @@ impl RavPdfApp {
                             has_doc,
                             egui::SelectableLabel::new(
                                 is_single,
-                                "📄 Single Page View (FR-01.2.2)",
+                                "📄 Single Page View",
                             ),
                         )
                         .clicked()
@@ -2382,7 +2397,7 @@ impl RavPdfApp {
                             has_doc,
                             egui::SelectableLabel::new(
                                 is_cont,
-                                "📜 Continuous Scroll View (FR-01.2.2)",
+                                "📜 Continuous Scroll View",
                             ),
                         )
                         .clicked()
@@ -2393,7 +2408,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            egui::SelectableLabel::new(is_org, "🗂 Organize Pages Grid (FR-06.1)"),
+                            egui::SelectableLabel::new(is_org, "🗂 Organize Pages Grid"),
                         )
                         .clicked()
                     {
@@ -2419,7 +2434,7 @@ impl RavPdfApp {
                             has_doc,
                             egui::SelectableLabel::new(
                                 self.is_full_screen,
-                                "⛶ Full Screen Presentation (F11 / Ctrl+L) (FR-01.3.6)",
+                                "⛶ Full Screen Presentation (F11 / Ctrl+L)",
                             ),
                         )
                         .clicked()
@@ -2432,7 +2447,7 @@ impl RavPdfApp {
                             has_doc,
                             egui::SelectableLabel::new(
                                 self.split_view_enabled,
-                                "◫ Split View Mode (Ctrl+Shift+T) (FR-01.3.5)",
+                                "◫ Split View Mode (Ctrl+Shift+T)",
                             ),
                         )
                         .clicked()
@@ -2452,7 +2467,7 @@ impl RavPdfApp {
                             has_doc,
                             egui::SelectableLabel::new(
                                 self.active_tool == ActiveTool::Loupe,
-                                "🔎 Magnifying Glass / Loupe (FR-01.3.3)",
+                                "🔎 Magnifying Glass / Loupe",
                             ),
                         )
                         .clicked()
@@ -2466,7 +2481,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             can_back,
-                            Button::new("⮌ Previous View (Alt+Left) (FR-01.2.7)"),
+                            Button::new("⮌ Previous View (Alt+Left)"),
                         )
                         .clicked()
                     {
@@ -2474,7 +2489,7 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(can_fwd, Button::new("⮎ Next View (Alt+Right) (FR-01.2.7)"))
+                        .add_enabled(can_fwd, Button::new("⮎ Next View (Alt+Right)"))
                         .clicked()
                     {
                         self.navigate_forward();
@@ -2486,7 +2501,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Auto-Generate Bookmarks from Headings (FR-19.7)"),
+                            Button::new("Auto-Generate Bookmarks from Headings"),
                         )
                         .clicked()
                     {
@@ -2513,7 +2528,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Export Annotations to XFDF... (FR-08.3.6)"),
+                            Button::new("Export Annotations to XFDF..."),
                         )
                         .clicked()
                     {
@@ -2528,7 +2543,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Import Annotations from XFDF... (FR-08.3.6)"),
+                            Button::new("Import Annotations from XFDF..."),
                         )
                         .clicked()
                     {
@@ -2537,28 +2552,28 @@ impl RavPdfApp {
                     }
                     ui.separator();
                     if ui
-                        .add_enabled(has_doc, Button::new("Add Watermark... (FR-18.2)"))
+                        .add_enabled(has_doc, Button::new("Add Watermark..."))
                         .clicked()
                     {
                         self.show_watermark_dialog = true;
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Bates Numbering... (FR-18.3)"))
+                        .add_enabled(has_doc, Button::new("Bates Numbering..."))
                         .clicked()
                     {
                         self.show_bates_dialog = true;
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Headers & Footers... (FR-18.1)"))
+                        .add_enabled(has_doc, Button::new("Headers & Footers..."))
                         .clicked()
                     {
                         self.show_header_footer_dialog = true;
                         ui.close_menu();
                     }
                     ui.separator();
-                    ui.menu_button("Rubber Stamps (FR-10)", |ui| {
+                    ui.menu_button("Rubber Stamps", |ui| {
                         if ui
                             .add_enabled(has_doc, Button::new("✓ APPROVED (Green)"))
                             .clicked()
@@ -2597,7 +2612,7 @@ impl RavPdfApp {
                     });
                     ui.separator();
                     if ui
-                        .add_enabled(has_doc, Button::new("Flatten All Forms (FR-11.3.4)"))
+                        .add_enabled(has_doc, Button::new("Flatten All Forms"))
                         .clicked()
                     {
                         if let Some(tab) = self.active_tab_mut() {
@@ -2610,14 +2625,14 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Export Form Data... (FR-11.3.2)"))
+                        .add_enabled(has_doc, Button::new("Export Form Data..."))
                         .clicked()
                     {
                         self.show_export_form_dialog = true;
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Set Page Tab Order... (FR-11.2.7)"))
+                        .add_enabled(has_doc, Button::new("Set Page Tab Order..."))
                         .clicked()
                     {
                         self.show_tab_order_dialog = true;
@@ -2625,14 +2640,14 @@ impl RavPdfApp {
                     }
                     ui.separator();
                     if ui
-                        .add_enabled(has_doc, Button::new("🛡 Sanitize Document... (FR-15.5)"))
+                        .add_enabled(has_doc, Button::new("🛡 Sanitize Document..."))
                         .clicked()
                     {
                         self.show_sanitize_dialog = true;
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Redact Patterns / Text... (FR-15.2)"))
+                        .add_enabled(has_doc, Button::new("Redact Patterns / Text..."))
                         .clicked()
                     {
                         self.show_redact_pattern_dialog = true;
@@ -2641,7 +2656,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Protect & Encrypt Document... (FR-14)"),
+                            Button::new("Protect & Encrypt Document..."),
                         )
                         .clicked()
                     {
@@ -2650,7 +2665,7 @@ impl RavPdfApp {
                     }
                     ui.separator();
                     if ui
-                        .add_enabled(has_doc, Button::new("Audit Space Usage... (FR-25.9)"))
+                        .add_enabled(has_doc, Button::new("Audit Space Usage..."))
                         .clicked()
                     {
                         if let Some(tab) = self.active_tab() {
@@ -2659,7 +2674,7 @@ impl RavPdfApp {
                         }
                         ui.close_menu();
                     }
-                    if ui.button("Compare Two Documents... (FR-17)").clicked() {
+                    if ui.button("Compare Two Documents...").clicked() {
                         if let Some(tab) = self.active_tab() {
                             self.compare_file_a = tab.file_path.clone();
                         }
@@ -2670,7 +2685,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Preflight & Standards Validation... (FR-22, FR-23)"),
+                            Button::new("Preflight & Standards Validation..."),
                         )
                         .clicked()
                     {
@@ -2680,7 +2695,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Output Preview & Separations... (FR-23.2)"),
+                            Button::new("Output Preview & Separations..."),
                         )
                         .clicked()
                     {
@@ -2693,7 +2708,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Color Management & Soft Proofing... (FR-24)"),
+                            Button::new("Color Management & Soft Proofing..."),
                         )
                         .clicked()
                     {
@@ -2703,7 +2718,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Prepress Tools & Printer Marks... (FR-23.3)"),
+                            Button::new("Prepress Tools & Printer Marks..."),
                         )
                         .clicked()
                     {
@@ -2714,7 +2729,7 @@ impl RavPdfApp {
                         .add_enabled(
                             has_doc,
                             Button::new(
-                                "Standards Compliance Wizard (PDF/A, PDF/X, PDF/E)... (FR-22)",
+                                "Standards Compliance Wizard (PDF/A, PDF/X, PDF/E)...",
                             ),
                         )
                         .clicked()
@@ -2725,7 +2740,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Digital Signatures & Certificates... (FR-13)"),
+                            Button::new("Digital Signatures & Certificates..."),
                         )
                         .clicked()
                     {
@@ -2734,28 +2749,28 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .button("Action Wizard (Batch Processing)... (FR-30)")
+                        .button("Action Wizard (Batch Processing)...")
                         .clicked()
                     {
                         self.show_batch_dialog = true;
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Embed Rich Media / Video... (FR-27)"))
+                        .add_enabled(has_doc, Button::new("Embed Rich Media / Video..."))
                         .clicked()
                     {
                         self.show_rich_media_dialog = true;
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Embed 3D Model... (FR-28)"))
+                        .add_enabled(has_doc, Button::new("Embed 3D Model..."))
                         .clicked()
                     {
                         self.show_threed_dialog = true;
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_doc, Button::new("Recognize Text (OCR)... (FR-16)"))
+                        .add_enabled(has_doc, Button::new("Recognize Text (OCR)..."))
                         .clicked()
                     {
                         self.show_ocr_dialog = true;
@@ -2763,7 +2778,7 @@ impl RavPdfApp {
                     }
                     ui.separator();
                     if ui
-                        .add_enabled(has_doc, Button::new("Accessibility Checker... (FR-21.1)"))
+                        .add_enabled(has_doc, Button::new("Accessibility Checker..."))
                         .clicked()
                     {
                         if let Some(tab) = self.active_tab() {
@@ -2788,7 +2803,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Review & Comments Summary... (FR-31.5)"),
+                            Button::new("Review & Comments Summary..."),
                         )
                         .clicked()
                     {
@@ -2802,7 +2817,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Merge Comments from Reviewer... (FR-31.3)"),
+                            Button::new("Merge Comments from Reviewer..."),
                         )
                         .clicked()
                     {
@@ -2812,7 +2827,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("Measurement Scale & Calibration... (FR-26.5)"),
+                            Button::new("Measurement Scale & Calibration..."),
                         )
                         .clicked()
                     {
@@ -2823,7 +2838,7 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
-                            Button::new("JavaScript Console & Debugger... (Ctrl+J) (FR-12.9)"),
+                            Button::new("JavaScript Console & Debugger... (Ctrl+J)"),
                         )
                         .clicked()
                     {
@@ -2831,7 +2846,7 @@ impl RavPdfApp {
                         ui.close_menu();
                     }
                     if ui
-                        .button("Plugins & Extensions Manager... (FR-36)")
+                        .button("Plugins & Extensions Manager...")
                         .clicked()
                     {
                         self.show_plugins_dialog = true;
@@ -2942,14 +2957,14 @@ impl RavPdfApp {
                 let can_fwd = self.nav_history_idx + 1 < self.nav_history.len();
                 if ui
                     .add_enabled(can_back, Button::new("⮌"))
-                    .on_hover_text("Previous View (Alt+Left) (FR-01.2.7)")
+                    .on_hover_text("Previous View (Alt+Left)")
                     .clicked()
                 {
                     self.navigate_back();
                 }
                 if ui
                     .add_enabled(can_fwd, Button::new("⮎"))
-                    .on_hover_text("Next View (Alt+Right) (FR-01.2.7)")
+                    .on_hover_text("Next View (Alt+Right)")
                     .clicked()
                 {
                     self.navigate_forward();
@@ -3007,7 +3022,7 @@ impl RavPdfApp {
                 let is_org = self.page_view_mode == PageViewMode::OrganizePages;
                 if ui
                     .add_enabled(has_doc, egui::SelectableLabel::new(is_single, "📄 Single"))
-                    .on_hover_text("Single Page View (FR-01.2.2)")
+                    .on_hover_text("Single Page View")
                     .clicked()
                 {
                     self.page_view_mode = PageViewMode::SinglePage;
@@ -3017,14 +3032,14 @@ impl RavPdfApp {
                         has_doc,
                         egui::SelectableLabel::new(is_cont, "📜 Continuous"),
                     )
-                    .on_hover_text("Continuous Scroll View (FR-01.2.2)")
+                    .on_hover_text("Continuous Scroll View")
                     .clicked()
                 {
                     self.page_view_mode = PageViewMode::ContinuousScroll;
                 }
                 if ui
                     .add_enabled(has_doc, egui::SelectableLabel::new(is_org, "🗂 Organize"))
-                    .on_hover_text("Organize Pages Grid View (FR-06.1)")
+                    .on_hover_text("Organize Pages Grid View")
                     .clicked()
                 {
                     self.page_view_mode = PageViewMode::OrganizePages;
@@ -3046,7 +3061,7 @@ impl RavPdfApp {
                 }
                 if ui
                     .add_enabled(has_doc, Button::new("🖼 Image"))
-                    .on_hover_text("Insert image onto page (FR-05.1)")
+                    .on_hover_text("Insert image onto page")
                     .clicked()
                 {
                     self.insert_image_dialog();
@@ -3098,7 +3113,7 @@ impl RavPdfApp {
                     ui.separator();
                     if ui
                         .selectable_label(self.split_view_enabled, "◫ Split")
-                        .on_hover_text("Split View (Ctrl+Shift+T) (FR-01.3.5)")
+                        .on_hover_text("Split View (Ctrl+Shift+T)")
                         .clicked()
                     {
                         self.split_view_enabled = !self.split_view_enabled;
@@ -3110,7 +3125,7 @@ impl RavPdfApp {
                     }
                     if ui
                         .button("⛶ Fullscreen")
-                        .on_hover_text("Full Screen Presentation (F11 / Ctrl+L) (FR-01.3.6)")
+                        .on_hover_text("Full Screen Presentation (F11 / Ctrl+L)")
                         .clicked()
                     {
                         self.is_full_screen = true;
@@ -3182,7 +3197,7 @@ impl RavPdfApp {
                         }
                     });
                     ui.checkbox(&mut self.form_test_mode, "👁 Test Mode")
-                        .on_hover_text("Toggle Form Test / Fill Preview Mode (FR-11.3.6)");
+                        .on_hover_text("Toggle Form Test / Fill Preview Mode");
 
                     if self.active_tool == ActiveTool::MeasureDistance
                         || self.active_tool == ActiveTool::MeasureArea
@@ -3190,14 +3205,14 @@ impl RavPdfApp {
                         ui.separator();
                         if ui
                             .small_button("⚙ Scale")
-                            .on_hover_text("Configure scale ratio and measurement units (FR-26.5)")
+                            .on_hover_text("Configure scale ratio and measurement units")
                             .clicked()
                         {
                             self.show_measure_scale_dialog = true;
                         }
                         ui.checkbox(&mut self.measure_bake_as_annot, "Annotate")
                             .on_hover_text(
-                                "Bake measurements into document as annotations (FR-26.4)",
+                                "Bake measurements into document as annotations",
                             );
                     }
 
@@ -3207,7 +3222,7 @@ impl RavPdfApp {
                             .button(
                                 RichText::new("🗑 Del Annot").color(Color32::from_rgb(239, 68, 68)),
                             )
-                            .on_hover_text("Delete selected annotation (Del) (FR-08.3)")
+                            .on_hover_text("Delete selected annotation (Del)")
                             .clicked()
                         {
                             if let Some(sel) = self.selected_annotation.take() {
@@ -3221,7 +3236,7 @@ impl RavPdfApp {
                         }
                         if ui
                             .button("⚙ Annot Props")
-                            .on_hover_text("Open annotation properties inspector (FR-08.3)")
+                            .on_hover_text("Open annotation properties inspector")
                             .clicked()
                         {
                             self.show_annot_inspector = true;
@@ -3234,7 +3249,7 @@ impl RavPdfApp {
                             .button(
                                 RichText::new("🗑 Del Field").color(Color32::from_rgb(239, 68, 68)),
                             )
-                            .on_hover_text("Delete selected form field (Del) (FR-11.1, FR-11.3)")
+                            .on_hover_text("Delete selected form field (Del)")
                             .clicked()
                         {
                             if let Some(sel) = self.selected_form_field.take() {
@@ -3250,14 +3265,14 @@ impl RavPdfApp {
                         }
                         if ui
                             .button("⚙ Field Props")
-                            .on_hover_text("Configure form field properties (FR-11.2)")
+                            .on_hover_text("Configure form field properties")
                             .clicked()
                         {
                             self.show_form_field_inspector = true;
                         }
                         if ui
                             .button("📋 Duplicate to Pages...")
-                            .on_hover_text("Duplicate field across multiple pages (FR-11.3.5)")
+                            .on_hover_text("Duplicate field across multiple pages")
                             .clicked()
                         {
                             self.show_duplicate_field_dialog = true;
@@ -3273,7 +3288,7 @@ impl RavPdfApp {
                                     .color(Color32::from_rgb(239, 68, 68))
                                     .strong(),
                             )
-                            .on_hover_text("Permanently apply marked redactions (FR-15.3, FR-15.6)")
+                            .on_hover_text("Permanently apply marked redactions")
                             .clicked()
                         {
                             self.show_apply_redactions_confirm_dialog = true;
@@ -3294,7 +3309,7 @@ impl RavPdfApp {
                                 RichText::new("📋 Copy Text")
                                     .color(Color32::from_rgb(59, 130, 246)),
                             )
-                            .on_hover_text("Copy selected text to clipboard (Ctrl+C) (FR-04.7)")
+                            .on_hover_text("Copy selected text to clipboard (Ctrl+C)")
                             .clicked()
                         {
                             ctx.output_mut(|o| {
@@ -3464,19 +3479,49 @@ impl RavPdfApp {
             .default_width(240.0)
             .min_width(200.0)
             .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Thumbnails, "Pages");
-                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Bookmarks, "Outline");
-                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Destinations, "Dests");
-                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Annotations, "Notes");
-                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Forms, "Forms");
-                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Attachments, "Files");
-                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Signatures, "Sign");
-                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Properties, "Info");
-                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Search, "Results");
-                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Accessibility, "A11y");
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+                    let row1 = [
+                        (SidebarTab::Thumbnails, "📄", "Pages (Thumbnails)"),
+                        (SidebarTab::Bookmarks, "📑", "Document Outline & Bookmarks"),
+                        (SidebarTab::Destinations, "📌", "Named Destinations"),
+                        (SidebarTab::Annotations, "💬", "Comments & Markup"),
+                        (SidebarTab::Forms, "📝", "Interactive Form Fields"),
+                    ];
+                    for (tab, icon, tip) in row1 {
+                        let selected = self.sidebar_tab == tab;
+                        if ui
+                            .selectable_label(selected, egui::RichText::new(icon).size(13.5))
+                            .on_hover_text(tip)
+                            .clicked()
+                        {
+                            self.sidebar_tab = tab;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+                    let row2 = [
+                        (SidebarTab::Attachments, "📎", "Embedded Attachments"),
+                        (SidebarTab::Signatures, "✍", "Digital Signatures"),
+                        (SidebarTab::Properties, "ℹ", "Document Information"),
+                        (SidebarTab::Search, "🔍", "Text Search Results"),
+                        (SidebarTab::Accessibility, "♿", "Accessibility Audit"),
+                    ];
+                    for (tab, icon, tip) in row2 {
+                        let selected = self.sidebar_tab == tab;
+                        if ui
+                            .selectable_label(selected, egui::RichText::new(icon).size(13.5))
+                            .on_hover_text(tip)
+                            .clicked()
+                        {
+                            self.sidebar_tab = tab;
+                        }
+                    }
                 });
 
+                ui.add_space(3.0);
                 ui.separator();
 
                 if self.active_tab().is_none() {
@@ -3498,7 +3543,7 @@ impl RavPdfApp {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui
                                     .button("➕ Blank")
-                                    .on_hover_text("Insert blank A4 page at end (FR-06.1)")
+                                    .on_hover_text("Insert blank A4 page at end")
                                     .clicked()
                                 {
                                     if let Some(tab) = self.active_tab_mut() {
@@ -3518,7 +3563,7 @@ impl RavPdfApp {
                                 }
                                 if ui
                                     .button("🏷 Labels")
-                                    .on_hover_text("Configure page numbering schemes (FR-06.9)")
+                                    .on_hover_text("Configure page numbering schemes")
                                     .clicked()
                                 {
                                     if let Some(tab) = self.active_tab() {
@@ -3544,20 +3589,20 @@ impl RavPdfApp {
                                 };
 
                                 let stroke = if is_selected {
-                                    Stroke::new(2.0_f32, Color32::from_rgb(66, 153, 225))
+                                    Stroke::new(2.0_f32, Color32::from_rgb(59, 130, 246))
                                 } else {
-                                    Stroke::new(1.0_f32, Color32::from_gray(60))
+                                    Stroke::new(1.0_f32, Color32::from_rgb(50, 50, 58))
                                 };
                                 let bg = if is_selected {
                                     Color32::from_rgb(30, 41, 59)
                                 } else {
-                                    Color32::from_rgb(20, 24, 33)
+                                    Color32::from_rgb(24, 24, 28)
                                 };
 
                                 egui::Frame::none()
                                     .fill(bg)
                                     .stroke(stroke)
-                                    .rounding(4.0)
+                                    .rounding(6.0)
                                     .inner_margin(egui::Margin::same(6.0))
                                     .show(ui, |ui| {
                                         ui.vertical_centered(|ui| {
@@ -3598,7 +3643,7 @@ impl RavPdfApp {
                                                 );
                                                 if ui
                                                     .small_button("⟳")
-                                                    .on_hover_text("Rotate 90° clockwise (FR-06.7)")
+                                                    .on_hover_text("Rotate 90° clockwise")
                                                     .clicked()
                                                 {
                                                     page_action = Some(PageAction::Rotate(i));
@@ -3606,7 +3651,7 @@ impl RavPdfApp {
                                                 if i > 0
                                                     && ui
                                                         .small_button("▲")
-                                                        .on_hover_text("Move page up (FR-06.6)")
+                                                        .on_hover_text("Move page up")
                                                         .clicked()
                                                 {
                                                     page_action = Some(PageAction::MoveUp(i));
@@ -3614,28 +3659,28 @@ impl RavPdfApp {
                                                 if i + 1 < total_pages
                                                     && ui
                                                         .small_button("▼")
-                                                        .on_hover_text("Move page down (FR-06.6)")
+                                                        .on_hover_text("Move page down")
                                                         .clicked()
                                                 {
                                                     page_action = Some(PageAction::MoveDown(i));
                                                 }
                                                 if ui
                                                     .small_button("📄")
-                                                    .on_hover_text("Extract page to new tab (FR-06.3)")
+                                                    .on_hover_text("Extract page to new tab")
                                                     .clicked()
                                                 {
                                                     page_action = Some(PageAction::Extract(i));
                                                 }
                                                 if ui
                                                     .small_button("📋")
-                                                    .on_hover_text("Duplicate page (FR-06.11)")
+                                                    .on_hover_text("Duplicate page")
                                                     .clicked()
                                                 {
                                                     page_action = Some(PageAction::Duplicate(i));
                                                 }
                                                 if ui
                                                     .small_button("✂")
-                                                    .on_hover_text("Crop page (FR-06.8)")
+                                                    .on_hover_text("Crop page")
                                                     .clicked()
                                                 {
                                                     page_action = Some(PageAction::Crop(i));
@@ -3643,7 +3688,7 @@ impl RavPdfApp {
                                                 if total_pages > 1
                                                     && ui
                                                         .small_button("🗑")
-                                                        .on_hover_text("Delete page (FR-06.2)")
+                                                        .on_hover_text("Delete page")
                                                         .clicked()
                                                 {
                                                     page_action = Some(PageAction::Delete(i));
@@ -3809,7 +3854,7 @@ impl RavPdfApp {
                             }
                         });
 
-                        if ui.button("⚡ Auto-Generate from Headings (FR-19.7)").on_hover_text("Scan page headings and generate bookmark tree").clicked() {
+                        if ui.button("⚡ Auto-Generate from Headings").on_hover_text("Scan page headings and generate bookmark tree").clicked() {
                             if let Some(tab) = self.active_tab_mut() {
                                 match ravpdf_core::outline::auto_generate_bookmarks_from_headings(&mut tab.doc) {
                                     Ok(count) => {
@@ -3848,7 +3893,7 @@ impl RavPdfApp {
 
                     SidebarTab::Destinations => {
                         // FR-20.4: Named Destinations Panel conforming to ISO 32000-1 Section 12.3.2.3
-                        ui.heading("Named Destinations (FR-20.4)");
+                        ui.heading("Named Destinations");
                         ui.add_space(4.0);
 
                         // Destination creation section
@@ -3934,7 +3979,7 @@ impl RavPdfApp {
                     }
 
                     SidebarTab::Annotations => {
-                        ui.heading("Comments & Markup (FR-08.3)");
+                        ui.heading("Comments & Markup");
                         ui.add_space(4.0);
                         let mut to_delete: Option<(usize, ObjectId)> = None;
                         let mut to_select: Option<SelectedAnnotation> = None;
@@ -4099,7 +4144,7 @@ impl RavPdfApp {
                                 }
                             }
                         } else {
-                            ui.heading("Attachments (FR-29)");
+                            ui.heading("Attachments");
                         }
                         ui.add_space(4.0);
 
@@ -4185,11 +4230,11 @@ impl RavPdfApp {
                     }
 
                     SidebarTab::Signatures => {
-                        ui.heading("Digital Signatures (FR-13)");
+                        ui.heading("Digital Signatures");
                         ui.add_space(4.0);
 
                         ui.horizontal(|ui| {
-                            if ui.button("➕ Sign Document...").on_hover_text("Add digital signature field (FR-13.1, FR-13.10)").clicked() {
+                            if ui.button("➕ Sign Document...").on_hover_text("Add digital signature field").clicked() {
                                 if let Some(tab) = self.active_tab() {
                                     self.sig_target_page = tab.current_page;
                                 }
@@ -4283,7 +4328,7 @@ impl RavPdfApp {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui
                                     .button("➕ Add")
-                                    .on_hover_text("Add interactive form field (FR-11.1)")
+                                    .on_hover_text("Add interactive form field")
                                     .clicked()
                                 {
                                     self.show_add_form_field_dialog = true;
@@ -4297,18 +4342,18 @@ impl RavPdfApp {
                         let mut import_data = false;
 
                         ui.horizontal(|ui| {
-                            if ui.button("🔍 Auto-Detect").on_hover_text("Heuristically scan page for fields (FR-11.3.1)").clicked() {
+                            if ui.button("🔍 Auto-Detect").on_hover_text("Heuristically scan page for fields").clicked() {
                                 auto_detect = true;
                             }
-                            if ui.button("🔢 Tab Order").on_hover_text("Configure tab navigation sequence (FR-11.2.7)").clicked() {
+                            if ui.button("🔢 Tab Order").on_hover_text("Configure tab navigation sequence").clicked() {
                                 self.show_tab_order_dialog = true;
                             }
                         });
                         ui.horizontal(|ui| {
-                            if ui.button("📥 Import").on_hover_text("Import values from FDF/JSON/CSV/XML (FR-11.3.2)").clicked() {
+                            if ui.button("📥 Import").on_hover_text("Import values from FDF/JSON/CSV/XML").clicked() {
                                 import_data = true;
                             }
-                            if ui.button("📤 Export").on_hover_text("Export values to FDF/JSON/CSV/XML (FR-11.3.2)").clicked() {
+                            if ui.button("📤 Export").on_hover_text("Export values to FDF/JSON/CSV/XML").clicked() {
                                 self.show_export_form_dialog = true;
                             }
                         });
@@ -4328,7 +4373,7 @@ impl RavPdfApp {
                                     ui.label(RichText::new(format!("{} fields", fields.len())).strong());
                                     if ui
                                         .button("Flatten All")
-                                        .on_hover_text("Permanently burn form fields into content (FR-11.6)")
+                                        .on_hover_text("Permanently burn form fields into content")
                                         .clicked()
                                     {
                                         flatten = true;
@@ -4467,7 +4512,7 @@ impl RavPdfApp {
                         ui.horizontal(|ui| {
                             ui.heading("Accessibility");
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("Auditing...").on_hover_text("Refresh accessibility audit (FR-21.1)").clicked() {
+                                if ui.button("Auditing...").on_hover_text("Refresh accessibility audit").clicked() {
                                     if let Some(tab) = self.active_tab() {
                                         self.accessibility_report = audit_accessibility(&tab.doc).ok();
                                     }
@@ -4514,7 +4559,7 @@ impl RavPdfApp {
                                 if !report.is_compliant {
                                     if ui
                                         .button("⚡ Quick Fix All Automatically")
-                                        .on_hover_text("Remediate title, language, tagged PDF structure, and tab order (FR-21.3-10)")
+                                        .on_hover_text("Remediate title, language, tagged PDF structure, and tab order")
                                         .clicked()
                                     {
                                         run_remediation = true;
@@ -4565,7 +4610,7 @@ impl RavPdfApp {
                             }
                             if let Some(updated) = updated_opt {
                                 self.accessibility_report = Some(updated);
-                                self.status_message = "Applied automatic accessibility remediations (FR-21)".into();
+                                self.status_message = "Applied automatic accessibility remediations".into();
                             }
                         }
 
@@ -4673,7 +4718,7 @@ impl RavPdfApp {
             // Organize Pages Toolbar
             ui.horizontal_wrapped(|ui| {
                 ui.heading(
-                    RichText::new("🗂 Organize Pages (FR-06)")
+                    RichText::new("🗂 Organize Pages")
                         .size(15.0)
                         .strong(),
                 );
@@ -4681,7 +4726,7 @@ impl RavPdfApp {
 
                 if ui
                     .button("➕ Insert Blank")
-                    .on_hover_text("Insert blank A4 page at end (FR-06.2)")
+                    .on_hover_text("Insert blank A4 page at end")
                     .clicked()
                 {
                     organize_action = Some(OrganizeAction::InsertBlank);
@@ -4689,28 +4734,28 @@ impl RavPdfApp {
                 let has_selection = !self.organize_selected_pages.is_empty();
                 if ui
                     .add_enabled(has_selection, Button::new("⟳ Rotate 90° CW"))
-                    .on_hover_text("Rotate selected pages 90° clockwise (FR-06.6)")
+                    .on_hover_text("Rotate selected pages 90° clockwise")
                     .clicked()
                 {
                     organize_action = Some(OrganizeAction::RotateCW);
                 }
                 if ui
                     .add_enabled(has_selection, Button::new("⟲ Rotate 90° CCW"))
-                    .on_hover_text("Rotate selected pages 90° counter-clockwise (FR-06.6)")
+                    .on_hover_text("Rotate selected pages 90° counter-clockwise")
                     .clicked()
                 {
                     organize_action = Some(OrganizeAction::RotateCCW);
                 }
                 if ui
                     .add_enabled(has_selection, Button::new("📄 Extract"))
-                    .on_hover_text("Extract selected pages to a new document tab (FR-06.7)")
+                    .on_hover_text("Extract selected pages to a new document tab")
                     .clicked()
                 {
                     organize_action = Some(OrganizeAction::Extract);
                 }
                 if ui
                     .add_enabled(has_selection, Button::new("📋 Duplicate"))
-                    .on_hover_text("Duplicate selected pages (FR-06.11)")
+                    .on_hover_text("Duplicate selected pages")
                     .clicked()
                 {
                     organize_action = Some(OrganizeAction::Duplicate);
@@ -4723,7 +4768,7 @@ impl RavPdfApp {
                             RichText::new("🗑 Delete").color(Color32::from_rgb(239, 68, 68)),
                         ),
                     )
-                    .on_hover_text("Delete selected pages (FR-06.4)")
+                    .on_hover_text("Delete selected pages")
                     .clicked()
                 {
                     organize_action = Some(OrganizeAction::Delete);
@@ -4900,7 +4945,7 @@ impl RavPdfApp {
                                             ui.horizontal(|ui| {
                                                 if ui
                                                     .small_button("⟳")
-                                                    .on_hover_text("Rotate 90° CW (FR-06.6)")
+                                                    .on_hover_text("Rotate 90° CW")
                                                     .clicked()
                                                 {
                                                     organize_action = Some(
@@ -4909,7 +4954,7 @@ impl RavPdfApp {
                                                 }
                                                 if ui
                                                     .small_button("⟲")
-                                                    .on_hover_text("Rotate 90° CCW (FR-06.6)")
+                                                    .on_hover_text("Rotate 90° CCW")
                                                     .clicked()
                                                 {
                                                     organize_action = Some(
@@ -4919,7 +4964,7 @@ impl RavPdfApp {
                                                 if page_idx > 0
                                                     && ui
                                                         .small_button("◀")
-                                                        .on_hover_text("Move page left (FR-06.5)")
+                                                        .on_hover_text("Move page left")
                                                         .clicked()
                                                 {
                                                     organize_action =
@@ -4928,7 +4973,7 @@ impl RavPdfApp {
                                                 if page_idx + 1 < total_pages
                                                     && ui
                                                         .small_button("▶")
-                                                        .on_hover_text("Move page right (FR-06.5)")
+                                                        .on_hover_text("Move page right")
                                                         .clicked()
                                                 {
                                                     organize_action =
@@ -4937,7 +4982,7 @@ impl RavPdfApp {
                                                 if total_pages > 1
                                                     && ui
                                                         .small_button("🗑")
-                                                        .on_hover_text("Delete page (FR-06.4)")
+                                                        .on_hover_text("Delete page")
                                                         .clicked()
                                                 {
                                                     organize_action = Some(
@@ -5133,7 +5178,7 @@ impl RavPdfApp {
         let mut close_split = false;
 
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Split View Mode (FR-01.3.5)").strong());
+            ui.label(RichText::new("Split View Mode").strong());
             ui.separator();
             if ui.button("✖ Close Split View").clicked() {
                 close_split = true;
@@ -6876,7 +6921,7 @@ impl RavPdfApp {
         // 1. Watermark Dialog (FR-18.2)
         if self.show_watermark_dialog {
             let mut close = false;
-            egui::Window::new("Add Text Watermark (FR-18.2)")
+            egui::Window::new("Add Text Watermark")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -6916,7 +6961,7 @@ impl RavPdfApp {
         // 2. Bates Numbering Dialog (FR-18.3)
         if self.show_bates_dialog {
             let mut close = false;
-            egui::Window::new("Apply Bates Numbering (FR-18.3)")
+            egui::Window::new("Apply Bates Numbering")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -6961,7 +7006,7 @@ impl RavPdfApp {
         // 3. Headers and Footers Dialog (FR-18.1)
         if self.show_header_footer_dialog {
             let mut close = false;
-            egui::Window::new("Add Headers & Footers (FR-18.1)")
+            egui::Window::new("Add Headers & Footers")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -7052,7 +7097,7 @@ impl RavPdfApp {
         // 4. FreeText Annotation Dialog (FR-08.1.4)
         if self.show_free_text_dialog {
             let mut close = false;
-            egui::Window::new("Add Text Box Annotation (FR-08.1.4)")
+            egui::Window::new("Add Text Box Annotation")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -7089,7 +7134,7 @@ impl RavPdfApp {
         // 5. Combine / Merge Files Dialog (FR-07.1)
         if self.show_combine_dialog {
             let mut close = false;
-            egui::Window::new("Combine / Merge PDF Files (FR-07.1)")
+            egui::Window::new("Combine / Merge PDF Files")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([480.0, 360.0])
@@ -7214,7 +7259,7 @@ impl RavPdfApp {
         // 6. Split Document Dialog (FR-07.3)
         if self.show_split_dialog {
             let mut close = false;
-            egui::Window::new("Split Document (FR-07.3)")
+            egui::Window::new("Split Document")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -7280,7 +7325,7 @@ impl RavPdfApp {
         if self.show_properties_dialog {
             let mut close = false;
             let mut apply = false;
-            egui::Window::new("Document Properties (FR-33)")
+            egui::Window::new("Document Properties")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([500.0, 420.0])
@@ -7394,7 +7439,7 @@ impl RavPdfApp {
         if self.show_redact_pattern_dialog {
             let mut close = false;
             let mut apply = false;
-            egui::Window::new("Sanitize & Redact Patterns (FR-15.4)")
+            egui::Window::new("Sanitize & Redact Patterns")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -7492,7 +7537,7 @@ impl RavPdfApp {
         // 9. Password Protect & Encrypt Dialog (FR-14)
         if self.show_encrypt_dialog {
             let mut close = false;
-            egui::Window::new("Password Protect & Encrypt (FR-14)")
+            egui::Window::new("Password Protect & Encrypt")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -7525,7 +7570,7 @@ impl RavPdfApp {
                     });
 
                     ui.add_space(8.0);
-                    ui.heading("Permissions (FR-14.2)");
+                    ui.heading("Permissions");
                     ui.checkbox(&mut self.encrypt_allow_print, "Allow Printing");
                     ui.checkbox(&mut self.encrypt_allow_copy, "Allow Copying Text & Graphics");
                     ui.checkbox(&mut self.encrypt_allow_modify, "Allow Modifying Content");
@@ -7585,7 +7630,7 @@ impl RavPdfApp {
         if self.show_optimize_dialog {
             let mut close = false;
             let mut apply = false;
-            egui::Window::new("Reduce File Size & Optimize (FR-25.1)")
+            egui::Window::new("Reduce File Size & Optimize")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -7650,7 +7695,7 @@ impl RavPdfApp {
         // 11. Audit Space Usage Dialog (FR-25.9)
         if self.show_space_audit_dialog {
             let mut close = false;
-            egui::Window::new("Audit Space Usage (FR-25.9)")
+            egui::Window::new("Audit Space Usage")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -7719,7 +7764,7 @@ impl RavPdfApp {
         if self.show_compare_dialog {
             let mut close = false;
             let mut run_compare = false;
-            egui::Window::new("Compare Two Documents (FR-17)")
+            egui::Window::new("Compare Two Documents")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([580.0, 460.0])
@@ -7839,7 +7884,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut run_check = false;
             let mut execute_fixup = false;
-            egui::Window::new("Preflight & Standards Validation (FR-22, FR-23)")
+            egui::Window::new("Preflight & Standards Validation")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([620.0, 500.0])
@@ -7896,7 +7941,7 @@ impl RavPdfApp {
                         });
                         if !rep.is_compliant {
                             ui.add_space(6.0);
-                            if ui.button("🛠 Execute Automated Preflight Fixups (FR-23.1.4)").on_hover_text("Embeds standard fonts, normalizes color spaces, sets OutputIntent, and compresses uncompressed streams").clicked() {
+                            if ui.button("🛠 Execute Automated Preflight Fixups").on_hover_text("Embeds standard fonts, normalizes color spaces, sets OutputIntent, and compresses uncompressed streams").clicked() {
                                 execute_fixup = true;
                             }
                         }
@@ -7950,7 +7995,7 @@ impl RavPdfApp {
         if self.show_batch_dialog {
             let mut close = false;
             let mut run_batch = false;
-            egui::Window::new("Action Wizard & Batch Processing (FR-30)")
+            egui::Window::new("Action Wizard & Batch Processing")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([640.0, 520.0])
@@ -7993,7 +8038,7 @@ impl RavPdfApp {
 
                     ui.separator();
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Templates (FR-30.3):").strong());
+                        ui.label(RichText::new("Templates:").strong());
                         if ui
                             .button("Distribution")
                             .on_hover_text("Sanitize metadata, flatten forms, optimize")
@@ -8032,26 +8077,26 @@ impl RavPdfApp {
                         }
                     });
 
-                    ui.heading("Action Sequence to Apply (FR-30.4):");
+                    ui.heading("Action Sequence to Apply:");
                     ui.checkbox(
                         &mut self.batch_action_optimize,
-                        "Optimize & Flate Compress (FR-25)",
+                        "Optimize & Flate Compress",
                     );
                     ui.checkbox(
                         &mut self.batch_action_linearize,
-                        "Linearize for Fast Web Streaming (FR-02.8, FR-25.8)",
+                        "Linearize for Fast Web Streaming",
                     );
                     ui.checkbox(
                         &mut self.batch_action_sanitize,
-                        "Sanitize Document Metadata (FR-30.4)",
+                        "Sanitize Document Metadata",
                     );
                     ui.checkbox(
                         &mut self.batch_action_flatten,
-                        "Flatten All Interactive Forms (FR-11)",
+                        "Flatten All Interactive Forms",
                     );
 
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.batch_action_watermark, "Add Watermark (FR-18.2):");
+                        ui.checkbox(&mut self.batch_action_watermark, "Add Watermark:");
                         if self.batch_action_watermark {
                             ui.text_edit_singleline(&mut self.batch_watermark_text);
                         }
@@ -8060,7 +8105,7 @@ impl RavPdfApp {
                     ui.horizontal(|ui| {
                         ui.checkbox(
                             &mut self.batch_action_bates,
-                            "Apply Bates Numbering (FR-18.3):",
+                            "Apply Bates Numbering:",
                         );
                         if self.batch_action_bates {
                             ui.label("Prefix:");
@@ -8163,7 +8208,7 @@ impl RavPdfApp {
         if self.show_crop_dialog {
             let mut close = false;
             let mut apply = false;
-            egui::Window::new(format!("Page Boundary Boxes (FR-06.8) - Page {}", self.crop_target_page + 1))
+            egui::Window::new(format!("Page Boundary Boxes - Page {}", self.crop_target_page + 1))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -8273,14 +8318,14 @@ impl RavPdfApp {
         if self.show_add_signature_dialog {
             let mut close = false;
             let mut execute_sig = false;
-            egui::Window::new("Digital Signatures & Certificates (FR-13)")
+            egui::Window::new("Digital Signatures & Certificates")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut self.sig_mode_idx, 0, "🔏 Cryptographic Digital ID (ISO 32000-1 Clause 12.8)");
-                        ui.selectable_value(&mut self.sig_mode_idx, 1, "📋 Prepare Signature Field (FR-13.10)");
+                        ui.selectable_value(&mut self.sig_mode_idx, 1, "📋 Prepare Signature Field");
                     });
                     ui.separator();
 
@@ -8306,9 +8351,9 @@ impl RavPdfApp {
                             ui.label("Location:");
                             ui.text_edit_singleline(&mut self.sig_location);
                         });
-                        ui.checkbox(&mut self.sig_is_visible, "Render Visible Signature Appearance (FR-13.10)");
+                        ui.checkbox(&mut self.sig_is_visible, "Render Visible Signature Appearance");
                         ui.add_space(4.0);
-                        ui.checkbox(&mut self.sig_is_certify, "Author Certification Signature (DocMDP - FR-13.3)");
+                        ui.checkbox(&mut self.sig_is_certify, "Author Certification Signature (DocMDP)");
                         if self.sig_is_certify {
                             ui.horizontal(|ui| {
                                 ui.label("Permitted Actions:");
@@ -8325,7 +8370,7 @@ impl RavPdfApp {
                                     });
                             });
                         }
-                        ui.checkbox(&mut self.sig_embed_ltv, "Embed Document Security Store (/DSS) for Long-Term Validation (LTV) (FR-13.8)");
+                        ui.checkbox(&mut self.sig_embed_ltv, "Embed Document Security Store (/DSS) for Long-Term Validation (LTV)");
                     } else {
                         ui.label(RichText::new("Place an interactive form signature field to be signed later:").italics());
                         ui.horizontal(|ui| {
@@ -8344,7 +8389,7 @@ impl RavPdfApp {
                             ui.label("Location:");
                             ui.text_edit_singleline(&mut self.sig_location);
                         });
-                        ui.checkbox(&mut self.sig_is_visible, "Visible Signature Appearance Box (FR-13.10)");
+                        ui.checkbox(&mut self.sig_is_visible, "Visible Signature Appearance Box");
                     }
 
                     ui.add_space(10.0);
@@ -8506,7 +8551,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut apply = false;
             let mut clear = false;
-            egui::Window::new("Page Numbering & Labels (FR-06.9)")
+            egui::Window::new("Page Numbering & Labels")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -8657,7 +8702,7 @@ impl RavPdfApp {
         if self.show_link_dialog {
             let mut close = false;
             let mut insert = false;
-            egui::Window::new("Add Hyperlink (FR-20.1)")
+            egui::Window::new("Add Hyperlink")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -8765,7 +8810,7 @@ impl RavPdfApp {
         if self.show_add_form_field_dialog {
             let mut close = false;
             let mut create_field = false;
-            egui::Window::new("Add Interactive Form Field (FR-11.1)")
+            egui::Window::new("Add Interactive Form Field")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -8872,7 +8917,7 @@ impl RavPdfApp {
                             });
                             ui.checkbox(
                                 &mut self.form_field_multiselect,
-                                "Allow Multiple Selection (FR-11.1.5)",
+                                "Allow Multiple Selection",
                             );
                         }
                         5 => {
@@ -9056,7 +9101,7 @@ impl RavPdfApp {
                 }
             }
 
-            egui::Window::new("Accessibility Checker & PDF/UA Remediation (FR-21)")
+            egui::Window::new("Accessibility Checker & PDF/UA Remediation")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([650.0, 520.0])
@@ -9089,7 +9134,7 @@ impl RavPdfApp {
 
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button("⚡ Remediate All Automatically (FR-21.3-10)").on_hover_text("Fix title, display preference, natural language, tags, and structure tab order in one click").clicked() {
+                            if ui.button("⚡ Remediate All Automatically").on_hover_text("Fix title, display preference, natural language, tags, and structure tab order in one click").clicked() {
                                 run_remediation = true;
                             }
                             if ui.button("🔄 Re-Audit Document").clicked() {
@@ -9179,7 +9224,7 @@ impl RavPdfApp {
                 }
                 if let Some(rep) = updated {
                     self.accessibility_report = Some(rep);
-                    self.status_message = "Completed accessibility remediation (FR-21)".into();
+                    self.status_message = "Completed accessibility remediation".into();
                 }
             }
             if let Some(t) = fix_title {
@@ -9236,7 +9281,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut do_export = false;
 
-            egui::Window::new("Export Document (FR-03.2)")
+            egui::Window::new("Export Document")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -9392,7 +9437,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut do_csv = false;
 
-            egui::Window::new("Comments & Review Summary (FR-31.5)")
+            egui::Window::new("Comments & Review Summary")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([600.0, 420.0])
@@ -9404,7 +9449,7 @@ impl RavPdfApp {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("Total Comments: {}", self.comments_list.len())).strong());
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("📥 Export Comments as CSV (FR-31.5)").clicked() {
+                            if ui.button("📥 Export Comments as CSV").clicked() {
                                 do_csv = true;
                             }
                         });
@@ -9471,7 +9516,7 @@ impl RavPdfApp {
         if self.show_merge_comments_dialog {
             let mut close = false;
 
-            egui::Window::new("Merge Reviewer Comments (FR-31.3)")
+            egui::Window::new("Merge Reviewer Comments")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -9526,7 +9571,7 @@ impl RavPdfApp {
         if self.show_measure_scale_dialog {
             let mut close = false;
 
-            egui::Window::new("Measurement Scale & Calibration (FR-26.5)")
+            egui::Window::new("Measurement Scale & Calibration")
                 .collapsible(false)
                 .resizable(false)
                 .default_size([460.0, 400.0])
@@ -9618,7 +9663,7 @@ impl RavPdfApp {
 
                     ui.add_space(6.0);
                     ui.group(|ui| {
-                        ui.label(RichText::new("Reference Calibration (FR-26.5)").strong());
+                        ui.label(RichText::new("Reference Calibration").strong());
                         ui.label("Calibrate scale from a known distance on paper (e.g. 10 ft doorway):");
                         ui.horizontal(|ui| {
                             ui.label("Known Distance:");
@@ -9634,14 +9679,14 @@ impl RavPdfApp {
 
                     ui.add_space(6.0);
                     ui.group(|ui| {
-                        ui.label(RichText::new("Snapping & Annotations (FR-26.4, FR-26.6)").strong());
+                        ui.label(RichText::new("Snapping & Annotations").strong());
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut self.measure_snap.snap_endpoints, "Endpoints");
                             ui.checkbox(&mut self.measure_snap.snap_midpoints, "Midpoints");
                             ui.checkbox(&mut self.measure_snap.snap_intersections, "Intersections");
                         });
                         ui.add_space(2.0);
-                        ui.checkbox(&mut self.measure_bake_as_annot, "Bake dimension lines into PDF as annotations (FR-26.4)");
+                        ui.checkbox(&mut self.measure_bake_as_annot, "Bake dimension lines into PDF as annotations");
                     });
 
                     ui.add_space(10.0);
@@ -9662,7 +9707,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut create_portfolio_action = false;
 
-            egui::Window::new("Create PDF Portfolio (FR-29.2.1)")
+            egui::Window::new("Create PDF Portfolio")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([540.0, 420.0])
@@ -9790,7 +9835,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut do_linearize = false;
 
-            egui::Window::new("Linearize for Fast Web View (FR-02.8, FR-25.8)")
+            egui::Window::new("Linearize for Fast Web View")
                 .collapsible(false)
                 .resizable(false)
                 .default_size([460.0, 240.0])
@@ -9859,7 +9904,7 @@ impl RavPdfApp {
             let mut run_calcs = false;
             let mut clear_log = false;
 
-            egui::Window::new("JavaScript Console & Debugger (FR-12.9)")
+            egui::Window::new("JavaScript Console & Debugger")
                 .open(&mut self.show_js_console_dialog)
                 .default_size([650.0, 480.0])
                 .resizable(true)
@@ -9979,7 +10024,7 @@ impl RavPdfApp {
             let mut pick_scans = false;
             let mut process_scans = false;
 
-            egui::Window::new("Scan & Enhance Pages (FR-32)")
+            egui::Window::new("Scan & Enhance Pages")
                 .open(&mut self.show_scan_dialog)
                 .default_size([540.0, 420.0])
                 .resizable(true)
@@ -10006,11 +10051,11 @@ impl RavPdfApp {
 
                     ui.separator();
                     ui.label(RichText::new("Enhancement & Correction Filters:").strong());
-                    ui.checkbox(&mut self.scan_auto_deskew, "Auto-Deskew Rotation (Projection profile analysis) (FR-32.4)");
-                    ui.checkbox(&mut self.scan_auto_crop, "Auto-Crop Page Boundaries (Remove bed margins) (FR-32.3)");
-                    ui.checkbox(&mut self.scan_despeckle, "Despeckle (Remove salt-and-pepper scan noise) (FR-32.5)");
-                    ui.checkbox(&mut self.scan_whiten, "Whiten Paper Background (Clean illumination) (FR-32.5)");
-                    ui.checkbox(&mut self.scan_binarize, "Otsu Binarization (Pure 1-bit Black & White) (FR-32.5)");
+                    ui.checkbox(&mut self.scan_auto_deskew, "Auto-Deskew Rotation (Projection profile analysis)");
+                    ui.checkbox(&mut self.scan_auto_crop, "Auto-Crop Page Boundaries (Remove bed margins)");
+                    ui.checkbox(&mut self.scan_despeckle, "Despeckle (Remove salt-and-pepper scan noise)");
+                    ui.checkbox(&mut self.scan_whiten, "Whiten Paper Background (Clean illumination)");
+                    ui.checkbox(&mut self.scan_binarize, "Otsu Binarization (Pure 1-bit Black & White)");
 
                     ui.add_space(10.0);
                     ui.separator();
@@ -10086,7 +10131,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut do_print_ps = false;
 
-            egui::Window::new("Print & Imposition Setup (FR-35)")
+            egui::Window::new("Print & Imposition Setup")
                 .default_size([520.0, 440.0])
                 .resizable(true)
                 .show(ctx, |ui| {
@@ -10107,7 +10152,7 @@ impl RavPdfApp {
                     });
 
                     ui.separator();
-                    ui.label(RichText::new("Page Layout & Imposition (FR-35.6 - FR-35.8):").strong());
+                    ui.label(RichText::new("Page Layout & Imposition:").strong());
                     egui::ComboBox::from_label("Imposition Mode")
                         .selected_text(match self.print_layout_idx {
                             0 => "Standard (1-Up Full Page)",
@@ -10242,7 +10287,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut trigger_action: Option<(String, String)> = None;
 
-            egui::Window::new("Plugins & Extensions Manager (FR-36)")
+            egui::Window::new("Plugins & Extensions Manager")
                 .open(&mut self.show_plugins_dialog)
                 .default_size([580.0, 420.0])
                 .resizable(true)
@@ -10328,7 +10373,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut do_export = false;
 
-            egui::Window::new("Export Form Data (FR-11.3.2)")
+            egui::Window::new("Export Form Data")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -10435,7 +10480,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut apply_tab_order = false;
 
-            egui::Window::new("Set Page Tab Order (FR-11.2.7)")
+            egui::Window::new("Set Page Tab Order")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -10493,7 +10538,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut do_embed = false;
 
-            egui::Window::new("Embed Rich Media / Video (FR-27)")
+            egui::Window::new("Embed Rich Media / Video")
                 .collapsible(false)
                 .resizable(false)
                 .default_size([460.0, 320.0])
@@ -10533,8 +10578,8 @@ impl RavPdfApp {
                     }
 
                     ui.add_space(4.0);
-                    ui.checkbox(&mut self.rich_media_autoplay, "Auto-play on page open (FR-27.4)");
-                    ui.checkbox(&mut self.rich_media_loop, "Loop playback (FR-27.4)");
+                    ui.checkbox(&mut self.rich_media_autoplay, "Auto-play on page open");
+                    ui.checkbox(&mut self.rich_media_loop, "Loop playback");
 
                     ui.weak(format!("Bounding Box: [{:.1}, {:.1}, {:.1}, {:.1}] pt",
                         self.rich_media_rect[0], self.rich_media_rect[1],
@@ -10655,7 +10700,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut do_embed = false;
 
-            egui::Window::new("Embed 3D Model (FR-28)")
+            egui::Window::new("Embed 3D Model")
                 .collapsible(false)
                 .resizable(false)
                 .default_size([460.0, 320.0])
@@ -10841,12 +10886,12 @@ impl RavPdfApp {
             let mut close = false;
             let mut run_ocr = false;
 
-            egui::Window::new("Recognize Text (OCR Engine) - FR-16")
+            egui::Window::new("Recognize Text (OCR Engine)")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([500.0, 480.0])
                 .show(ctx, |ui| {
-                    ui.heading("Optical Character Recognition (ISO 32000-1 / FR-16)");
+                    ui.heading("Optical Character Recognition");
                     ui.label(
                         "Generate searchable, selectable text layers from scanned raster pages.",
                     );
@@ -10935,7 +10980,7 @@ impl RavPdfApp {
 
                     ui.checkbox(
                         &mut self.ocr_auto_rotate,
-                        "Auto-detect orientation and correct rotation (FR-16.6)",
+                        "Auto-detect orientation and correct rotation",
                     );
 
                     ui.separator();
@@ -10955,7 +11000,7 @@ impl RavPdfApp {
 
                     if let Some(ref res) = self.ocr_result {
                         ui.separator();
-                        ui.heading("Recognition Results Summary (FR-16.9)");
+                        ui.heading("Recognition Results Summary");
                         ui.label(format!("• Total Recognized Words: {}", res.total_words));
                         ui.label(format!(
                             "• Average Confidence Score: {:.1}%",
@@ -11052,7 +11097,7 @@ impl RavPdfApp {
             let mut inspect = false;
             let mut reset_plates = false;
 
-            egui::Window::new("Output Preview & Separations (FR-23.2)")
+            egui::Window::new("Output Preview & Separations")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([460.0, 520.0])
@@ -11212,13 +11257,13 @@ impl RavPdfApp {
             let mut execute_convert = false;
             let mut execute_embed_oi = false;
 
-            egui::Window::new("Color Management & Soft Proofing (FR-24)")
+            egui::Window::new("Color Management & Soft Proofing")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([540.0, 560.0])
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.heading("Soft-Proofing Simulation (FR-24.5)");
+                    ui.heading("Soft-Proofing Simulation");
                     ui.label("Simulate press output, ink gamut, paper white, and black ink on your display.");
                     ui.add_space(4.0);
 
@@ -11251,7 +11296,7 @@ impl RavPdfApp {
                         });
 
                         ui.horizontal(|ui| {
-                            ui.label("Rendering Intent (FR-24.2):");
+                            ui.label("Rendering Intent:");
                             egui::ComboBox::from_id_salt("sp_rendering_intent")
                                 .selected_text(self.soft_proof_config.rendering_intent.to_pdf_name())
                                 .show_ui(ui, |ui| {
@@ -11280,7 +11325,7 @@ impl RavPdfApp {
 
                     ui.add_space(8.0);
                     ui.separator();
-                    ui.heading("Convert Document Colors (FR-24.6)");
+                    ui.heading("Convert Document Colors");
                     ui.label("Transform color operators in all page content streams to a target working color space.");
                     ui.add_space(4.0);
 
@@ -11298,7 +11343,7 @@ impl RavPdfApp {
 
                     ui.add_space(8.0);
                     ui.separator();
-                    ui.heading("Output Intent & ICC Profiles (FR-24.1, FR-24.4)");
+                    ui.heading("Output Intent & ICC Profiles");
                     ui.label("Embed PDF/X or PDF/A OutputIntent with embedded ICC binary profile.");
                     ui.add_space(4.0);
 
@@ -11416,7 +11461,7 @@ impl RavPdfApp {
             let mut execute_convert_spots = false;
             let mut execute_add_trap = false;
 
-            egui::Window::new("Commercial Prepress & Print Production (FR-23.3)")
+            egui::Window::new("Commercial Prepress & Print Production")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([600.0, 520.0])
@@ -11432,7 +11477,7 @@ impl RavPdfApp {
 
                     match self.prepress_tab_idx {
                         0 => {
-                            ui.heading("Add Prepress Printer Marks (FR-23.3.4)");
+                            ui.heading("Add Prepress Printer Marks");
                             ui.label("Embed cutting ticks, bleed boundaries, registration bullseyes, color bars, and slug info.");
                             ui.add_space(4.0);
                             ui.group(|ui| {
@@ -11455,7 +11500,7 @@ impl RavPdfApp {
                             }
                         }
                         1 => {
-                            ui.heading("Ink Manager & Separation Plates (FR-23.3.2)");
+                            ui.heading("Ink Manager & Separation Plates");
                             ui.label("Inspect process inks and spot color separations; map spot plates to process CMYK.");
                             ui.add_space(4.0);
                             if let Some(tab) = self.active_tab() {
@@ -11476,7 +11521,7 @@ impl RavPdfApp {
                             }
                         }
                         2 => {
-                            ui.heading("Transparency Flattener (FR-23.3.3)");
+                            ui.heading("Transparency Flattener");
                             ui.label("Flatten transparency groups and normalize opacity for prepress PostScript RIPs.");
                             ui.add_space(4.0);
                             ui.group(|ui| {
@@ -11494,7 +11539,7 @@ impl RavPdfApp {
                             }
                         }
                         _ => {
-                            ui.heading("Trap Presets (FR-23.3.5)");
+                            ui.heading("Trap Presets");
                             ui.label("Manage ink trapping tolerances to prevent press registration gaps.");
                             ui.add_space(4.0);
                             if let Some(tab) = self.active_tab() {
@@ -11616,7 +11661,7 @@ impl RavPdfApp {
             let mut execute_validate = false;
             let mut execute_convert = false;
 
-            egui::Window::new("Standards Compliance Wizard (PDF/A, PDF/X, PDF/E) (FR-22)")
+            egui::Window::new("Standards Compliance Wizard (PDF/A, PDF/X, PDF/E)")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([580.0, 520.0])
@@ -11861,7 +11906,7 @@ impl RavPdfApp {
             let mut apply_insert = false;
             let mut refresh_spans = false;
 
-            egui::Window::new("In-Place Text Editor (FR-04.1 - FR-04.5, FR-04.12)")
+            egui::Window::new("In-Place Text Editor")
                 .collapsible(false)
                 .resizable(true)
                 .default_width(540.0)
@@ -11871,8 +11916,8 @@ impl RavPdfApp {
                     ui.add_space(4.0);
 
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.text_editor_block_mode, false, "✏️ In-Place Text Replace (FR-04.1)");
-                        ui.selectable_value(&mut self.text_editor_block_mode, true, "📐 Formatted Paragraph Reflow (FR-04.2, FR-04.4)");
+                        ui.selectable_value(&mut self.text_editor_block_mode, false, "✏️ In-Place Text Replace");
+                        ui.selectable_value(&mut self.text_editor_block_mode, true, "📐 Formatted Paragraph Reflow");
                         if ui.button("🔄 Refresh Spans").clicked() {
                             refresh_spans = true;
                         }
@@ -12127,7 +12172,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut create_doc = false;
 
-            egui::Window::new("Create PDF from Markdown (FR-02.5, FR-02.6, FR-03.1.6)")
+            egui::Window::new("Create PDF from Markdown")
                 .collapsible(false)
                 .resizable(true)
                 .default_width(560.0)
@@ -12227,7 +12272,7 @@ impl RavPdfApp {
             let mut apply_crop = false;
             let mut z_order_action: Option<ZOrderAction> = None;
 
-            egui::Window::new("🖼️ Edit & Transform Images (FR-05)")
+            egui::Window::new("🖼️ Edit & Transform Images")
                 .collapsible(false)
                 .resizable(true)
                 .default_width(580.0)
@@ -12287,7 +12332,7 @@ impl RavPdfApp {
                                 ui.add(egui::DragValue::new(&mut self.image_editor_pos_x).speed(1.0).range(0.0..=2000.0));
                                 ui.label("Y:");
                                 ui.add(egui::DragValue::new(&mut self.image_editor_pos_y).speed(1.0).range(0.0..=2000.0));
-                                ui.checkbox(&mut self.image_editor_snapping_enabled, "Magnetic Snap (FR-05.9)");
+                                ui.checkbox(&mut self.image_editor_snapping_enabled, "Magnetic Snap");
                             });
 
                             // Alignment Guide Snapping Calculation (FR-05.9)
@@ -12358,18 +12403,18 @@ impl RavPdfApp {
                             });
 
                             ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.image_editor_flip_h, "Flip Horizontal (FR-05.7)");
-                                ui.checkbox(&mut self.image_editor_flip_v, "Flip Vertical (FR-05.7)");
+                                ui.checkbox(&mut self.image_editor_flip_h, "Flip Horizontal");
+                                ui.checkbox(&mut self.image_editor_flip_v, "Flip Vertical");
                             });
 
                             // Opacity (FR-05.10)
                             ui.horizontal(|ui| {
-                                ui.label("Opacity / Transparency (FR-05.10):");
+                                ui.label("Opacity / Transparency:");
                                 ui.add(egui::Slider::new(&mut self.image_editor_opacity, 0.05..=1.0).text("Alpha"));
                             });
 
                             // Vector Cropping (FR-05.6)
-                            ui.collapsing("Vector Cropping Frame (FR-05.6)", |ui| {
+                            ui.collapsing("Vector Cropping Frame", |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label("Crop X:");
                                     ui.add(egui::DragValue::new(&mut self.image_editor_crop_x));
@@ -12401,10 +12446,10 @@ impl RavPdfApp {
                                 if ui.button("💾 Apply Transforms").clicked() {
                                     apply_transform = true;
                                 }
-                                if ui.button("🔄 Replace with New Image File... (FR-05.2)").clicked() {
+                                if ui.button("🔄 Replace with New Image File...").clicked() {
                                     replace_file = true;
                                 }
-                                if ui.button("🗑️ Delete Image (FR-05.3)").clicked() {
+                                if ui.button("🗑️ Delete Image").clicked() {
                                     delete_img = true;
                                 }
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -12538,7 +12583,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut apply_stamp = false;
 
-            egui::Window::new("🏷️ Rubber Stamps & Sign Here (FR-10)")
+            egui::Window::new("🏷️ Rubber Stamps & Sign Here")
                 .collapsible(false)
                 .resizable(true)
                 .default_width(520.0)
@@ -12631,7 +12676,7 @@ impl RavPdfApp {
                     // Dynamic Stamp Options (FR-10.3)
                     ui.checkbox(
                         &mut self.stamp_include_dynamic_date,
-                        "Embed Dynamic User & Timestamp (FR-10.3)",
+                        "Embed Dynamic User & Timestamp",
                     );
                     if self.stamp_include_dynamic_date {
                         ui.horizontal(|ui| {
@@ -12679,7 +12724,7 @@ impl RavPdfApp {
 
                     // Pop-up Note (FR-10.7)
                     ui.horizontal(|ui| {
-                        ui.label("Pop-up Note (FR-10.7):");
+                        ui.label("Pop-up Note:");
                         ui.text_edit_singleline(&mut self.stamp_note_input);
                     });
 
@@ -12791,7 +12836,7 @@ impl RavPdfApp {
             let mut apply_ink = false;
             let mut apply_erase = false;
 
-            egui::Window::new("📐 Drawing & Shape Tools (FR-09)")
+            egui::Window::new("📐 Drawing & Shape Tools")
                 .collapsible(false)
                 .resizable(true)
                 .default_width(560.0)
@@ -12803,10 +12848,10 @@ impl RavPdfApp {
                     // Category Tabs
                     ui.horizontal(|ui| {
                         let categories = [
-                            "Shapes (FR-09.3-6)",
-                            "Polygons (FR-09.7-8)",
-                            "Freehand Ink (FR-09.1)",
-                            "Eraser Tool (FR-09.2)",
+                            "Shapes",
+                            "Polygons",
+                            "Freehand Ink",
+                            "Eraser Tool",
                         ];
                         for (idx, cat) in categories.iter().enumerate() {
                             if ui.selectable_label(self.drawing_category_idx == idx, *cat).clicked() {
@@ -12894,7 +12939,7 @@ impl RavPdfApp {
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.checkbox(&mut self.drawing_is_cloudy, "☁️ Cloudy / Scalloped Border (FR-09.9)");
+                                    ui.checkbox(&mut self.drawing_is_cloudy, "☁️ Cloudy / Scalloped Border");
                                     if self.drawing_is_cloudy {
                                         ui.label("Intensity:");
                                         ui.add(egui::Slider::new(&mut self.drawing_cloudy_intensity, 0.5..=3.0));
@@ -12913,9 +12958,9 @@ impl RavPdfApp {
                             });
 
                             ui.horizontal(|ui| {
-                                ui.label("Opacity (FR-09.11):");
+                                ui.label("Opacity:");
                                 ui.add(egui::Slider::new(&mut self.drawing_opacity, 0.1..=1.0));
-                                ui.checkbox(&mut self.drawing_locked, "🔒 Lock Annotation (FR-09.12)");
+                                ui.checkbox(&mut self.drawing_locked, "🔒 Lock Annotation");
                             });
 
                             ui.horizontal(|ui| {
@@ -12936,7 +12981,7 @@ impl RavPdfApp {
                         }
                         1 => {
                             // Polygons & Polylines
-                            ui.label("Closed Polygon (FR-09.7) or Open Polyline (FR-09.8):");
+                            ui.label("Closed Polygon or Open Polyline:");
                             ui.horizontal(|ui| {
                                 ui.label("Vertices Coordinates (x1,y1; x2,y2; ...):");
                             });
@@ -12971,7 +13016,7 @@ impl RavPdfApp {
                                 if self.drawing_has_fill {
                                     ui.color_edit_button_rgb(&mut self.drawing_fill_color);
                                 }
-                                ui.checkbox(&mut self.drawing_is_cloudy, "☁️ Cloudy Perimeter (FR-09.9)");
+                                ui.checkbox(&mut self.drawing_is_cloudy, "☁️ Cloudy Perimeter");
                             });
 
                             ui.horizontal(|ui| {
@@ -12993,7 +13038,7 @@ impl RavPdfApp {
                         }
                         2 => {
                             // Freehand Ink Tool
-                            ui.label("Freehand Ink Drawing (FR-09.1):");
+                            ui.label("Freehand Ink Drawing:");
                             ui.label(RichText::new("Sequence of point coordinates: x1,y1; x2,y2; ... (separate multiple strokes with '|')").small());
                             ui.text_edit_multiline(&mut self.drawing_ink_strokes_input);
 
@@ -13019,7 +13064,7 @@ impl RavPdfApp {
                             });
 
                             ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.drawing_ink_smooth, "✨ Apply Catmull-Rom Smoothing (FR-09.1)");
+                                ui.checkbox(&mut self.drawing_ink_smooth, "✨ Apply Catmull-Rom Smoothing");
                                 ui.label("Opacity:");
                                 ui.add(egui::Slider::new(&mut self.drawing_opacity, 0.1..=1.0));
                                 ui.checkbox(&mut self.drawing_locked, "🔒 Lock");
@@ -13038,7 +13083,7 @@ impl RavPdfApp {
                         }
                         _ => {
                             // Eraser Tool
-                            ui.label("Stroke & Point Eraser (FR-09.2):");
+                            ui.label("Stroke & Point Eraser:");
                             ui.label(RichText::new("Removes intersecting freehand ink strokes at the specified page coordinates.").small());
                             ui.separator();
 
@@ -13304,7 +13349,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut apply_callout = false;
 
-            egui::Window::new("🗨️ Callout Annotation (FR-08.1.3)")
+            egui::Window::new("🗨️ Callout Annotation")
                 .collapsible(false)
                 .resizable(true)
                 .default_width(420.0)
@@ -13416,7 +13461,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut apply_typewriter = false;
 
-            egui::Window::new("⌨️ Typewriter Annotation (FR-08.1.4)")
+            egui::Window::new("⌨️ Typewriter Annotation")
                 .collapsible(false)
                 .resizable(true)
                 .default_width(380.0)
@@ -13509,7 +13554,7 @@ impl RavPdfApp {
                 let subtype_str = sel.annot_type.subtype_name().to_string();
                 let rect_coords = sel.rect;
 
-                egui::Window::new("🏷 Annotation Properties (FR-08.3)")
+                egui::Window::new("🏷 Annotation Properties")
                     .collapsible(true)
                     .resizable(true)
                     .default_size([300.0, 320.0])
@@ -13553,7 +13598,7 @@ impl RavPdfApp {
 
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if ui.button("🔒 Toggle Lock (FR-09.12)").clicked() {
+                            if ui.button("🔒 Toggle Lock").clicked() {
                                 toggle_lock = true;
                             }
                             if ui
@@ -13640,7 +13685,7 @@ impl RavPdfApp {
                 let field_type_name = sel.field_type.ft_name().to_string();
                 let rect_coords = sel.rect;
 
-                egui::Window::new("📝 Form Field Properties (FR-11.2)")
+                egui::Window::new("📝 Form Field Properties")
                     .collapsible(true)
                     .resizable(true)
                     .default_size([340.0, 420.0])
@@ -13665,7 +13710,7 @@ impl RavPdfApp {
                         ));
                         ui.separator();
 
-                        ui.label(RichText::new("General Properties (FR-11.2.1)").strong());
+                        ui.label(RichText::new("General Properties").strong());
                         ui.horizontal(|ui| {
                             ui.label("Field Name (/T):");
                             ui.text_edit_singleline(&mut self.form_field_inspector_name);
@@ -13680,7 +13725,7 @@ impl RavPdfApp {
                         });
 
                         ui.separator();
-                        ui.label(RichText::new("Appearance (FR-11.2.2)").strong());
+                        ui.label(RichText::new("Appearance").strong());
                         ui.horizontal(|ui| {
                             ui.label("Font Size:");
                             ui.add(
@@ -13697,7 +13742,7 @@ impl RavPdfApp {
                         });
 
                         ui.separator();
-                        ui.label(RichText::new("Field Flags (FR-11.2.6)").strong());
+                        ui.label(RichText::new("Field Flags").strong());
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut self.form_field_inspector_readonly, "Read-Only");
                             ui.checkbox(&mut self.form_field_inspector_required, "Required");
@@ -13710,7 +13755,7 @@ impl RavPdfApp {
                             }
                             if ui
                                 .button(
-                                    RichText::new("🗑 Delete Field (FR-11.3)")
+                                    RichText::new("🗑 Delete Field")
                                         .color(Color32::from_rgb(239, 68, 68)),
                                 )
                                 .clicked()
@@ -13787,7 +13832,7 @@ impl RavPdfApp {
             let mut clear_all = false;
             let count = self.marked_redactions.len();
 
-            egui::Window::new("⚠️ Apply Redactions - Irreversible Action (FR-15.3, FR-15.6)")
+            egui::Window::new("⚠️ Apply Redactions - Irreversible Action")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -13859,7 +13904,7 @@ impl RavPdfApp {
                             tab.is_modified = true;
                             tab.invalidate_render();
                             self.status_message =
-                                format!("Permanently burned {} redactions (FR-15.3)", num);
+                                format!("Permanently burned {} redactions", num);
                             self.marked_redactions.clear();
                         }
                         Err(e) => {
@@ -13882,7 +13927,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut execute_sanitize = false;
 
-            egui::Window::new("🛡 Sanitize Document (FR-15.5)")
+            egui::Window::new("🛡 Sanitize Document")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -13923,7 +13968,7 @@ impl RavPdfApp {
 
                     if let Some(ref report) = self.sanitize_report {
                         ui.separator();
-                        ui.label(RichText::new("Sanitization Summary (FR-15.5):").strong().color(Color32::from_rgb(34, 197, 94)));
+                        ui.label(RichText::new("Sanitization Summary:").strong().color(Color32::from_rgb(34, 197, 94)));
                         ui.label(format!("• Metadata fields removed: {}", report.metadata_fields_removed));
                         ui.label(format!("• XMP metadata stream removed: {}", if report.xmp_metadata_removed { "Yes" } else { "No" }));
                         ui.label(format!("• Annotations/comments removed: {}", report.annotations_removed));
@@ -13952,7 +13997,7 @@ impl RavPdfApp {
                             tab.is_modified = true;
                             tab.invalidate_render();
                             self.status_message =
-                                "Document sanitized successfully (FR-15.5)".into();
+                                "Document sanitized successfully".into();
                             self.sanitize_report = Some(rep);
                         }
                         Err(e) => {
@@ -13974,7 +14019,7 @@ impl RavPdfApp {
             let mut execute_duplicate = false;
             let sel_opt = self.selected_form_field.clone();
 
-            egui::Window::new("Duplicate Field Across Pages (FR-11.3.5)")
+            egui::Window::new("Duplicate Field Across Pages")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -14120,7 +14165,7 @@ impl RavPdfApp {
                                     tab.is_modified = true;
                                     tab.invalidate_render();
                                     self.status_message = format!(
-                                        "Duplicated field '{}' to {} pages (FR-11.3.5)",
+                                        "Duplicated field '{}' to {} pages",
                                         sel.name,
                                         ids.len()
                                     );
@@ -14148,7 +14193,7 @@ impl RavPdfApp {
             let mut close = false;
             let mut execute_import = false;
 
-            egui::Window::new("XFDF Annotations Exchange (ISO 19444-1 / FR-08.3.6)")
+            egui::Window::new("XFDF Annotations Exchange")
                 .collapsible(false)
                 .resizable(true)
                 .default_size([550.0, 400.0])
@@ -14221,7 +14266,7 @@ impl RavPdfApp {
                                 tab.is_modified = true;
                                 tab.invalidate_render();
                                 self.status_message =
-                                    format!("Imported {} annotations from XFDF (FR-08.3.6)", count);
+                                    format!("Imported {} annotations from XFDF", count);
                                 close = true;
                             }
                             Err(e) => {
@@ -14284,6 +14329,57 @@ impl eframe::App for RavPdfApp {
     }
 }
 
+fn setup_custom_theme(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.dark_mode = true;
+    visuals.panel_fill = Color32::from_rgb(24, 24, 27); // Zinc 900
+    visuals.window_fill = Color32::from_rgb(32, 32, 36);
+    visuals.faint_bg_color = Color32::from_rgb(39, 39, 42); // Zinc 800
+    visuals.extreme_bg_color = Color32::from_rgb(18, 18, 20); // Canvas & input background
+    visuals.code_bg_color = Color32::from_rgb(28, 28, 32);
+
+    visuals.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(63, 63, 70));
+    visuals.window_rounding = egui::Rounding::same(8.0);
+    visuals.menu_rounding = egui::Rounding::same(6.0);
+
+    let rounding = egui::Rounding::same(5.0);
+
+    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(30, 30, 34);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(48, 48, 56));
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231));
+    visuals.widgets.noninteractive.rounding = rounding;
+
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(39, 39, 44);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(58, 58, 66));
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(220, 220, 225));
+    visuals.widgets.inactive.rounding = rounding;
+
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(52, 52, 60);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(59, 130, 246));
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.widgets.hovered.rounding = rounding;
+
+    visuals.widgets.active.bg_fill = Color32::from_rgb(37, 99, 235);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.widgets.active.rounding = rounding;
+
+    visuals.widgets.open.bg_fill = Color32::from_rgb(44, 44, 50);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(59, 130, 246));
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.widgets.open.rounding = rounding;
+
+    visuals.selection.bg_fill = Color32::from_rgb(37, 99, 235);
+    visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
+
+    ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(6.0, 5.0);
+    style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    ctx.set_style(style);
+}
+
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -14308,6 +14404,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "RAV PDF",
         options,
-        Box::new(|_cc| Ok(Box::new(initial_app))),
+        Box::new(|cc| {
+            setup_custom_theme(&cc.egui_ctx);
+            Ok(Box::new(initial_app))
+        }),
     )
 }

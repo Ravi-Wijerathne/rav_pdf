@@ -13,6 +13,7 @@ use ravpdf_core::document::PdfDocument;
 use ravpdf_core::error::{PdfError, Result};
 use ravpdf_core::lexer::{Lexer, Token};
 use ravpdf_core::object::{Object, PdfDictionary, PdfName, PdfStream};
+use ravpdf_core::FontEncodingInfo;
 
 /// Represents an extracted or formatted text span with its spatial coordinates and typography.
 ///
@@ -264,10 +265,22 @@ fn token_as_f64(token: &Token) -> Option<f64> {
     }
 }
 
-fn token_as_text(token: &Token) -> Option<String> {
+fn token_as_decoded_text(token: &Token, font: Option<&FontEncodingInfo>) -> Option<String> {
     match token {
-        Token::StringLiteral(bytes) => Some(decode_pdf_string(bytes)),
-        Token::HexString(bytes) => Some(decode_pdf_string(bytes)),
+        Token::StringLiteral(bytes) => {
+            if let Some(f) = font {
+                Some(f.decode_string(bytes))
+            } else {
+                Some(decode_pdf_string(bytes))
+            }
+        }
+        Token::HexString(bytes) => {
+            if let Some(f) = font {
+                Some(f.decode_string(bytes))
+            } else {
+                Some(decode_pdf_string(bytes))
+            }
+        }
         _ => None,
     }
 }
@@ -280,6 +293,12 @@ pub fn extract_page_text_spans(doc: &PdfDocument, page_index: usize) -> Result<V
     if content_bytes.is_empty() {
         return Ok(Vec::new());
     }
+
+    let fonts = if let Some(page) = doc.get_page(page_index) {
+        FontEncodingInfo::load_page_fonts(doc, page.resources.as_ref())
+    } else {
+        std::collections::HashMap::new()
+    };
 
     let mut spans = Vec::new();
     let mut lexer = Lexer::new(&content_bytes);
@@ -397,8 +416,10 @@ pub fn extract_page_text_spans(doc: &PdfDocument, page_index: usize) -> Result<V
                         tm_y = lm_y;
                     }
                     "Tj" => {
+                        let font_key = cur_font.strip_prefix('/').unwrap_or(&cur_font);
+                        let font_info = fonts.get(font_key);
                         if !operands.is_empty() {
-                            if let Some(text) = token_as_text(&operands[operands.len() - 1]) {
+                            if let Some(text) = token_as_decoded_text(&operands[operands.len() - 1], font_info) {
                                 if !text.is_empty() {
                                     spans.push(TextSpan {
                                         text: text.clone(),
@@ -416,11 +437,13 @@ pub fn extract_page_text_spans(doc: &PdfDocument, page_index: usize) -> Result<V
                         }
                     }
                     "'" => {
+                        let font_key = cur_font.strip_prefix('/').unwrap_or(&cur_font);
+                        let font_info = fonts.get(font_key);
                         lm_y -= cur_leading;
                         tm_x = lm_x;
                         tm_y = lm_y;
                         if !operands.is_empty() {
-                            if let Some(text) = token_as_text(&operands[operands.len() - 1]) {
+                            if let Some(text) = token_as_decoded_text(&operands[operands.len() - 1], font_info) {
                                 if !text.is_empty() {
                                     spans.push(TextSpan {
                                         text: text.clone(),
@@ -438,13 +461,15 @@ pub fn extract_page_text_spans(doc: &PdfDocument, page_index: usize) -> Result<V
                         }
                     }
                     "\"" => {
+                        let font_key = cur_font.strip_prefix('/').unwrap_or(&cur_font);
+                        let font_info = fonts.get(font_key);
                         if operands.len() >= 3 {
                             cur_word_spacing = token_as_f64(&operands[operands.len() - 3]).unwrap_or(0.0);
                             cur_char_spacing = token_as_f64(&operands[operands.len() - 2]).unwrap_or(0.0);
                             lm_y -= cur_leading;
                             tm_x = lm_x;
                             tm_y = lm_y;
-                            if let Some(text) = token_as_text(&operands[operands.len() - 1]) {
+                            if let Some(text) = token_as_decoded_text(&operands[operands.len() - 1], font_info) {
                                 if !text.is_empty() {
                                     spans.push(TextSpan {
                                         text: text.clone(),
@@ -462,9 +487,11 @@ pub fn extract_page_text_spans(doc: &PdfDocument, page_index: usize) -> Result<V
                         }
                     }
                     "TJ" => {
+                        let font_key = cur_font.strip_prefix('/').unwrap_or(&cur_font);
+                        let font_info = fonts.get(font_key);
                         let mut combined_text = String::new();
                         for op in operands.iter().rev() {
-                            if let Some(t) = token_as_text(op) {
+                            if let Some(t) = token_as_decoded_text(op, font_info) {
                                 combined_text.insert_str(0, &t);
                             } else if matches!(op, Token::ArrayOpen) {
                                 break;
