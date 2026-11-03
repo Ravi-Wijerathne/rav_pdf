@@ -5,6 +5,7 @@
 use ravpdf_core::document::PdfDocument;
 use ravpdf_core::error::{PdfError, Result};
 use ravpdf_core::lexer::{Lexer, Token};
+use ravpdf_core::FontEncodingInfo;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -22,36 +23,68 @@ pub fn extract_page_text(doc: &PdfDocument, page_index: usize) -> Result<String>
         return Ok(String::new());
     }
 
+    let fonts = if let Some(page) = doc.get_page(page_index) {
+        FontEncodingInfo::load_page_fonts(doc, page.resources.as_ref())
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let mut lexer = Lexer::new(&content_bytes);
     let mut page_text = String::new();
     let mut last_was_text = false;
+    let mut cur_font = String::new();
+    let mut operands: Vec<Token> = Vec::new();
 
     while let Ok(token) = lexer.next_token() {
         match token {
             Token::Eof => break,
+            Token::Keyword(kw) => {
+                match kw.as_str() {
+                    "Tf" => {
+                        if operands.len() >= 2 {
+                            if let Token::Name(ref name) = operands[operands.len() - 2] {
+                                cur_font = name.clone();
+                            }
+                        }
+                    }
+                    "T*" | "ET" => {
+                        page_text.push('\n');
+                        last_was_text = false;
+                    }
+                    _ => {}
+                }
+                operands.clear();
+            }
             Token::StringLiteral(bytes) => {
-                let s = String::from_utf8_lossy(&bytes);
+                let font_key = cur_font.strip_prefix('/').unwrap_or(&cur_font);
+                let s = if let Some(info) = fonts.get(font_key) {
+                    info.decode_string(&bytes)
+                } else {
+                    FontEncodingInfo::default().decode_string(&bytes)
+                };
                 if !page_text.is_empty() && !last_was_text {
                     page_text.push(' ');
                 }
                 page_text.push_str(&s);
                 last_was_text = true;
+                operands.push(Token::StringLiteral(bytes));
             }
             Token::HexString(bytes) => {
-                let s = String::from_utf8_lossy(&bytes);
+                let font_key = cur_font.strip_prefix('/').unwrap_or(&cur_font);
+                let s = if let Some(info) = fonts.get(font_key) {
+                    info.decode_string(&bytes)
+                } else {
+                    FontEncodingInfo::default().decode_string(&bytes)
+                };
                 if !page_text.is_empty() && !last_was_text {
                     page_text.push(' ');
                 }
                 page_text.push_str(&s);
                 last_was_text = true;
+                operands.push(Token::HexString(bytes));
             }
-            Token::Keyword(kw) => {
-                if kw == "T*" || kw == "ET" {
-                    page_text.push('\n');
-                    last_was_text = false;
-                }
-            }
-            _ => {
+            other => {
+                operands.push(other);
                 last_was_text = false;
             }
         }
