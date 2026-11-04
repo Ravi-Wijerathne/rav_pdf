@@ -779,7 +779,15 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn draw_text_string(&mut self, text: &str) {
-        let font_bytes = if self.state.font_name.to_lowercase().contains("courier")
+        let font_key = self
+            .state
+            .font_name
+            .strip_prefix('/')
+            .unwrap_or(&self.state.font_name);
+
+        let embedded_bytes = self.fonts.get(font_key).and_then(|f| f.font_data.as_deref());
+
+        let fallback_bytes = if self.state.font_name.to_lowercase().contains("courier")
             || self.state.font_name.to_lowercase().contains("mono")
         {
             epaint_default_fonts::HACK_REGULAR
@@ -787,13 +795,21 @@ impl<'a> ContentInterpreter<'a> {
             epaint_default_fonts::UBUNTU_LIGHT
         };
 
+        let primary_font = embedded_bytes
+            .and_then(|b| ab_glyph::FontRef::try_from_slice(b).ok())
+            .or_else(|| ab_glyph::FontRef::try_from_slice(fallback_bytes).ok());
+
+        let fallback_font = ab_glyph::FontRef::try_from_slice(fallback_bytes).ok();
+        let emoji_font =
+            ab_glyph::FontRef::try_from_slice(epaint_default_fonts::NOTO_EMOJI_REGULAR).ok();
+
         let font_px_scale = (self.state.font_size * self.zoom).max(4.0);
         let combined = self.state.ctm.pre_concat(self.state.text_matrix);
         let mut pt = tiny_skia::Point::from_xy(0.0, 0.0);
         combined.map_point(&mut pt);
         let (base_x, base_y) = (pt.x, pt.y);
 
-        if let Ok(font) = ab_glyph::FontRef::try_from_slice(font_bytes) {
+        if let Some(font) = primary_font {
             use ab_glyph::{Font, ScaleFont};
             let scaled_font = font.as_scaled(font_px_scale);
             let mut cur_x = base_x;
@@ -815,35 +831,46 @@ impl<'a> ContentInterpreter<'a> {
                     continue;
                 }
 
-                let glyph_id = scaled_font.glyph_id(ch);
-                let mut h_advance = scaled_font.h_advance(glyph_id);
+                let mut gid = scaled_font.glyph_id(ch);
+                let mut active_font = &font;
+
+                // If missing in primary font (.notdef), fall back to fallback_font or emoji_font
+                if gid.0 == 0 {
+                    if let Some(ref fb) = fallback_font {
+                        let sfb = fb.as_scaled(font_px_scale);
+                        let fb_gid = sfb.glyph_id(ch);
+                        if fb_gid.0 != 0 {
+                            gid = fb_gid;
+                            active_font = fb;
+                        }
+                    }
+                    if gid.0 == 0 {
+                        if let Some(ref ef) = emoji_font {
+                            let sef = ef.as_scaled(font_px_scale);
+                            let ef_gid = sef.glyph_id(ch);
+                            if ef_gid.0 != 0 {
+                                gid = ef_gid;
+                                active_font = ef;
+                            }
+                        }
+                    }
+                }
+
+                let active_scaled = active_font.as_scaled(font_px_scale);
+                let mut h_advance = active_scaled.h_advance(gid);
                 if h_advance <= 0.0 {
                     h_advance = font_px_scale * 0.28;
                 }
 
-                let glyph = glyph_id.with_scale_and_position(
+                let glyph = gid.with_scale_and_position(
                     font_px_scale,
                     ab_glyph::Point {
                         x: cur_x,
-                        y: baseline_y - scaled_font.ascent(),
+                        y: baseline_y - active_scaled.ascent(),
                     },
                 );
 
-                let outlined = font.outline_glyph(glyph).or_else(|| {
-                    ab_glyph::FontRef::try_from_slice(epaint_default_fonts::NOTO_EMOJI_REGULAR).ok().and_then(|f2| {
-                        let sf2 = f2.as_scaled(font_px_scale);
-                        let g2 = sf2.glyph_id(ch).with_scale_and_position(
-                            font_px_scale,
-                            ab_glyph::Point {
-                                x: cur_x,
-                                y: baseline_y - sf2.ascent(),
-                            },
-                        );
-                        f2.outline_glyph(g2)
-                    })
-                });
-
-                if let Some(outlined) = outlined {
+                if let Some(outlined) = active_font.outline_glyph(glyph) {
                     let bounds = outlined.px_bounds();
                     let pixels = self.pixmap.pixels_mut();
 

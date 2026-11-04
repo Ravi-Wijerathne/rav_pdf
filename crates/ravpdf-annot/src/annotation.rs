@@ -70,6 +70,7 @@ pub enum AnnotationType {
     FreeText,      // Text box on page
     Highlight,     // Highlight
     Underline,     // Underline
+    Squiggly,      // Squiggly wavy underline (ISO 32000-1 Clause 12.5.6.10, FR-08.2.4)
     StrikeOut,     // Strikeout
     Square,        // Rectangle
     Circle,        // Oval / Circle
@@ -90,6 +91,7 @@ impl AnnotationType {
             AnnotationType::FreeText => "FreeText",
             AnnotationType::Highlight => "Highlight",
             AnnotationType::Underline => "Underline",
+            AnnotationType::Squiggly => "Squiggly",
             AnnotationType::StrikeOut => "StrikeOut",
             AnnotationType::Square => "Square",
             AnnotationType::Circle => "Circle",
@@ -106,6 +108,7 @@ impl AnnotationType {
             "FreeText" => Some(AnnotationType::FreeText),
             "Highlight" => Some(AnnotationType::Highlight),
             "Underline" => Some(AnnotationType::Underline),
+            "Squiggly" => Some(AnnotationType::Squiggly),
             "StrikeOut" => Some(AnnotationType::StrikeOut),
             "Square" => Some(AnnotationType::Square),
             "Circle" => Some(AnnotationType::Circle),
@@ -775,6 +778,7 @@ pub fn export_annotations_to_xfdf(doc: &PdfDocument) -> Result<String> {
                 AnnotationType::Text => "text",
                 AnnotationType::Highlight => "highlight",
                 AnnotationType::Underline => "underline",
+                AnnotationType::Squiggly => "squiggly",
                 AnnotationType::StrikeOut => "strikeout",
                 AnnotationType::FreeText => "freetext",
                 AnnotationType::Square => "square",
@@ -923,6 +927,7 @@ pub fn import_annotations_from_xfdf(doc: &mut PdfDocument, xfdf_content: &str) -
                 "text" => AnnotationType::Text,
                 "highlight" => AnnotationType::Highlight,
                 "underline" => AnnotationType::Underline,
+                "squiggly" => AnnotationType::Squiggly,
                 "strikeout" => AnnotationType::StrikeOut,
                 "freetext" => AnnotationType::FreeText,
                 "square" => AnnotationType::Square,
