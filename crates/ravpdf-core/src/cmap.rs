@@ -271,14 +271,46 @@ pub struct FontEncodingInfo {
     pub to_unicode: Option<CMap>,
     pub encoding_name: Option<String>,
     pub differences: HashMap<u8, String>,
+    pub font_data: Option<Vec<u8>>,
+}
+
+fn extract_embedded_font_data(
+    doc: &PdfDocument,
+    descriptor_obj: Option<&Object>,
+) -> Option<Vec<u8>> {
+    let desc_dict = match descriptor_obj {
+        Some(Object::Dictionary(d)) => Some(d),
+        Some(Object::Reference(id)) => doc.get_object(*id).and_then(Object::as_dict),
+        _ => None,
+    }?;
+
+    for key in ["FontFile2", "FontFile3", "FontFile"] {
+        if let Some(ff_obj) = desc_dict.get(key) {
+            let data = match ff_obj {
+                Object::Reference(id) => doc
+                    .get_object(*id)
+                    .and_then(|o| o.as_stream())
+                    .and_then(|s| s.decode().ok()),
+                Object::Stream(s) => s.decode().ok(),
+                _ => None,
+            };
+            if let Some(bytes) = data {
+                if !bytes.is_empty() {
+                    return Some(bytes);
+                }
+            }
+        }
+    }
+    None
 }
 
 impl FontEncodingInfo {
-    /// Extracts font encoding and CMap from a PDF font dictionary.
+    /// Extracts font encoding, CMap, and embedded font data from a PDF font dictionary.
     pub fn from_dict(doc: &PdfDocument, font_dict: &PdfDictionary) -> Self {
         let base_font = font_dict.get_name("BaseFont").unwrap_or("").to_string();
         let subtype = font_dict.get_name("Subtype").unwrap_or("").to_string();
         let encoding_name = font_dict.get_name("Encoding").map(|s| s.to_string());
+        let mut font_data = extract_embedded_font_data(doc, font_dict.get("FontDescriptor"));
 
         // Check for /ToUnicode CMap stream
         let mut to_unicode = None;
@@ -297,7 +329,7 @@ impl FontEncodingInfo {
         }
 
         // If Type0, also inspect /DescendantFonts
-        if to_unicode.is_none() && subtype == "Type0" {
+        if subtype == "Type0" {
             if let Some(desc_obj) = font_dict.get("DescendantFonts") {
                 let desc_arr = match desc_obj {
                     Object::Array(arr) => Some(arr.as_slice()),
@@ -305,24 +337,33 @@ impl FontEncodingInfo {
                     _ => None,
                 };
                 if let Some(arr) = desc_arr {
-                    if let Some(first_desc) = arr.first() {
+                    for first_desc in arr {
                         let desc_dict = match first_desc {
                             Object::Dictionary(d) => Some(d),
                             Object::Reference(id) => doc.get_object(*id).and_then(Object::as_dict),
                             _ => None,
                         };
                         if let Some(d) = desc_dict {
-                            if let Some(to_uni_obj) = d.get("ToUnicode") {
-                                let stream_data = match to_uni_obj {
-                                    Object::Reference(id) => doc
-                                        .get_object(*id)
-                                        .and_then(|o| o.as_stream())
-                                        .and_then(|s| s.decode().ok()),
-                                    Object::Stream(s) => s.decode().ok(),
-                                    _ => None,
-                                };
-                                if let Some(data) = stream_data {
-                                    to_unicode = Some(CMap::parse(&data));
+                            if to_unicode.is_none() {
+                                if let Some(to_uni_obj) = d.get("ToUnicode") {
+                                    let stream_data = match to_uni_obj {
+                                        Object::Reference(id) => doc
+                                            .get_object(*id)
+                                            .and_then(|o| o.as_stream())
+                                            .and_then(|s| s.decode().ok()),
+                                        Object::Stream(s) => s.decode().ok(),
+                                        _ => None,
+                                    };
+                                    if let Some(data) = stream_data {
+                                        to_unicode = Some(CMap::parse(&data));
+                                    }
+                                }
+                            }
+                            if font_data.is_none() {
+                                if let Some(fd) =
+                                    extract_embedded_font_data(doc, d.get("FontDescriptor"))
+                                {
+                                    font_data = Some(fd);
                                 }
                             }
                         }
@@ -366,6 +407,7 @@ impl FontEncodingInfo {
             to_unicode,
             encoding_name,
             differences,
+            font_data,
         }
     }
 

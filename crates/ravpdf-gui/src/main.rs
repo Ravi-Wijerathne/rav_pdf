@@ -169,9 +169,11 @@ enum ActiveTool {
     Select,
     Hand,
     Loupe,
+    MarqueeZoom,
     StickyNote,
     Highlight,
     Underline,
+    Squiggly,
     StrikeOut,
     Rectangle,
     Circle,
@@ -193,6 +195,8 @@ enum ActiveTool {
 pub enum PageViewMode {
     SinglePage,
     ContinuousScroll,
+    TwoPageFacing,
+    TwoPageContinuous,
     OrganizePages,
 }
 
@@ -709,6 +713,11 @@ struct RavPdfApp {
     // XFDF Import / Export Dialog (FR-08.3.6)
     show_xfdf_dialog: bool,
     xfdf_buffer: String,
+
+    // Theme and Viewing options (FR-01.2.2, NFR-05)
+    dark_theme: bool,
+    two_page_cover_page: bool,
+    marquee_zoom_start: Option<Pos2>,
 }
 
 impl Default for RavPdfApp {
@@ -722,6 +731,10 @@ impl Default for RavPdfApp {
             sidebar_open: true,
             active_tool: ActiveTool::Select,
             status_message: "Ready • No document open".into(),
+
+            dark_theme: true,
+            two_page_cover_page: false,
+            marquee_zoom_start: None,
 
             search_bar_open: false,
             search_query: String::new(),
@@ -1811,18 +1824,24 @@ impl RavPdfApp {
 
             // Navigation shortcuts (FR-01.2.1)
             if has_doc && total_pages > 0 {
+                let nav_step = if self.page_view_mode == PageViewMode::TwoPageFacing {
+                    2
+                } else {
+                    1
+                };
                 if let Some(tab) = self.active_tab_mut() {
                     if (i.key_pressed(Key::PageDown) || i.key_pressed(Key::ArrowRight))
                         && tab.current_page + 1 < total_pages
                     {
-                        tab.current_page += 1;
+                        tab.current_page =
+                            (tab.current_page + nav_step).min(total_pages.saturating_sub(1));
                         tab.page_input_buffer = (tab.current_page + 1).to_string();
                         tab.invalidate_render();
                     }
                     if (i.key_pressed(Key::PageUp) || i.key_pressed(Key::ArrowLeft))
                         && tab.current_page > 0
                     {
-                        tab.current_page -= 1;
+                        tab.current_page = tab.current_page.saturating_sub(nav_step);
                         tab.page_input_buffer = (tab.current_page + 1).to_string();
                         tab.invalidate_render();
                     }
@@ -2378,6 +2397,8 @@ impl RavPdfApp {
                     ui.separator();
                     let is_single = self.page_view_mode == PageViewMode::SinglePage;
                     let is_cont = self.page_view_mode == PageViewMode::ContinuousScroll;
+                    let is_facing = self.page_view_mode == PageViewMode::TwoPageFacing;
+                    let is_two_cont = self.page_view_mode == PageViewMode::TwoPageContinuous;
                     let is_org = self.page_view_mode == PageViewMode::OrganizePages;
                     if ui
                         .add_enabled(
@@ -2408,11 +2429,58 @@ impl RavPdfApp {
                     if ui
                         .add_enabled(
                             has_doc,
+                            egui::SelectableLabel::new(
+                                is_facing,
+                                "📖 Two-Page Facing View",
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.page_view_mode = PageViewMode::TwoPageFacing;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(
+                            has_doc,
+                            egui::SelectableLabel::new(
+                                is_two_cont,
+                                "📚 Two-Page Continuous View",
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.page_view_mode = PageViewMode::TwoPageContinuous;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(
+                            has_doc,
                             egui::SelectableLabel::new(is_org, "🗂 Organize Pages Grid"),
                         )
                         .clicked()
                     {
                         self.page_view_mode = PageViewMode::OrganizePages;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
+                        .checkbox(
+                            &mut self.two_page_cover_page,
+                            "Show First Page as Cover in Facing View",
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    let theme_label = if self.dark_theme {
+                        "☀ Switch to Clean Light Theme"
+                    } else {
+                        "🌙 Switch to Modern Dark Theme"
+                    };
+                    if ui.button(theme_label).clicked() {
+                        self.dark_theme = !self.dark_theme;
+                        setup_custom_theme(ctx, self.dark_theme);
                         ui.close_menu();
                     }
                     ui.separator();
@@ -2897,12 +2965,17 @@ impl RavPdfApp {
                 let current_page = self.active_tab().map(|t| t.current_page).unwrap_or(0);
                 let can_prev = has_doc && current_page > 0;
                 let can_next = has_doc && current_page + 1 < total_pages;
+                let nav_step = if self.page_view_mode == PageViewMode::TwoPageFacing {
+                    2
+                } else {
+                    1
+                };
 
                 if ui.add_enabled(can_prev, Button::new("⏮")).clicked() {
                     self.record_page_navigation(0);
                 }
                 if ui.add_enabled(can_prev, Button::new("◀")).clicked() {
-                    self.record_page_navigation(current_page.saturating_sub(1));
+                    self.record_page_navigation(current_page.saturating_sub(nav_step));
                 }
 
                 // Go to page quick input box (FR-01.2.6) with Page Label support (FR-06.9)
@@ -2944,7 +3017,9 @@ impl RavPdfApp {
                 }
 
                 if ui.add_enabled(can_next, Button::new("▶")).clicked() {
-                    self.record_page_navigation(current_page + 1);
+                    self.record_page_navigation(
+                        (current_page + nav_step).min(total_pages.saturating_sub(1)),
+                    );
                 }
                 if ui.add_enabled(can_next, Button::new("⏭")).clicked() {
                     self.record_page_navigation(total_pages.saturating_sub(1));
@@ -3016,9 +3091,11 @@ impl RavPdfApp {
 
                 ui.separator();
 
-                // View Mode selector (Single Page vs Continuous Scroll vs Organize Pages) (FR-01.2.2, FR-06.1)
+                // View Mode selector (Single Page, Continuous, Two-Page Facing, Two-Page Continuous, Organize)
                 let is_single = self.page_view_mode == PageViewMode::SinglePage;
                 let is_cont = self.page_view_mode == PageViewMode::ContinuousScroll;
+                let is_facing = self.page_view_mode == PageViewMode::TwoPageFacing;
+                let is_two_cont = self.page_view_mode == PageViewMode::TwoPageContinuous;
                 let is_org = self.page_view_mode == PageViewMode::OrganizePages;
                 if ui
                     .add_enabled(has_doc, egui::SelectableLabel::new(is_single, "📄 Single"))
@@ -3036,6 +3113,26 @@ impl RavPdfApp {
                     .clicked()
                 {
                     self.page_view_mode = PageViewMode::ContinuousScroll;
+                }
+                if ui
+                    .add_enabled(
+                        has_doc,
+                        egui::SelectableLabel::new(is_facing, "📖 Facing"),
+                    )
+                    .on_hover_text("Two-Page Facing View")
+                    .clicked()
+                {
+                    self.page_view_mode = PageViewMode::TwoPageFacing;
+                }
+                if ui
+                    .add_enabled(
+                        has_doc,
+                        egui::SelectableLabel::new(is_two_cont, "📚 2-Page Scroll"),
+                    )
+                    .on_hover_text("Two-Page Continuous Scroll View")
+                    .clicked()
+                {
+                    self.page_view_mode = PageViewMode::TwoPageContinuous;
                 }
                 if ui
                     .add_enabled(has_doc, egui::SelectableLabel::new(is_org, "🗂 Organize"))
@@ -3069,68 +3166,326 @@ impl RavPdfApp {
 
                 ui.separator();
 
-                // Tool Selector Buttons (FR-08, FR-09, FR-20, FR-26)
+                // Tool Selector Buttons
                 ui.add_enabled_ui(has_doc, |ui| {
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Select, "Select");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Hand, "Pan");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Select, "👆 Select");
+                    ui.selectable_value(&mut self.active_tool, ActiveTool::Hand, "✋ Pan");
                     ui.separator();
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::StickyNote, "💬 Note");
-                    ui.selectable_value(
-                        &mut self.active_tool,
-                        ActiveTool::Highlight,
-                        "🖍 Highlight",
-                    );
-                    ui.selectable_value(
-                        &mut self.active_tool,
-                        ActiveTool::Underline,
-                        "U̲ Underline",
-                    );
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::StrikeOut, "S̶ Strike");
-                    ui.separator();
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Rectangle, "▭ Rect");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Circle, "◯ Circle");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Line, "➔ Line");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Pencil, "✏ Pencil");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Eraser, "🧹 Eraser");
-                    ui.separator();
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Text, "T Text");
-                    ui.selectable_value(
-                        &mut self.active_tool,
-                        ActiveTool::Typewriter,
-                        "⌨ Typewriter",
-                    );
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Callout, "🗨 Callout");
-                    ui.separator();
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Link, "🔗 Link");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Redact, "█ Redact");
-                    ui.selectable_value(
-                        &mut self.active_tool,
-                        ActiveTool::MeasureDistance,
-                        "📏 Distance",
-                    );
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::MeasureArea, "📐 Area");
-                    ui.selectable_value(&mut self.active_tool, ActiveTool::Loupe, "🔎 Loupe");
-                    ui.separator();
-                    if ui
-                        .selectable_label(self.split_view_enabled, "◫ Split")
-                        .on_hover_text("Split View (Ctrl+Shift+T)")
-                        .clicked()
-                    {
-                        self.split_view_enabled = !self.split_view_enabled;
-                        if self.split_view_enabled {
-                            let total = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
-                            let curr = self.active_tab().map(|t| t.current_page).unwrap_or(0);
-                            self.split_view_second_page = (curr + 1).min(total.saturating_sub(1));
+
+                    // Markup Tools
+                    let markup_label = match self.active_tool {
+                        ActiveTool::StickyNote => "💬 Note",
+                        ActiveTool::Highlight => "🖍 Highlight",
+                        ActiveTool::Underline => "U̲ Underline",
+                        ActiveTool::Squiggly => "〰 Squiggly",
+                        ActiveTool::StrikeOut => "S̶ Strike",
+                        _ => "💬 Markup",
+                    };
+                    ui.menu_button(markup_label, |ui| {
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::StickyNote,
+                                "💬 Sticky Note",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::StickyNote;
+                            ui.close_menu();
                         }
-                    }
-                    if ui
-                        .button("⛶ Fullscreen")
-                        .on_hover_text("Full Screen Presentation (F11 / Ctrl+L)")
-                        .clicked()
-                    {
-                        self.is_full_screen = true;
-                    }
-                    ui.separator();
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Highlight,
+                                "🖍 Text Highlight",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Highlight;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Underline,
+                                "U̲ Text Underline",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Underline;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Squiggly,
+                                "〰 Squiggly Underline",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Squiggly;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::StrikeOut,
+                                "S̶ Strikethrough",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::StrikeOut;
+                            ui.close_menu();
+                        }
+                    });
+
+                    // Drawing Tools
+                    let draw_label = match self.active_tool {
+                        ActiveTool::Rectangle => "▭ Rect",
+                        ActiveTool::Circle => "◯ Circle",
+                        ActiveTool::Line => "➔ Line",
+                        ActiveTool::Pencil => "✏ Pencil",
+                        ActiveTool::Eraser => "🧹 Eraser",
+                        _ => "📐 Shapes",
+                    };
+                    ui.menu_button(draw_label, |ui| {
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Rectangle,
+                                "▭ Rectangle",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Rectangle;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Circle,
+                                "◯ Circle / Oval",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Circle;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Line,
+                                "➔ Arrow / Line",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Line;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Pencil,
+                                "✏ Freehand Pencil",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Pencil;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Eraser,
+                                "🧹 Stroke Eraser",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Eraser;
+                            ui.close_menu();
+                        }
+                    });
+
+                    // Text & Callout Tools
+                    let text_label = match self.active_tool {
+                        ActiveTool::Text => "T Text Box",
+                        ActiveTool::Typewriter => "⌨ Typewriter",
+                        ActiveTool::Callout => "🗨 Callout",
+                        _ => "T Text",
+                    };
+                    ui.menu_button(text_label, |ui| {
+                        if ui
+                            .selectable_label(self.active_tool == ActiveTool::Text, "T Text Box")
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Text;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Typewriter,
+                                "⌨ Typewriter",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Typewriter;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(self.active_tool == ActiveTool::Callout, "🗨 Callout")
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Callout;
+                            ui.close_menu();
+                        }
+                    });
+
+                    // Forms Tools
+                    ui.menu_button("📝 Forms", |ui| {
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::FormField(FormFieldType::Text),
+                                "📝 Text Field",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::FormField(FormFieldType::Text);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::FormField(FormFieldType::Checkbox),
+                                "☑ Checkbox",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::FormField(FormFieldType::Checkbox);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::FormField(FormFieldType::Radio),
+                                "🔘 Radio Button",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::FormField(FormFieldType::Radio);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::FormField(FormFieldType::Choice),
+                                "▾ Dropdown List",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::FormField(FormFieldType::Choice);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool
+                                    == ActiveTool::FormField(FormFieldType::PushButton),
+                                "🔘 Push Button",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::FormField(FormFieldType::PushButton);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::FormField(FormFieldType::Signature),
+                                "🔏 Signature Field",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::FormField(FormFieldType::Signature);
+                            ui.close_menu();
+                        }
+                    });
+
+                    // More Tools Dropdown
+                    let more_label = match self.active_tool {
+                        ActiveTool::Link => "🔗 Link",
+                        ActiveTool::Redact => "█ Redact",
+                        ActiveTool::MeasureDistance => "📏 Distance",
+                        ActiveTool::MeasureArea => "📐 Area",
+                        ActiveTool::Loupe => "🔎 Loupe",
+                        ActiveTool::MarqueeZoom => "🔍 Marquee",
+                        _ => "🛠 Tools",
+                    };
+                    ui.menu_button(more_label, |ui| {
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Link,
+                                "🔗 Add Hyperlink",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Link;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Redact,
+                                "█ Mark Redaction",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Redact;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::MeasureDistance,
+                                "📏 Distance",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::MeasureDistance;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::MeasureArea,
+                                "📐 Area",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::MeasureArea;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Loupe,
+                                "🔎 Loupe Tool",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Loupe;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::MarqueeZoom,
+                                "🔍 Marquee Zoom",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::MarqueeZoom;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui
+                            .selectable_label(self.split_view_enabled, "◫ Split View")
+                            .clicked()
+                        {
+                            self.split_view_enabled = !self.split_view_enabled;
+                            if self.split_view_enabled {
+                                let total =
+                                    self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
+                                let curr = self.active_tab().map(|t| t.current_page).unwrap_or(0);
+                                self.split_view_second_page =
+                                    (curr + 1).min(total.saturating_sub(1));
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("⛶ Fullscreen Presentation").clicked() {
+                            self.is_full_screen = true;
+                            ui.close_menu();
+                        }
+                    });
 
                     // Interactive Form Field authoring tools (FR-11.1)
                     ui.menu_button("📝 Forms", |ui| {
@@ -5281,6 +5636,356 @@ impl RavPdfApp {
         }
     }
 
+    /// Helper to get dimensions of a page in PDF points.
+    fn get_page_dim(&self, page_idx: usize) -> (f32, f32) {
+        if let Some(tab) = self.active_tab() {
+            if let Some(p) = tab.doc.get_page(page_idx) {
+                let w = (p.crop_box[2] - p.crop_box[0]).abs() as f32;
+                let h = (p.crop_box[3] - p.crop_box[1]).abs() as f32;
+                return (w, h);
+            }
+        }
+        (612.0_f32, 792.0_f32)
+    }
+
+    /// Renders Two-Page Facing View (spreads side-by-side) with optional cover page (FR-01.2.2).
+    fn render_two_page_facing(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let total_pages = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
+        if total_pages == 0 {
+            return;
+        }
+
+        let curr_page = self.active_tab().map(|t| t.current_page).unwrap_or(0);
+        let zoom = self.active_tab().map(|t| t.zoom).unwrap_or(1.0_f32);
+
+        // Calculate left and right pages for facing spread
+        let (left_idx, right_idx) = if self.two_page_cover_page {
+            if curr_page == 0 {
+                (0, None)
+            } else {
+                let left = 1 + ((curr_page - 1) / 2) * 2;
+                let right = if left + 1 < total_pages {
+                    Some(left + 1)
+                } else {
+                    None
+                };
+                (left, right)
+            }
+        } else {
+            let left = (curr_page / 2) * 2;
+            let right = if left + 1 < total_pages {
+                Some(left + 1)
+            } else {
+                None
+            };
+            (left, right)
+        };
+
+        let gutter = 20.0_f32;
+        let (pw_l, ph_l) = self.get_page_dim(left_idx);
+        let size_l = Vec2::new(pw_l * zoom, ph_l * zoom);
+
+        let (size_r, has_right) = if let Some(r_idx) = right_idx {
+            let (pw_r, ph_r) = self.get_page_dim(r_idx);
+            (Vec2::new(pw_r * zoom, ph_r * zoom), true)
+        } else {
+            (Vec2::ZERO, false)
+        };
+
+        let total_spread_w = size_l.x
+            + if has_right {
+                size_r.x + gutter
+            } else {
+                0.0_f32
+            };
+
+        ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let avail_w = ui.available_width();
+                let offset_x = ((avail_w - total_spread_w) * 0.5_f32).max(16.0_f32);
+                ui.add_space(16.0_f32);
+
+                ui.horizontal(|ui| {
+                    ui.add_space(offset_x);
+
+                    // Left Page
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(format!("Page {}", left_idx + 1))
+                                .size(11.0_f32)
+                                .weak(),
+                        );
+                        ui.add_space(4.0_f32);
+                        let (rect_l, resp_l) =
+                            ui.allocate_exact_size(size_l, egui::Sense::click_and_drag());
+
+                        ui.painter().rect_filled(
+                            rect_l.translate(Vec2::new(0.0_f32, 4.0_f32)).expand(6.0_f32),
+                            4.0_f32,
+                            Color32::from_black_alpha(20),
+                        );
+                        ui.painter().rect_filled(
+                            rect_l.translate(Vec2::new(0.0_f32, 2.0_f32)).expand(3.0_f32),
+                            2.0_f32,
+                            Color32::from_black_alpha(35),
+                        );
+                        ui.painter().rect_filled(rect_l, 0.0_f32, Color32::WHITE);
+
+                        let tex_l = if let Some(tab) = self.active_tab_mut() {
+                            tab.get_or_render_continuous_page(ctx, left_idx)
+                        } else {
+                            None
+                        };
+                        if let Some(tex) = tex_l {
+                            ui.painter().image(
+                                tex.id(),
+                                rect_l,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0_f32, 1.0_f32)),
+                                Color32::WHITE,
+                            );
+                        }
+
+                        if resp_l.clicked() {
+                            if let Some(tab) = self.active_tab_mut() {
+                                tab.current_page = left_idx;
+                                tab.page_input_buffer = (left_idx + 1).to_string();
+                            }
+                        }
+                    });
+
+                    // Right Page
+                    if let Some(r_idx) = right_idx {
+                        ui.add_space(gutter);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(format!("Page {}", r_idx + 1))
+                                    .size(11.0_f32)
+                                    .weak(),
+                            );
+                            ui.add_space(4.0_f32);
+                            let (rect_r, resp_r) =
+                                ui.allocate_exact_size(size_r, egui::Sense::click_and_drag());
+
+                            ui.painter().rect_filled(
+                                rect_r.translate(Vec2::new(0.0_f32, 4.0_f32)).expand(6.0_f32),
+                                4.0_f32,
+                                Color32::from_black_alpha(20),
+                            );
+                            ui.painter().rect_filled(
+                                rect_r.translate(Vec2::new(0.0_f32, 2.0_f32)).expand(3.0_f32),
+                                2.0_f32,
+                                Color32::from_black_alpha(35),
+                            );
+                            ui.painter().rect_filled(rect_r, 0.0_f32, Color32::WHITE);
+
+                            let tex_r = if let Some(tab) = self.active_tab_mut() {
+                                tab.get_or_render_continuous_page(ctx, r_idx)
+                            } else {
+                                None
+                            };
+                            if let Some(tex) = tex_r {
+                                ui.painter().image(
+                                    tex.id(),
+                                    rect_r,
+                                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0_f32, 1.0_f32)),
+                                    Color32::WHITE,
+                                );
+                            }
+
+                            if resp_r.clicked() {
+                                if let Some(tab) = self.active_tab_mut() {
+                                    tab.current_page = r_idx;
+                                    tab.page_input_buffer = (r_idx + 1).to_string();
+                                }
+                            }
+                        });
+                    }
+                });
+
+                ui.add_space(20.0_f32);
+            });
+    }
+
+    /// Renders Two-Page Continuous Scroll View (FR-01.2.2).
+    fn render_two_page_continuous(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let total_pages = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
+        if total_pages == 0 {
+            return;
+        }
+
+        let zoom = self.active_tab().map(|t| t.zoom).unwrap_or(1.0_f32);
+        let gutter = 20.0_f32;
+
+        let mut spreads: Vec<(usize, Option<usize>)> = Vec::new();
+        if self.two_page_cover_page {
+            spreads.push((0, None));
+            let mut i = 1;
+            while i < total_pages {
+                let right = if i + 1 < total_pages {
+                    Some(i + 1)
+                } else {
+                    None
+                };
+                spreads.push((i, right));
+                i += 2;
+            }
+        } else {
+            let mut i = 0;
+            while i < total_pages {
+                let right = if i + 1 < total_pages {
+                    Some(i + 1)
+                } else {
+                    None
+                };
+                spreads.push((i, right));
+                i += 2;
+            }
+        }
+
+        let mut visible_in_focus = None;
+
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(12.0_f32);
+                for (left_idx, right_opt) in spreads {
+                    let (pw_l, ph_l) = self.get_page_dim(left_idx);
+                    let size_l = Vec2::new(pw_l * zoom, ph_l * zoom);
+
+                    let (size_r, has_right) = if let Some(r_idx) = right_opt {
+                        let (pw_r, ph_r) = self.get_page_dim(r_idx);
+                        (Vec2::new(pw_r * zoom, ph_r * zoom), true)
+                    } else {
+                        (Vec2::ZERO, false)
+                    };
+
+                    let total_spread_w = size_l.x
+                        + if has_right {
+                            size_r.x + gutter
+                        } else {
+                            0.0_f32
+                        };
+                    let avail_w = ui.available_width();
+                    let offset_x = ((avail_w - total_spread_w) * 0.5_f32).max(16.0_f32);
+
+                    ui.horizontal(|ui| {
+                        ui.add_space(offset_x);
+
+                        // Left Page
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(format!("Page {}", left_idx + 1))
+                                    .size(11.0_f32)
+                                    .weak(),
+                            );
+                            ui.add_space(2.0_f32);
+
+                            let (rect_l, resp_l) =
+                                ui.allocate_exact_size(size_l, egui::Sense::click_and_drag());
+
+                            ui.painter().rect_filled(
+                                rect_l.translate(Vec2::new(0.0_f32, 4.0_f32)).expand(6.0_f32),
+                                4.0_f32,
+                                Color32::from_black_alpha(20),
+                            );
+                            ui.painter().rect_filled(
+                                rect_l.translate(Vec2::new(0.0_f32, 2.0_f32)).expand(3.0_f32),
+                                2.0_f32,
+                                Color32::from_black_alpha(35),
+                            );
+                            ui.painter().rect_filled(rect_l, 0.0_f32, Color32::WHITE);
+
+                            let tex_l = if let Some(tab) = self.active_tab_mut() {
+                                tab.get_or_render_continuous_page(ctx, left_idx)
+                            } else {
+                                None
+                            };
+                            if let Some(tex) = tex_l {
+                                ui.painter().image(
+                                    tex.id(),
+                                    rect_l,
+                                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0_f32, 1.0_f32)),
+                                    Color32::WHITE,
+                                );
+                            }
+
+                            if ui.is_rect_visible(rect_l) && visible_in_focus.is_none() {
+                                visible_in_focus = Some(left_idx);
+                            }
+
+                            if resp_l.clicked() {
+                                if let Some(tab) = self.active_tab_mut() {
+                                    tab.current_page = left_idx;
+                                    tab.page_input_buffer = (left_idx + 1).to_string();
+                                }
+                            }
+                        });
+
+                        // Right Page
+                        if let Some(r_idx) = right_opt {
+                            ui.add_space(gutter);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(format!("Page {}", r_idx + 1))
+                                        .size(11.0_f32)
+                                        .weak(),
+                                );
+                                ui.add_space(2.0_f32);
+
+                                let (rect_r, resp_r) =
+                                    ui.allocate_exact_size(size_r, egui::Sense::click_and_drag());
+
+                                ui.painter().rect_filled(
+                                    rect_r.translate(Vec2::new(0.0_f32, 4.0_f32)).expand(6.0_f32),
+                                    4.0_f32,
+                                    Color32::from_black_alpha(20),
+                                );
+                                ui.painter().rect_filled(
+                                    rect_r.translate(Vec2::new(0.0_f32, 2.0_f32)).expand(3.0_f32),
+                                    2.0_f32,
+                                    Color32::from_black_alpha(35),
+                                );
+                                ui.painter().rect_filled(rect_r, 0.0_f32, Color32::WHITE);
+
+                                let tex_r = if let Some(tab) = self.active_tab_mut() {
+                                    tab.get_or_render_continuous_page(ctx, r_idx)
+                                } else {
+                                    None
+                                };
+                                if let Some(tex) = tex_r {
+                                    ui.painter().image(
+                                        tex.id(),
+                                        rect_r,
+                                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0_f32, 1.0_f32)),
+                                        Color32::WHITE,
+                                    );
+                                }
+
+                                if resp_r.clicked() {
+                                    if let Some(tab) = self.active_tab_mut() {
+                                        tab.current_page = r_idx;
+                                        tab.page_input_buffer = (r_idx + 1).to_string();
+                                    }
+                                }
+                            });
+                        }
+                    });
+
+                    ui.add_space(18.0_f32);
+                }
+            });
+
+        if let Some(vis) = visible_in_focus {
+            if let Some(tab) = self.active_tab_mut() {
+                if tab.current_page != vis {
+                    tab.current_page = vis;
+                    tab.page_input_buffer = (vis + 1).to_string();
+                }
+            }
+        }
+    }
+
     /// Renders central canvas area with PDF rendering, interactive annotations, and form widgets (EI-01.3).
     fn render_canvas(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -5319,6 +6024,18 @@ impl RavPdfApp {
             // View Mode check: Split View Mode (FR-01.3.5)
             if self.split_view_enabled {
                 self.render_split_view(ui, ctx);
+                return;
+            }
+
+            // View Mode check: Two-Page Facing View (FR-01.2.2)
+            if self.page_view_mode == PageViewMode::TwoPageFacing {
+                self.render_two_page_facing(ui, ctx);
+                return;
+            }
+
+            // View Mode check: Two-Page Continuous Scroll Mode (FR-01.2.2)
+            if self.page_view_mode == PageViewMode::TwoPageContinuous {
+                self.render_two_page_continuous(ui, ctx);
                 return;
             }
 
@@ -5453,16 +6170,29 @@ impl RavPdfApp {
                         return;
                     }
 
-                    let (rect, response) =
-                        ui.allocate_exact_size(page_size, egui::Sense::click_and_drag());
+                    let avail_w = ui.available_width();
+                    let offset_x = ((avail_w - page_size.x) * 0.5_f32).max(16.0_f32);
+                    ui.add_space(16.0_f32);
 
-                    // 1. Draw page background and shadow
+                    let (rect, response) = ui
+                        .horizontal(|ui| {
+                            ui.add_space(offset_x);
+                            ui.allocate_exact_size(page_size, egui::Sense::click_and_drag())
+                        })
+                        .inner;
+
+                    // 1. Draw page background and soft drop shadow
                     ui.painter().rect_filled(
-                        rect.expand(2.0),
-                        0.0,
-                        Color32::from_black_alpha(40),
+                        rect.translate(Vec2::new(0.0_f32, 4.0_f32)).expand(6.0_f32),
+                        4.0_f32,
+                        Color32::from_black_alpha(20),
                     );
-                    ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
+                    ui.painter().rect_filled(
+                        rect.translate(Vec2::new(0.0_f32, 2.0_f32)).expand(3.0_f32),
+                        2.0_f32,
+                        Color32::from_black_alpha(35),
+                    );
+                    ui.painter().rect_filled(rect, 0.0_f32, Color32::WHITE);
 
                     // 2. Paint raster page texture
                     if let Some(tab) = self.active_tab() {
@@ -5895,6 +6625,9 @@ impl RavPdfApp {
                         if let Some(pos) = response.interact_pointer_pos() {
                             self.drag_start_pos = Some(pos);
                             self.drag_current_pos = Some(pos);
+                            if self.active_tool == ActiveTool::MarqueeZoom {
+                                self.marquee_zoom_start = Some(pos);
+                            }
                             if self.active_tool == ActiveTool::Pencil {
                                 self.active_pencil_points.clear();
                                 self.active_pencil_points.push(pos);
@@ -6173,6 +6906,62 @@ impl RavPdfApp {
                                     Stroke::new(2.0_f32, Color32::from_rgb(0, 120, 230)),
                                 );
                             }
+                            ActiveTool::Squiggly => {
+                                ui.painter().rect_filled(
+                                    drag_rect,
+                                    0.0_f32,
+                                    Color32::from_rgba_unmultiplied(16, 185, 129, 30),
+                                );
+                                let start_x = drag_rect.min.x;
+                                let end_x = drag_rect.max.x;
+                                let base_y = drag_rect.max.y;
+                                let step = 4.0_f32;
+                                let mut px = start_x;
+                                let mut points = Vec::new();
+                                let mut up = true;
+                                while px <= end_x {
+                                    let py = if up { base_y - 2.0_f32 } else { base_y + 2.0_f32 };
+                                    points.push(Pos2::new(px, py));
+                                    px += step;
+                                    up = !up;
+                                }
+                                for pair in points.windows(2) {
+                                    ui.painter().line_segment(
+                                        [pair[0], pair[1]],
+                                        Stroke::new(1.5_f32, Color32::from_rgb(16, 185, 129)),
+                                    );
+                                }
+                            }
+                            ActiveTool::MarqueeZoom => {
+                                ui.painter().rect_filled(
+                                    drag_rect,
+                                    0.0_f32,
+                                    Color32::from_rgba_unmultiplied(59, 130, 246, 35),
+                                );
+                                ui.painter().rect_stroke(
+                                    drag_rect,
+                                    0.0_f32,
+                                    Stroke::new(1.5_f32, Color32::from_rgb(59, 130, 246)),
+                                );
+                                let text = format!(
+                                    "🔍 Zoom to Box ({:.0} × {:.0} pt)",
+                                    drag_rect.width() / zoom,
+                                    drag_rect.height() / zoom,
+                                );
+                                let center = drag_rect.center();
+                                ui.painter().rect_filled(
+                                    Rect::from_center_size(center, Vec2::new(170.0_f32, 22.0_f32)),
+                                    4.0_f32,
+                                    Color32::from_rgba_unmultiplied(15, 23, 42, 220),
+                                );
+                                ui.painter().text(
+                                    center,
+                                    Align2::CENTER_CENTER,
+                                    text,
+                                    FontId::proportional(11.0_f32),
+                                    Color32::WHITE,
+                                );
+                            }
                             ActiveTool::StrikeOut => {
                                 ui.painter().rect_filled(
                                     drag_rect,
@@ -6358,6 +7147,42 @@ impl RavPdfApp {
                                             tab.is_modified = true;
                                             tab.invalidate_render();
                                             self.status_message = "Added underline annotation".into();
+                                        }
+                                    }
+                                    ActiveTool::Squiggly => {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let mut annot = Annotation::new(
+                                                AnnotationType::Squiggly,
+                                                pdf_rect,
+                                            );
+                                            annot.color = Some((0.06, 0.72, 0.50));
+                                            let curr_page = tab.current_page;
+                                            let _ = add_annotation_to_page(
+                                                &mut tab.doc,
+                                                curr_page,
+                                                &annot,
+                                            );
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message =
+                                                "Added squiggly underline annotation".into();
+                                        }
+                                    }
+                                    ActiveTool::MarqueeZoom => {
+                                        let avail_w = ui.available_width().max(100.0_f32);
+                                        let avail_h = ui.available_height().max(100.0_f32);
+                                        let dw = drag_rect.width().max(8.0_f32);
+                                        let dh = drag_rect.height().max(8.0_f32);
+                                        let factor = ((avail_w - 32.0_f32) / dw)
+                                            .min((avail_h - 32.0_f32) / dh);
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let target_zoom = (tab.zoom * factor).clamp(0.1_f32, 64.0_f32);
+                                            tab.zoom = target_zoom;
+                                            tab.invalidate_render();
+                                            self.status_message = format!(
+                                                "Marquee zoom: {:.0}%",
+                                                target_zoom * 100.0_f32
+                                            );
                                         }
                                     }
                                     ActiveTool::StrikeOut => {
@@ -6560,6 +7385,7 @@ impl RavPdfApp {
                                 }
                             }
                         }
+                        self.marquee_zoom_start = None;
                     }
 
                     if response.drag_stopped() && self.active_tool == ActiveTool::Select {
@@ -14329,48 +15155,95 @@ impl eframe::App for RavPdfApp {
     }
 }
 
-fn setup_custom_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.dark_mode = true;
-    visuals.panel_fill = Color32::from_rgb(24, 24, 27); // Zinc 900
-    visuals.window_fill = Color32::from_rgb(32, 32, 36);
-    visuals.faint_bg_color = Color32::from_rgb(39, 39, 42); // Zinc 800
-    visuals.extreme_bg_color = Color32::from_rgb(18, 18, 20); // Canvas & input background
-    visuals.code_bg_color = Color32::from_rgb(28, 28, 32);
+fn setup_custom_theme(ctx: &egui::Context, dark: bool) {
+    let mut visuals = if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    visuals.dark_mode = dark;
 
-    visuals.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(63, 63, 70));
-    visuals.window_rounding = egui::Rounding::same(8.0);
-    visuals.menu_rounding = egui::Rounding::same(6.0);
+    if dark {
+        visuals.panel_fill = Color32::from_rgb(24, 24, 27); // Zinc 900
+        visuals.window_fill = Color32::from_rgb(32, 32, 36);
+        visuals.faint_bg_color = Color32::from_rgb(39, 39, 42); // Zinc 800
+        visuals.extreme_bg_color = Color32::from_rgb(18, 18, 20); // Canvas & input background
+        visuals.code_bg_color = Color32::from_rgb(28, 28, 32);
 
-    let rounding = egui::Rounding::same(5.0);
+        visuals.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(63, 63, 70));
+        visuals.window_rounding = egui::Rounding::same(8.0);
+        visuals.menu_rounding = egui::Rounding::same(6.0);
 
-    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(30, 30, 34);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(48, 48, 56));
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231));
-    visuals.widgets.noninteractive.rounding = rounding;
+        let rounding = egui::Rounding::same(5.0);
 
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(39, 39, 44);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(58, 58, 66));
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(220, 220, 225));
-    visuals.widgets.inactive.rounding = rounding;
+        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(30, 30, 34);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(48, 48, 56));
+        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(228, 228, 231));
+        visuals.widgets.noninteractive.rounding = rounding;
 
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(52, 52, 60);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(59, 130, 246));
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
-    visuals.widgets.hovered.rounding = rounding;
+        visuals.widgets.inactive.bg_fill = Color32::from_rgb(39, 39, 44);
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(58, 58, 66));
+        visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(220, 220, 225));
+        visuals.widgets.inactive.rounding = rounding;
 
-    visuals.widgets.active.bg_fill = Color32::from_rgb(37, 99, 235);
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
-    visuals.widgets.active.rounding = rounding;
+        visuals.widgets.hovered.bg_fill = Color32::from_rgb(52, 52, 60);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(59, 130, 246));
+        visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+        visuals.widgets.hovered.rounding = rounding;
 
-    visuals.widgets.open.bg_fill = Color32::from_rgb(44, 44, 50);
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(59, 130, 246));
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
-    visuals.widgets.open.rounding = rounding;
+        visuals.widgets.active.bg_fill = Color32::from_rgb(37, 99, 235);
+        visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
+        visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+        visuals.widgets.active.rounding = rounding;
 
-    visuals.selection.bg_fill = Color32::from_rgb(37, 99, 235);
-    visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
+        visuals.widgets.open.bg_fill = Color32::from_rgb(44, 44, 50);
+        visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(59, 130, 246));
+        visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+        visuals.widgets.open.rounding = rounding;
+
+        visuals.selection.bg_fill = Color32::from_rgb(37, 99, 235);
+        visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250));
+    } else {
+        visuals.panel_fill = Color32::from_rgb(241, 245, 249); // Slate 100
+        visuals.window_fill = Color32::from_rgb(255, 255, 255);
+        visuals.faint_bg_color = Color32::from_rgb(248, 250, 252); // Slate 50
+        visuals.extreme_bg_color = Color32::from_rgb(226, 232, 240); // Slate 200
+        visuals.code_bg_color = Color32::from_rgb(241, 245, 249);
+
+        visuals.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(203, 213, 225));
+        visuals.window_rounding = egui::Rounding::same(8.0);
+        visuals.menu_rounding = egui::Rounding::same(6.0);
+
+        let rounding = egui::Rounding::same(5.0);
+
+        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(248, 250, 252);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(226, 232, 240));
+        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(30, 41, 59));
+        visuals.widgets.noninteractive.rounding = rounding;
+
+        visuals.widgets.inactive.bg_fill = Color32::from_rgb(255, 255, 255);
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(203, 213, 225));
+        visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(15, 23, 42));
+        visuals.widgets.inactive.rounding = rounding;
+
+        visuals.widgets.hovered.bg_fill = Color32::from_rgb(238, 242, 246);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(37, 99, 235));
+        visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(15, 23, 42));
+        visuals.widgets.hovered.rounding = rounding;
+
+        visuals.widgets.active.bg_fill = Color32::from_rgb(37, 99, 235);
+        visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(29, 78, 216));
+        visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+        visuals.widgets.active.rounding = rounding;
+
+        visuals.widgets.open.bg_fill = Color32::from_rgb(241, 245, 249);
+        visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(37, 99, 235));
+        visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(15, 23, 42));
+        visuals.widgets.open.rounding = rounding;
+
+        visuals.selection.bg_fill = Color32::from_rgb(37, 99, 235);
+        visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(29, 78, 216));
+    }
 
     ctx.set_visuals(visuals);
 
@@ -14405,7 +15278,7 @@ fn main() -> eframe::Result<()> {
         "RAV PDF",
         options,
         Box::new(|cc| {
-            setup_custom_theme(&cc.egui_ctx);
+            setup_custom_theme(&cc.egui_ctx, true);
             Ok(Box::new(initial_app))
         }),
     )

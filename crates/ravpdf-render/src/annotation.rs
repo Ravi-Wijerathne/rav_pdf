@@ -146,6 +146,34 @@ fn render_single_annotation(
             }
         }
 
+        "Squiggly" => {
+            let mut paint = Paint::default();
+            paint.set_color(Color::from_rgba8(0, 150, 80, 255));
+            paint.anti_alias = true;
+
+            let stroke = Stroke {
+                width: 1.5_f32 * zoom,
+                ..Default::default()
+            };
+
+            let mut pb = PathBuilder::new();
+            let step = (3.5_f32 * zoom).max(2.0);
+            let mut cur_x = rx;
+            let base_y = ry + rh;
+            let mut up = true;
+            pb.move_to(cur_x, base_y);
+            while cur_x < rx + rw {
+                let next_x = (cur_x + step).min(rx + rw);
+                let next_y = if up { base_y - 2.0 * zoom } else { base_y + 2.0 * zoom };
+                pb.line_to(next_x, next_y);
+                cur_x = next_x;
+                up = !up;
+            }
+            if let Some(path) = pb.finish() {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+
         "StrikeOut" => {
             let mut paint = Paint::default();
             paint.set_color(Color::from_rgba8(204, 0, 0, 255));

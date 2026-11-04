@@ -4450,6 +4450,7 @@ fn main() -> Result<()> {
             let at = match annot_type.to_lowercase().as_str() {
                 "highlight" => AnnotationType::Highlight,
                 "underline" => AnnotationType::Underline,
+                "squiggly" | "wave" => AnnotationType::Squiggly,
                 "strikeout" | "strike" => AnnotationType::StrikeOut,
                 "square" | "rect" => AnnotationType::Square,
                 "circle" | "oval" => AnnotationType::Circle,
