@@ -178,6 +178,8 @@ enum ActiveTool {
     Rectangle,
     Circle,
     Line,
+    Polygon,
+    Polyline,
     Pencil,
     Eraser,
     Text,
@@ -636,6 +638,9 @@ struct RavPdfApp {
     // Active freehand pencil drawing on canvas (FR-09.1)
     active_pencil_points: Vec<Pos2>,
 
+    // Polygon & Polyline Vector Shapes (FR-09.2, FR-09.3)
+    polygon_vertices: Vec<[f64; 2]>,
+
     // Callout text annotation modal state (FR-08.1.3)
     show_callout_dialog: bool,
     callout_text_input: String,
@@ -1059,6 +1064,7 @@ impl Default for RavPdfApp {
             drawing_eraser_radius: 20.0,
 
             active_pencil_points: Vec::new(),
+            polygon_vertices: Vec::new(),
 
             show_callout_dialog: false,
             callout_text_input: "Note: Check area details".to_string(),
@@ -3239,6 +3245,8 @@ impl RavPdfApp {
                         ActiveTool::Rectangle => "▭ Rect",
                         ActiveTool::Circle => "◯ Circle",
                         ActiveTool::Line => "➔ Line",
+                        ActiveTool::Polygon => "⬡ Polygon",
+                        ActiveTool::Polyline => "⚡ Polyline",
                         ActiveTool::Pencil => "✏ Pencil",
                         ActiveTool::Eraser => "🧹 Eraser",
                         _ => "📐 Shapes",
@@ -3272,6 +3280,28 @@ impl RavPdfApp {
                             .clicked()
                         {
                             self.active_tool = ActiveTool::Line;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Polygon,
+                                "⬡ Polygon",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Polygon;
+                            self.polygon_vertices.clear();
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.active_tool == ActiveTool::Polyline,
+                                "⚡ Polyline",
+                            )
+                            .clicked()
+                        {
+                            self.active_tool = ActiveTool::Polyline;
+                            self.polygon_vertices.clear();
                             ui.close_menu();
                         }
                         if ui
@@ -6361,20 +6391,30 @@ impl RavPdfApp {
                                             );
                                         }
                                         FormFieldType::Signature => {
+                                            let mut trigger_sign = false;
                                             ui.allocate_new_ui(
                                                 egui::UiBuilder::new().max_rect(field_rect),
                                                 |ui| {
-                                                    egui::Frame::none()
+                                                    let resp = egui::Frame::none()
                                                         .fill(Color32::from_rgba_unmultiplied(255, 248, 220, 200))
                                                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(218, 165, 32)))
                                                         .show(ui, |ui| {
                                                             ui.horizontal(|ui| {
                                                                 ui.label(RichText::new("🔏").size(12.0));
-                                                                ui.label(RichText::new("Digital Signature").size(10.0).italics());
+                                                                ui.label(RichText::new("Click to Digitally Sign").size(10.0).italics());
                                                             });
-                                                        });
+                                                        }).response.interact(egui::Sense::click());
+                                                    if resp.clicked() {
+                                                        trigger_sign = true;
+                                                    }
                                                 },
                                             );
+                                            if trigger_sign {
+                                                self.sig_target_page = current_page;
+                                                self.sig_field_name = field.name.clone();
+                                                self.sig_mode_idx = 0;
+                                                self.show_add_signature_dialog = true;
+                                            }
                                         }
                                     }
                                 }
@@ -6580,9 +6620,115 @@ impl RavPdfApp {
                     }
                     if !self.text_selection.selected_text.is_empty() {
                         if let Some(pos) = self.text_selection.current_pos {
-                            let pill_rect = Rect::from_min_size(Pos2::new(pos.x.clamp(rect.min.x, rect.max.x - 140.0), (pos.y - 30.0).max(rect.min.y)), Vec2::new(130.0, 24.0));
-                            ui.painter().rect_filled(pill_rect, 4.0, Color32::from_rgba_unmultiplied(30, 41, 59, 230));
-                            ui.painter().text(pill_rect.center(), Align2::CENTER_CENTER, "📋 Copy (Ctrl+C)", FontId::proportional(11.0), Color32::WHITE);
+                            let pill_w = 360.0_f32;
+                            let pill_h = 28.0_f32;
+                            let pill_x = pos.x.clamp(rect.min.x, (rect.max.x - pill_w).max(rect.min.x));
+                            let pill_y = (pos.y - 34.0).max(rect.min.y);
+                            let pill_rect = Rect::from_min_size(Pos2::new(pill_x, pill_y), Vec2::new(pill_w, pill_h));
+
+                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(pill_rect), |ui| {
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgba_unmultiplied(24, 24, 27, 245))
+                                    .rounding(6.0_f32)
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(63, 63, 70)))
+                                    .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+                                            if ui.small_button("📋 Copy").on_hover_text("Copy selected text (Ctrl+C)").clicked() {
+                                                ctx.output_mut(|o| o.copied_text = self.text_selection.selected_text.clone());
+                                                self.status_message = format!("Copied {} chars to clipboard", self.text_selection.selected_text.len());
+                                            }
+                                            if ui.small_button("🖍 Highlight").on_hover_text("Highlight selected text").clicked() {
+                                                let mut min_x = f64::MAX;
+                                                let mut min_y = f64::MAX;
+                                                let mut max_x = f64::MIN;
+                                                let mut max_y = f64::MIN;
+                                                for span in &self.text_selection.selected_spans {
+                                                    let span_w = span.text.len() as f64 * span.font_size * 0.55;
+                                                    let span_h = span.font_size * 1.2;
+                                                    min_x = min_x.min(span.x);
+                                                    min_y = min_y.min(span.y);
+                                                    max_x = max_x.max(span.x + span_w);
+                                                    max_y = max_y.max(span.y + span_h);
+                                                }
+                                                if min_x < max_x && min_y < max_y {
+                                                    if let Some(tab) = self.active_tab_mut() {
+                                                        let annot = Annotation::new(AnnotationType::Highlight, [min_x, min_y, max_x, max_y]);
+                                                        let curr = tab.current_page;
+                                                        let _ = add_annotation_to_page(&mut tab.doc, curr, &annot);
+                                                        tab.is_modified = true;
+                                                        tab.invalidate_render();
+                                                        self.status_message = "Highlighted selected text".into();
+                                                    }
+                                                }
+                                            }
+                                            if ui.small_button("U̲ Underline").on_hover_text("Underline selected text").clicked() {
+                                                let mut min_x = f64::MAX;
+                                                let mut min_y = f64::MAX;
+                                                let mut max_x = f64::MIN;
+                                                let mut max_y = f64::MIN;
+                                                for span in &self.text_selection.selected_spans {
+                                                    let span_w = span.text.len() as f64 * span.font_size * 0.55;
+                                                    let span_h = span.font_size * 1.2;
+                                                    min_x = min_x.min(span.x);
+                                                    min_y = min_y.min(span.y);
+                                                    max_x = max_x.max(span.x + span_w);
+                                                    max_y = max_y.max(span.y + span_h);
+                                                }
+                                                if min_x < max_x && min_y < max_y {
+                                                    if let Some(tab) = self.active_tab_mut() {
+                                                        let annot = Annotation::new(AnnotationType::Underline, [min_x, min_y, max_x, max_y]);
+                                                        let curr = tab.current_page;
+                                                        let _ = add_annotation_to_page(&mut tab.doc, curr, &annot);
+                                                        tab.is_modified = true;
+                                                        tab.invalidate_render();
+                                                        self.status_message = "Underlined selected text".into();
+                                                    }
+                                                }
+                                            }
+                                            if ui.small_button("█ Redact").on_hover_text("Mark selected text for redaction").clicked() {
+                                                let mut min_x = f64::MAX;
+                                                let mut min_y = f64::MAX;
+                                                let mut max_x = f64::MIN;
+                                                let mut max_y = f64::MIN;
+                                                for span in &self.text_selection.selected_spans {
+                                                    let span_w = span.text.len() as f64 * span.font_size * 0.55;
+                                                    let span_h = span.font_size * 1.2;
+                                                    min_x = min_x.min(span.x);
+                                                    min_y = min_y.min(span.y);
+                                                    max_x = max_x.max(span.x + span_w);
+                                                    max_y = max_y.max(span.y + span_h);
+                                                }
+                                                if min_x < max_x && min_y < max_y {
+                                                    let r_id = self.next_redaction_id;
+                                                    self.next_redaction_id += 1;
+                                                    self.marked_redactions.push(MarkedRedaction {
+                                                        id: r_id,
+                                                        page_index: current_page,
+                                                        rect: [min_x, min_y, max_x, max_y],
+                                                        appearance: RedactionAppearance {
+                                                            fill_color: [0.0, 0.0, 0.0],
+                                                            overlay_text: Some("[REDACTED]".into()),
+                                                            text_color: [1.0, 1.0, 1.0],
+                                                            font_size: None,
+                                                        },
+                                                    });
+                                                    self.status_message = format!("Marked selection for redaction (Total marked: {})", self.marked_redactions.len());
+                                                }
+                                            }
+                                            if ui.small_button("✏ Edit").on_hover_text("Edit text in-place").clicked() {
+                                                self.text_editor_target_text = self.text_selection.selected_text.clone();
+                                                self.text_editor_new_text = self.text_selection.selected_text.clone();
+                                                self.show_text_editor_dialog = true;
+                                            }
+                                            if ui.small_button("✖").on_hover_text("Clear selection").clicked() {
+                                                self.text_selection.selected_text.clear();
+                                                self.text_selection.selected_spans.clear();
+                                            }
+                                        });
+                                    });
+                            });
                         }
                     }
 
@@ -6815,6 +6961,42 @@ impl RavPdfApp {
                     if self.active_tool == ActiveTool::Eraser {
                         if let Some(pos) = response.interact_pointer_pos() {
                             ui.painter().circle_stroke(pos, 15.0, Stroke::new(1.5_f32, Color32::from_rgb(239, 68, 68)));
+                        }
+                    }
+
+                    // Live preview and vertex rendering for Polygon & Polyline (FR-09.2, FR-09.3)
+                    if (self.active_tool == ActiveTool::Polygon || self.active_tool == ActiveTool::Polyline) && !self.polygon_vertices.is_empty() {
+                        let shape_color = Color32::from_rgb(220, 38, 38);
+                        let seg_stroke = Stroke::new(2.0_f32, shape_color);
+
+                        // Draw lines between existing vertices
+                        for i in 0..self.polygon_vertices.len().saturating_sub(1) {
+                            let p1 = self.polygon_vertices[i];
+                            let p2 = self.polygon_vertices[i + 1];
+                            let s1 = Pos2::new(rect.min.x + (p1[0] as f32) * zoom, rect.min.y + (page_h - p1[1] as f32) * zoom);
+                            let s2 = Pos2::new(rect.min.x + (p2[0] as f32) * zoom, rect.min.y + (page_h - p2[1] as f32) * zoom);
+                            ui.painter().line_segment([s1, s2], seg_stroke);
+                        }
+
+                        // Draw anchor dots at all vertices
+                        for pt in &self.polygon_vertices {
+                            let s = Pos2::new(rect.min.x + (pt[0] as f32) * zoom, rect.min.y + (page_h - pt[1] as f32) * zoom);
+                            ui.painter().circle_filled(s, 3.5, shape_color);
+                            ui.painter().circle_stroke(s, 4.5, Stroke::new(1.0_f32, Color32::WHITE));
+                        }
+
+                        // Rubber-band line to cursor
+                        if let Some(cursor_pos) = response.hover_pos() {
+                            if let Some(&last_pt) = self.polygon_vertices.last() {
+                                let last_s = Pos2::new(rect.min.x + (last_pt[0] as f32) * zoom, rect.min.y + (page_h - last_pt[1] as f32) * zoom);
+                                ui.painter().line_segment([last_s, cursor_pos], Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(220, 38, 38, 160)));
+
+                                if self.active_tool == ActiveTool::Polygon && self.polygon_vertices.len() >= 2 {
+                                    let first_pt = self.polygon_vertices[0];
+                                    let first_s = Pos2::new(rect.min.x + (first_pt[0] as f32) * zoom, rect.min.y + (page_h - first_pt[1] as f32) * zoom);
+                                    ui.painter().line_segment([cursor_pos, first_s], Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(100, 116, 139, 120)));
+                                }
+                            }
                         }
                     }
 
@@ -7483,10 +7665,11 @@ impl RavPdfApp {
                                     let mut pill_clicked = false;
                                     if !self.text_selection.selected_text.is_empty() {
                                         if let Some(curr) = self.text_selection.current_pos {
-                                            let pill_rect = Rect::from_min_size(Pos2::new(curr.x.clamp(rect.min.x, rect.max.x - 140.0), (curr.y - 30.0).max(rect.min.y)), Vec2::new(130.0, 24.0));
+                                            let pill_w = 360.0_f32;
+                                            let pill_x = curr.x.clamp(rect.min.x, (rect.max.x - pill_w).max(rect.min.x));
+                                            let pill_y = (curr.y - 34.0).max(rect.min.y);
+                                            let pill_rect = Rect::from_min_size(Pos2::new(pill_x, pill_y), Vec2::new(pill_w, 28.0));
                                             if pill_rect.contains(pos) {
-                                                ctx.output_mut(|o| o.copied_text = self.text_selection.selected_text.clone());
-                                                self.status_message = format!("Copied {} chars to clipboard", self.text_selection.selected_text.len());
                                                 pill_clicked = true;
                                             }
                                         }
@@ -7623,7 +7806,109 @@ impl RavPdfApp {
                                     self.callout_knee_y = local_y - 10.0;
                                     self.show_callout_dialog = true;
                                 }
+                                ActiveTool::Polygon => {
+                                    let mut finish = false;
+                                    if self.polygon_vertices.len() >= 3 {
+                                        let first = self.polygon_vertices[0];
+                                        let dx = (first[0] - local_x).abs();
+                                        let dy = (first[1] - local_y).abs();
+                                        if (dx * zoom as f64) < 12.0 && (dy * zoom as f64) < 12.0 {
+                                            finish = true;
+                                        }
+                                    }
+                                    if finish {
+                                        let vertices = std::mem::take(&mut self.polygon_vertices);
+                                        let num_verts = vertices.len();
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let config = ShapeAnnotationConfig {
+                                                shape_type: ShapeType::Polygon { vertices },
+                                                rect: [0.0, 0.0, 0.0, 0.0],
+                                                stroke_color: Some((0.85, 0.15, 0.15)),
+                                                fill_color: None,
+                                                stroke_width: 2.0,
+                                                border_style: BorderStyle::Solid,
+                                                border_effect: BorderEffect::None,
+                                                opacity: 1.0,
+                                                author: Some("User".into()),
+                                                locked: false,
+                                                popup_note: None,
+                                            };
+                                            let curr_page = tab.current_page;
+                                            let _ = add_shape_annotation(&mut tab.doc, curr_page, &config);
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = format!("Created polygon with {} vertices", num_verts);
+                                        }
+                                    } else {
+                                        self.polygon_vertices.push([local_x, local_y]);
+                                        self.status_message = format!("Added vertex {} (Click near start or press Enter to close)", self.polygon_vertices.len());
+                                    }
+                                }
+                                ActiveTool::Polyline => {
+                                    self.polygon_vertices.push([local_x, local_y]);
+                                    self.status_message = format!("Added polyline vertex {} (Double-click or press Enter to finish)", self.polygon_vertices.len());
+                                }
                                 _ => {}
+                            }
+                        }
+                    }
+
+                    // Keyboard & double-click shortcuts for Polygon and Polyline
+                    if self.active_tool == ActiveTool::Polygon || self.active_tool == ActiveTool::Polyline {
+                        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                            self.polygon_vertices.clear();
+                            self.status_message = "Cancelled drawing".into();
+                        } else if ctx.input(|i| i.key_pressed(Key::Enter)) || response.double_clicked() {
+                            if self.active_tool == ActiveTool::Polygon && self.polygon_vertices.len() >= 3 {
+                                let vertices = std::mem::take(&mut self.polygon_vertices);
+                                let num_verts = vertices.len();
+                                if let Some(tab) = self.active_tab_mut() {
+                                    let config = ShapeAnnotationConfig {
+                                        shape_type: ShapeType::Polygon { vertices },
+                                        rect: [0.0, 0.0, 0.0, 0.0],
+                                        stroke_color: Some((0.85, 0.15, 0.15)),
+                                        fill_color: None,
+                                        stroke_width: 2.0,
+                                        border_style: BorderStyle::Solid,
+                                        border_effect: BorderEffect::None,
+                                        opacity: 1.0,
+                                        author: Some("User".into()),
+                                        locked: false,
+                                        popup_note: None,
+                                    };
+                                    let curr_page = tab.current_page;
+                                    let _ = add_shape_annotation(&mut tab.doc, curr_page, &config);
+                                    tab.is_modified = true;
+                                    tab.invalidate_render();
+                                    self.status_message = format!("Created polygon with {} vertices", num_verts);
+                                }
+                            } else if self.active_tool == ActiveTool::Polyline && self.polygon_vertices.len() >= 2 {
+                                let vertices = std::mem::take(&mut self.polygon_vertices);
+                                let num_verts = vertices.len();
+                                if let Some(tab) = self.active_tab_mut() {
+                                    let config = ShapeAnnotationConfig {
+                                        shape_type: ShapeType::PolyLine {
+                                            vertices,
+                                            start_style: LineEndingStyle::None,
+                                            end_style: LineEndingStyle::None,
+                                        },
+                                        rect: [0.0, 0.0, 0.0, 0.0],
+                                        stroke_color: Some((0.85, 0.15, 0.15)),
+                                        fill_color: None,
+                                        stroke_width: 2.0,
+                                        border_style: BorderStyle::Solid,
+                                        border_effect: BorderEffect::None,
+                                        opacity: 1.0,
+                                        author: Some("User".into()),
+                                        locked: false,
+                                        popup_note: None,
+                                    };
+                                    let curr_page = tab.current_page;
+                                    let _ = add_shape_annotation(&mut tab.doc, curr_page, &config);
+                                    tab.is_modified = true;
+                                    tab.invalidate_render();
+                                    self.status_message = format!("Created polyline with {} vertices", num_verts);
+                                }
                             }
                         }
                     }
@@ -14573,6 +14858,24 @@ impl RavPdfApp {
                             ui.checkbox(&mut self.form_field_inspector_readonly, "Read-Only");
                             ui.checkbox(&mut self.form_field_inspector_required, "Required");
                         });
+
+                        if sel.field_type == FormFieldType::Signature {
+                            ui.separator();
+                            if ui
+                                .button(
+                                    RichText::new("🔏 Digitally Sign This Document Now...")
+                                        .color(Color32::from_rgb(59, 130, 246))
+                                        .strong(),
+                                )
+                                .clicked()
+                            {
+                                self.sig_field_name = self.form_field_inspector_name.clone();
+                                self.sig_target_page = page_idx;
+                                self.sig_mode_idx = 0;
+                                self.show_add_signature_dialog = true;
+                                close = true;
+                            }
+                        }
 
                         ui.separator();
                         ui.horizontal(|ui| {
