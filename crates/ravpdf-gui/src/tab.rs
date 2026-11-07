@@ -25,6 +25,7 @@ pub struct DocumentTab {
     pub current_page: usize,
     pub page_input_buffer: String,
     pub zoom: f32,
+    pub target_zoom: f32,
     pub rotation: i64,
     pub is_modified: bool,
     pub metadata: Option<DocumentInfo>,
@@ -34,6 +35,7 @@ pub struct DocumentTab {
     pub continuous_page_textures: std::collections::HashMap<usize, egui::TextureHandle>,
     pub cached_page_index: Option<usize>,
     pub cached_zoom: Option<f32>,
+    pub cached_render_zoom: Option<f32>,
     pub cached_rotation: Option<i64>,
     pub cached_plate_config: Option<PlateSeparationConfig>,
     pub cached_soft_proof: Option<SoftProofConfig>,
@@ -54,6 +56,7 @@ impl DocumentTab {
             current_page: 0,
             page_input_buffer: "1".into(),
             zoom: 1.0,
+            target_zoom: 1.0,
             rotation: 0,
             is_modified: false,
             metadata,
@@ -63,6 +66,7 @@ impl DocumentTab {
             continuous_page_textures: std::collections::HashMap::new(),
             cached_page_index: None,
             cached_zoom: None,
+            cached_render_zoom: None,
             cached_rotation: None,
             cached_plate_config: None,
             cached_soft_proof: None,
@@ -75,6 +79,8 @@ impl DocumentTab {
         self.page_texture = None;
         self.thumbnail_textures.clear();
         self.continuous_page_textures.clear();
+        self.cached_zoom = None;
+        self.cached_render_zoom = None;
     }
 
     /// Retrieves an existing page texture or rasterizes it on demand for continuous scrolling (FR-01.2.2).
@@ -90,8 +96,10 @@ impl DocumentTab {
             return None;
         }
 
+        let ppp = ctx.pixels_per_point();
+        let render_zoom = self.zoom * ppp;
         let options = RenderOptions {
-            zoom: self.zoom,
+            zoom: render_zoom,
             rotation: self.rotation,
             background_color: Color::WHITE,
         };
@@ -112,8 +120,8 @@ impl DocumentTab {
 
             let tex = ctx.load_texture(
                 format!(
-                    "cont_tab_{}_{}_z{:.2}_r{}",
-                    self.id, page_idx, self.zoom, self.rotation
+                    "cont_tab_{}_{}_z{:.2}_p{:.1}_r{}",
+                    self.id, page_idx, self.zoom, ppp, self.rotation
                 ),
                 color_image,
                 TextureOptions::LINEAR,
@@ -188,9 +196,11 @@ impl DocumentTab {
         plate_config: Option<&PlateSeparationConfig>,
         soft_proof_config: Option<&SoftProofConfig>,
     ) -> Option<SeparationAnalysis> {
+        let ppp = ctx.pixels_per_point();
+        let render_zoom = self.zoom * ppp;
         let needs_render = self.page_texture.is_none()
             || self.cached_page_index != Some(self.current_page)
-            || self.cached_zoom != Some(self.zoom)
+            || self.cached_render_zoom != Some(render_zoom)
             || self.cached_rotation != Some(self.rotation)
             || self.cached_plate_config.as_ref() != plate_config
             || self.cached_soft_proof.as_ref() != soft_proof_config;
@@ -199,7 +209,7 @@ impl DocumentTab {
 
         if needs_render && self.current_page < self.doc.page_count() {
             let options = RenderOptions {
-                zoom: self.zoom,
+                zoom: render_zoom,
                 rotation: self.rotation,
                 background_color: Color::WHITE,
             };
@@ -238,13 +248,14 @@ impl DocumentTab {
                 };
 
                 let tex = ctx.load_texture(
-                    format!("page_view_tab_{}_{}", self.id, self.current_page),
+                    format!("page_view_tab_{}_{}_p{:.1}", self.id, self.current_page, ppp),
                     color_image,
                     TextureOptions::LINEAR,
                 );
                 self.page_texture = Some(tex);
                 self.cached_page_index = Some(self.current_page);
                 self.cached_zoom = Some(self.zoom);
+                self.cached_render_zoom = Some(render_zoom);
                 self.cached_rotation = Some(self.rotation);
                 self.cached_plate_config = plate_config.cloned();
                 self.cached_soft_proof = soft_proof_config.cloned();
@@ -260,6 +271,7 @@ impl DocumentTab {
             let page_w = (page.crop_box[2] - page.crop_box[0]).abs() as f32;
             if page_w > 0.0 && avail_w > 0.0 {
                 self.zoom = (avail_w / page_w).clamp(0.2, 5.0);
+                self.target_zoom = self.zoom;
                 self.invalidate_render();
             }
         }
@@ -275,6 +287,7 @@ impl DocumentTab {
                 let zoom_w = avail_w / page_w;
                 let zoom_h = avail_h / page_h;
                 self.zoom = zoom_w.min(zoom_h).clamp(0.2, 5.0);
+                self.target_zoom = self.zoom;
                 self.invalidate_render();
             }
         }
