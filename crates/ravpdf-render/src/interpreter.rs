@@ -534,7 +534,7 @@ impl<'a> ContentInterpreter<'a> {
                         _ => &[],
                     };
                     let text = self.decode_string_bytes(bytes);
-                    self.draw_text_string(&text);
+                    self.draw_text(bytes, &text);
                 }
             }
             "TJ" => {
@@ -543,7 +543,7 @@ impl<'a> ContentInterpreter<'a> {
                         match item {
                             Object::String(s) => {
                                 let text = self.decode_string_bytes(&s.bytes);
-                                self.draw_text_string(&text);
+                                self.draw_text(&s.bytes, &text);
                             }
                             Object::Real(n) => {
                                 let adj = (-*n as f32 / 1000.0) * self.state.font_size;
@@ -828,27 +828,39 @@ impl<'a> ContentInterpreter<'a> {
         }
     }
 
-    fn draw_text_string(&mut self, text: &str) {
+    fn draw_text(&mut self, bytes: &[u8], text: &str) {
         let font_key = self
             .state
             .font_name
             .strip_prefix('/')
             .unwrap_or(&self.state.font_name);
 
-        let embedded_bytes = self.fonts.get(font_key).and_then(|f| f.font_data.as_deref());
+        let font_info = self.fonts.get(font_key);
+        let embedded_bytes = font_info.and_then(|f| f.font_data.as_deref());
 
-        let fallback_bytes = if self.state.font_name.to_lowercase().contains("courier")
-            || self.state.font_name.to_lowercase().contains("mono")
-        {
+        let is_bold = self.state.font_name.to_lowercase().contains("bold")
+            || self.state.font_name.to_lowercase().contains("black")
+            || self.state.font_name.to_lowercase().contains("heavy");
+        let is_mono = self.state.font_name.to_lowercase().contains("courier")
+            || self.state.font_name.to_lowercase().contains("mono");
+
+        let is_type0 = font_info
+            .map(|f| {
+                f.subtype == "Type0"
+                    || f.base_font.contains("Identity-H")
+                    || f.to_unicode.as_ref().map(|c| c.is_16bit).unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        let primary_font = embedded_bytes.and_then(|b| ab_glyph::FontRef::try_from_slice(b).ok());
+        let sys_bytes = get_system_font(is_bold, is_mono);
+        let sys_font = sys_bytes.and_then(|b| ab_glyph::FontRef::try_from_slice(b).ok());
+
+        let fallback_bytes = if is_mono {
             epaint_default_fonts::HACK_REGULAR
         } else {
             epaint_default_fonts::UBUNTU_LIGHT
         };
-
-        let primary_font = embedded_bytes
-            .and_then(|b| ab_glyph::FontRef::try_from_slice(b).ok())
-            .or_else(|| ab_glyph::FontRef::try_from_slice(fallback_bytes).ok());
-
         let fallback_font = ab_glyph::FontRef::try_from_slice(fallback_bytes).ok();
         let emoji_font =
             ab_glyph::FontRef::try_from_slice(epaint_default_fonts::NOTO_EMOJI_REGULAR).ok();
@@ -859,60 +871,148 @@ impl<'a> ContentInterpreter<'a> {
         combined.map_point(&mut pt);
         let (base_x, base_y) = (pt.x, pt.y);
 
-        if let Some(font) = primary_font {
-            use ab_glyph::{Font, ScaleFont};
-            let scaled_font = font.as_scaled(font_px_scale);
-            let mut cur_x = base_x;
-            let baseline_y = base_y;
+        let fill_col = self.state.fill_color.to_skia_color(self.state.fill_alpha);
+        let (r, g, b, a_base) = (
+            fill_col.red(),
+            fill_col.green(),
+            fill_col.blue(),
+            fill_col.alpha(),
+        );
 
-            let fill_col = self.state.fill_color.to_skia_color(self.state.fill_alpha);
-            let (r, g, b, a_base) = (
-                fill_col.red(),
-                fill_col.green(),
-                fill_col.blue(),
-                fill_col.alpha(),
-            );
+        let pixmap_w = self.pixmap.width() as i32;
+        let pixmap_h = self.pixmap.height() as i32;
 
-            let pixmap_w = self.pixmap.width() as i32;
-            let pixmap_h = self.pixmap.height() as i32;
+        struct GlyphDrawTarget {
+            cid_gid: Option<ab_glyph::GlyphId>,
+            ch: Option<char>,
+        }
 
+        let mut glyph_targets: Vec<GlyphDrawTarget> = Vec::new();
+
+        if is_type0 && !bytes.is_empty() {
+            let mut i = 0;
+            while i + 1 < bytes.len() {
+                let cid = ((bytes[i] as u16) << 8) | (bytes[i + 1] as u16);
+                let decoded_char = font_info
+                    .and_then(|f| f.to_unicode.as_ref())
+                    .and_then(|cmap| cmap.code_to_unicode.get(&(cid as u32)))
+                    .and_then(|s| s.chars().next());
+                glyph_targets.push(GlyphDrawTarget {
+                    cid_gid: Some(ab_glyph::GlyphId(cid)),
+                    ch: decoded_char,
+                });
+                i += 2;
+            }
+            if i < bytes.len() {
+                let cid = bytes[i] as u16;
+                let decoded_char = font_info
+                    .and_then(|f| f.to_unicode.as_ref())
+                    .and_then(|cmap| cmap.code_to_unicode.get(&(cid as u32)))
+                    .and_then(|s| s.chars().next());
+                glyph_targets.push(GlyphDrawTarget {
+                    cid_gid: Some(ab_glyph::GlyphId(cid)),
+                    ch: decoded_char,
+                });
+            }
+        } else {
             for ch in text.chars() {
+                glyph_targets.push(GlyphDrawTarget {
+                    cid_gid: None,
+                    ch: Some(ch),
+                });
+            }
+        }
+
+        use ab_glyph::{Font, ScaleFont};
+        let mut cur_x = base_x;
+        let baseline_y = base_y;
+
+        for target in glyph_targets {
+            if let Some(ch) = target.ch {
                 if ch.is_control() && ch != '\t' && ch != '\n' && ch != '\r' {
                     continue;
                 }
+            }
 
-                let mut gid = scaled_font.glyph_id(ch);
-                let mut active_font = &font;
+            let mut active_font: Option<&ab_glyph::FontRef> = None;
+            let mut active_gid = ab_glyph::GlyphId(0);
 
-                // If missing in primary font (.notdef), fall back to fallback_font or emoji_font
-                if gid.0 == 0 {
-                    if let Some(ref fb) = fallback_font {
-                        let sfb = fb.as_scaled(font_px_scale);
-                        let fb_gid = sfb.glyph_id(ch);
-                        if fb_gid.0 != 0 {
-                            gid = fb_gid;
-                            active_font = fb;
-                        }
-                    }
-                    if gid.0 == 0 {
-                        if let Some(ref ef) = emoji_font {
-                            let sef = ef.as_scaled(font_px_scale);
-                            let ef_gid = sef.glyph_id(ch);
-                            if ef_gid.0 != 0 {
-                                gid = ef_gid;
-                                active_font = ef;
-                            }
-                        }
+            // 1. In Type0 CIDFontType2, CID directly indexes the TrueType Glyph Index (ISO 32000-1 Clause 9.7)
+            if let (Some(gid), Some(ref font)) = (target.cid_gid, &primary_font) {
+                if gid.0 != 0 {
+                    let probe = gid.with_scale_and_position(
+                        font_px_scale,
+                        ab_glyph::Point {
+                            x: cur_x,
+                            y: baseline_y,
+                        },
+                    );
+                    if font.outline_glyph(probe).is_some()
+                        || font.as_scaled(font_px_scale).h_advance(gid) > 0.0
+                    {
+                        active_font = Some(font);
+                        active_gid = gid;
                     }
                 }
+            }
 
-                let active_scaled = active_font.as_scaled(font_px_scale);
-                let mut h_advance = active_scaled.h_advance(gid);
-                if h_advance <= 0.0 {
-                    h_advance = font_px_scale * 0.28;
+            // 2. Query primary embedded font with character
+            if active_font.is_none() {
+                if let (Some(ch), Some(ref font)) = (target.ch, &primary_font) {
+                    let sf = font.as_scaled(font_px_scale);
+                    let fgid = sf.glyph_id(ch);
+                    if fgid.0 != 0 {
+                        active_font = Some(font);
+                        active_gid = fgid;
+                    }
+                }
+            }
+
+            // 3. Fallback to system font (e.g. Arial / Arial Bold on macOS)
+            if active_font.is_none() {
+                if let (Some(ch), Some(ref font)) = (target.ch, &sys_font) {
+                    let sf = font.as_scaled(font_px_scale);
+                    let fgid = sf.glyph_id(ch);
+                    if fgid.0 != 0 {
+                        active_font = Some(font);
+                        active_gid = fgid;
+                    }
+                }
+            }
+
+            // 4. Fallback to universal bundled font (Ubuntu Light / Hack Regular)
+            if active_font.is_none() {
+                if let (Some(ch), Some(ref font)) = (target.ch, &fallback_font) {
+                    let sf = font.as_scaled(font_px_scale);
+                    let fgid = sf.glyph_id(ch);
+                    if fgid.0 != 0 {
+                        active_font = Some(font);
+                        active_gid = fgid;
+                    }
+                }
+            }
+
+            // 5. Fallback to emoji font
+            if active_font.is_none() {
+                if let (Some(ch), Some(ref font)) = (target.ch, &emoji_font) {
+                    let sf = font.as_scaled(font_px_scale);
+                    let fgid = sf.glyph_id(ch);
+                    if fgid.0 != 0 {
+                        active_font = Some(font);
+                        active_gid = fgid;
+                    }
+                }
+            }
+
+            let mut h_advance = font_px_scale * 0.28;
+            if let Some(font) = active_font {
+                let scaled = font.as_scaled(font_px_scale);
+                let adv = scaled.h_advance(active_gid);
+                if adv > 0.0 {
+                    h_advance = adv;
                 }
 
-                let glyph = gid.with_scale_and_position(
+                let glyph = active_gid.with_scale_and_position(
                     font_px_scale,
                     ab_glyph::Point {
                         x: cur_x,
@@ -920,7 +1020,7 @@ impl<'a> ContentInterpreter<'a> {
                     },
                 );
 
-                if let Some(outlined) = active_font.outline_glyph(glyph) {
+                if let Some(outlined) = font.outline_glyph(glyph) {
                     let bounds = outlined.px_bounds();
                     let pixels = self.pixmap.pixels_mut();
 
@@ -929,7 +1029,9 @@ impl<'a> ContentInterpreter<'a> {
                         let py = bounds.min.y as i32 + gy as i32;
                         if px >= 0 && px < pixmap_w && py >= 0 && py < pixmap_h {
                             let idx = (py * pixmap_w + px) as usize;
-                            let eff_a = coverage * a_base;
+                            // Apply perceptual stem darkening (gamma correction for crisp high-contrast anti-aliasing)
+                            let boosted_cov = coverage.powf(0.85);
+                            let eff_a = boosted_cov * a_base;
                             if eff_a > 0.005 {
                                 let existing = pixels[idx];
                                 let inv_a = 1.0 - eff_a;
@@ -955,18 +1057,44 @@ impl<'a> ContentInterpreter<'a> {
                         }
                     });
                 }
+            } else if let Some(ch) = target.ch {
+                if ch == ' ' {
+                    h_advance = font_px_scale * 0.28;
+                }
+            }
 
-                cur_x += h_advance;
-                let user_advance = h_advance / self.zoom;
-                let adv_m = Transform::from_translate(user_advance, 0.0);
-                self.state.text_matrix = self.state.text_matrix.pre_concat(adv_m);
-            }
-        } else {
-            let char_width = self.state.font_size * 0.55;
-            for _ in text.chars() {
-                let advance = Transform::from_translate(char_width, 0.0);
-                self.state.text_matrix = self.state.text_matrix.pre_concat(advance);
-            }
+            cur_x += h_advance;
+            let user_advance = h_advance / self.zoom;
+            let adv_m = Transform::from_translate(user_advance, 0.0);
+            self.state.text_matrix = self.state.text_matrix.pre_concat(adv_m);
         }
+    }
+}
+
+fn get_system_font(is_bold: bool, is_mono: bool) -> Option<&'static [u8]> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::OnceLock;
+        static ARIAL_REGULAR: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+        static ARIAL_BOLD: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+        if is_mono {
+            return None;
+        }
+        if is_bold {
+            ARIAL_BOLD
+                .get_or_init(|| {
+                    std::fs::read("/System/Library/Fonts/Supplemental/Arial Bold.ttf").ok()
+                })
+                .as_deref()
+        } else {
+            ARIAL_REGULAR
+                .get_or_init(|| std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf").ok())
+                .as_deref()
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (is_bold, is_mono);
+        None
     }
 }

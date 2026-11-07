@@ -1790,14 +1790,14 @@ impl RavPdfApp {
                 && has_doc
             {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.zoom = (tab.zoom * 1.25).min(64.0);
-                    tab.invalidate_render();
+                    tab.target_zoom = (tab.target_zoom * 1.25).min(64.0);
+                    ctx.request_repaint();
                 }
             }
             if i.modifiers.ctrl && i.key_pressed(Key::Minus) && has_doc {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.zoom = (tab.zoom / 1.25).max(0.1);
-                    tab.invalidate_render();
+                    tab.target_zoom = (tab.target_zoom / 1.25).max(0.1);
+                    ctx.request_repaint();
                 }
             }
 
@@ -3057,15 +3057,15 @@ impl RavPdfApp {
                 let zoom_pct = self.active_tab().map(|t| t.zoom * 100.0).unwrap_or(100.0);
                 if ui.add_enabled(has_doc, Button::new("➖")).clicked() {
                     if let Some(tab) = self.active_tab_mut() {
-                        tab.zoom = (tab.zoom / 1.2).max(0.1);
-                        tab.invalidate_render();
+                        tab.target_zoom = (tab.target_zoom / 1.2).max(0.1);
+                        ctx.request_repaint();
                     }
                 }
                 ui.label(format!("{:.0}%", zoom_pct));
                 if ui.add_enabled(has_doc, Button::new("➕")).clicked() {
                     if let Some(tab) = self.active_tab_mut() {
-                        tab.zoom = (tab.zoom * 1.2).min(64.0);
-                        tab.invalidate_render();
+                        tab.target_zoom = (tab.target_zoom * 1.2).min(64.0);
+                        ctx.request_repaint();
                     }
                 }
                 if ui.add_enabled(has_doc, Button::new("Fit Page")).clicked() {
@@ -5596,7 +5596,7 @@ impl RavPdfApp {
                         None
                     };
                     if let Some(tex) = tex_opt {
-                        let size = tex.size_vec2();
+                        let size = tex.size_vec2() / ctx.pixels_per_point();
                         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                         ui.painter().rect_filled(
                             rect.expand(2.0),
@@ -5637,7 +5637,7 @@ impl RavPdfApp {
                         None
                     };
                     if let Some(tex) = tex_opt {
-                        let size = tex.size_vec2();
+                        let size = tex.size_vec2() / ctx.pixels_per_point();
                         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                         ui.painter().rect_filled(
                             rect.expand(2.0),
@@ -6057,14 +6057,27 @@ impl RavPdfApp {
                 applied_zoom_factor = 1.0 + (scroll_delta_y * 0.005).clamp(-0.4, 0.4);
             }
 
-            if (applied_zoom_factor - 1.0).abs() > 0.002 && self.page_view_mode != PageViewMode::OrganizePages {
+            if (applied_zoom_factor - 1.0).abs() > 0.002
+                && self.page_view_mode != PageViewMode::OrganizePages
+            {
                 if let Some(tab) = self.active_tab_mut() {
-                    let old_zoom = tab.zoom;
-                    let target_zoom = (old_zoom * applied_zoom_factor).clamp(0.1, 64.0);
-                    if (target_zoom - old_zoom).abs() > 0.001 {
-                        tab.zoom = target_zoom;
+                    tab.target_zoom = (tab.target_zoom * applied_zoom_factor).clamp(0.1, 64.0);
+                    ctx.request_repaint();
+                }
+            }
+
+            // Smooth animated pinch zoom interpolation (critically damped exponential spring)
+            if let Some(tab) = self.active_tab_mut() {
+                let diff = tab.target_zoom - tab.zoom;
+                if diff.abs() > 0.0005 {
+                    let dt = ctx.input(|i| i.stable_dt).min(0.1);
+                    let lerp_factor = 1.0 - (-18.0 * dt).exp();
+                    tab.zoom += diff * lerp_factor;
+                    if (tab.target_zoom - tab.zoom).abs() < 0.001 {
+                        tab.zoom = tab.target_zoom;
                         tab.invalidate_render();
                     }
+                    ctx.request_repaint();
                 }
             }
 
@@ -6212,7 +6225,15 @@ impl RavPdfApp {
                     .as_ref()
                     .map(|p| (p.crop_box[3] - p.crop_box[1]).abs() as f32)
                     .unwrap_or(792.0);
-                let tex_size = tab.page_texture.as_ref().map(|t| t.size_vec2()).unwrap_or(Vec2::ZERO);
+                let page_w = page
+                    .as_ref()
+                    .map(|p| (p.crop_box[2] - p.crop_box[0]).abs() as f32)
+                    .unwrap_or(612.0);
+                let tex_size = tab
+                    .page_texture
+                    .as_ref()
+                    .map(|t| t.size_vec2() / ctx.pixels_per_point())
+                    .unwrap_or_else(|| Vec2::new(page_w * tab.zoom, page_h * tab.zoom));
                 (tex_size, page_h, tab.zoom)
             };
 
