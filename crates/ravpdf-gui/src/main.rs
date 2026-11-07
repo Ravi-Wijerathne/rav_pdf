@@ -6045,6 +6045,29 @@ impl RavPdfApp {
                 let _ = tab.ensure_page_rendered_with_plate(ctx, None, soft_proof.as_ref());
             }
 
+            // macOS Trackpad Pinch-to-Zoom & Cmd/Ctrl+Scroll Zoom (FR-01.3.1, NFR-05, NFR-06)
+            let zoom_delta = ctx.input(|i| i.zoom_delta());
+            let cmd_or_ctrl = ctx.input(|i| i.modifiers.command || i.modifiers.ctrl);
+            let scroll_delta_y = ctx.input(|i| i.raw_scroll_delta.y);
+
+            let mut applied_zoom_factor = 1.0_f32;
+            if (zoom_delta - 1.0).abs() > 0.002 {
+                applied_zoom_factor = zoom_delta;
+            } else if cmd_or_ctrl && scroll_delta_y.abs() > 0.0 {
+                applied_zoom_factor = 1.0 + (scroll_delta_y * 0.005).clamp(-0.4, 0.4);
+            }
+
+            if (applied_zoom_factor - 1.0).abs() > 0.002 && self.page_view_mode != PageViewMode::OrganizePages {
+                if let Some(tab) = self.active_tab_mut() {
+                    let old_zoom = tab.zoom;
+                    let target_zoom = (old_zoom * applied_zoom_factor).clamp(0.1, 64.0);
+                    if (target_zoom - old_zoom).abs() > 0.001 {
+                        tab.zoom = target_zoom;
+                        tab.invalidate_render();
+                    }
+                }
+            }
+
             // View Mode check: Organize Pages Visual Grid Mode (FR-06.1 - FR-06.11)
             if self.page_view_mode == PageViewMode::OrganizePages {
                 self.render_organize_pages_grid(ui, ctx);
