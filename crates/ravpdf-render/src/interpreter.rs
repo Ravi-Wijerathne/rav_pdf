@@ -298,6 +298,56 @@ impl<'a> ContentInterpreter<'a> {
                     self.state.stroke_color = PdfColor::Cmyk(c, m, y, k);
                 }
             }
+            // General Color Space & Color Setting Operators (ISO 32000-1 Section 8.6.8)
+            "cs" | "CS" => {
+                // ColorSpace name/array operand (DeviceRGB, DeviceGray, DeviceCMYK, ICCBased, etc.)
+            }
+            "sc" | "scn" => {
+                // Set non-stroking color in active color space
+                match args.len() {
+                    1 => {
+                        let g = args[0].as_f64().unwrap_or(0.0) as f32;
+                        self.state.fill_color = PdfColor::Gray(g);
+                    }
+                    3 => {
+                        let r = args[0].as_f64().unwrap_or(0.0) as f32;
+                        let g = args[1].as_f64().unwrap_or(0.0) as f32;
+                        let b = args[2].as_f64().unwrap_or(0.0) as f32;
+                        self.state.fill_color = PdfColor::Rgb(r, g, b);
+                    }
+                    4 => {
+                        let c = args[0].as_f64().unwrap_or(0.0) as f32;
+                        let m = args[1].as_f64().unwrap_or(0.0) as f32;
+                        let y = args[2].as_f64().unwrap_or(0.0) as f32;
+                        let k = args[3].as_f64().unwrap_or(0.0) as f32;
+                        self.state.fill_color = PdfColor::Cmyk(c, m, y, k);
+                    }
+                    _ => {}
+                }
+            }
+            "SC" | "SCN" => {
+                // Set stroking color in active color space
+                match args.len() {
+                    1 => {
+                        let g = args[0].as_f64().unwrap_or(0.0) as f32;
+                        self.state.stroke_color = PdfColor::Gray(g);
+                    }
+                    3 => {
+                        let r = args[0].as_f64().unwrap_or(0.0) as f32;
+                        let g = args[1].as_f64().unwrap_or(0.0) as f32;
+                        let b = args[2].as_f64().unwrap_or(0.0) as f32;
+                        self.state.stroke_color = PdfColor::Rgb(r, g, b);
+                    }
+                    4 => {
+                        let c = args[0].as_f64().unwrap_or(0.0) as f32;
+                        let m = args[1].as_f64().unwrap_or(0.0) as f32;
+                        let y = args[2].as_f64().unwrap_or(0.0) as f32;
+                        let k = args[3].as_f64().unwrap_or(0.0) as f32;
+                        self.state.stroke_color = PdfColor::Cmyk(c, m, y, k);
+                    }
+                    _ => {}
+                }
+            }
 
             // Path Construction Operators
             "m" => {
@@ -866,7 +916,7 @@ impl<'a> ContentInterpreter<'a> {
                     font_px_scale,
                     ab_glyph::Point {
                         x: cur_x,
-                        y: baseline_y - active_scaled.ascent(),
+                        y: baseline_y,
                     },
                 );
 
