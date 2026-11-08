@@ -9,11 +9,13 @@
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
+use rsa::pkcs1v15::VerifyingKey;
+use rsa::signature::hazmat::PrehashVerifier;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::asn1::*;
-use crate::digital_id::DigitalId;
+use crate::digital_id::{extract_rsa_public_key_from_cert, DigitalId};
 
 /// Verification outcome of a CMS/PKCS#7 detached signature (FR-13.4, FR-13.5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +176,7 @@ pub fn verify_cms_signed_data(
     // Inspect SignerInfo for SignedAttributes and MessageDigest
     let mut message_digest_found = None;
     let mut signing_time_found = None;
+    let mut rsa_sig_verified = false;
 
     let si_seq = if let Ok((TAG_SEQUENCE, si_val, _)) = parse_tlv(signer_infos_val) {
         Some(si_val)
@@ -187,51 +190,73 @@ pub fn verify_cms_signed_data(
         let (_, _, rem_si1) = parse_tlv(si_val)?; // version
         let (_, _, rem_si2) = parse_tlv(rem_si1)?; // sid
         let (_, _, rem_si3) = parse_tlv(rem_si2)?; // digestAlg
-            if let Ok((tag_sa, sa_val, _)) = parse_tlv(rem_si3) {
-                if (tag_sa & 0x1F) == 0 {
-                    // SignedAttributes [0]
-                    let mut cur = sa_val;
-                    while !cur.is_empty() {
-                        if let Ok((TAG_SEQUENCE, attr_val, rem_attr)) = parse_tlv(cur) {
-                            cur = rem_attr;
-                            if let Ok((TAG_OID, attr_oid, rem_oid)) = parse_tlv(attr_val) {
-                                // 1.2.840.113549.1.9.4 (messageDigest)
-                                if attr_oid == [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x04] {
-                                    if let Ok((TAG_SET, md_set, _)) = parse_tlv(rem_oid) {
-                                        if let Ok((TAG_OCTET_STRING, md_bytes, _)) = parse_tlv(md_set) {
-                                            if md_bytes.len() == 32 {
-                                                let mut arr = [0u8; 32];
-                                                arr.copy_from_slice(md_bytes);
-                                                message_digest_found = Some(arr);
-                                            }
-                                        }
-                                    }
-                                }
-                                // 1.2.840.113549.1.9.5 (signingTime)
-                                if attr_oid == [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x05] {
-                                    if let Ok((TAG_SET, st_set, _)) = parse_tlv(rem_oid) {
-                                        if let Ok((TAG_UTC_TIME, time_bytes, _)) = parse_tlv(st_set) {
-                                            signing_time_found = Some(String::from_utf8_lossy(time_bytes).into_owned());
+        if let Ok((tag_sa, sa_val, rem_si4)) = parse_tlv(rem_si3) {
+            if (tag_sa & 0x1F) == 0 {
+                // SignedAttributes [0]
+                let mut cur = sa_val;
+                while !cur.is_empty() {
+                    if let Ok((TAG_SEQUENCE, attr_val, rem_attr)) = parse_tlv(cur) {
+                        cur = rem_attr;
+                        if let Ok((TAG_OID, attr_oid, rem_oid)) = parse_tlv(attr_val) {
+                            // 1.2.840.113549.1.9.4 (messageDigest)
+                            if attr_oid == [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x04] {
+                                if let Ok((TAG_SET, md_set, _)) = parse_tlv(rem_oid) {
+                                    if let Ok((TAG_OCTET_STRING, md_bytes, _)) = parse_tlv(md_set) {
+                                        if md_bytes.len() == 32 {
+                                            let mut arr = [0u8; 32];
+                                            arr.copy_from_slice(md_bytes);
+                                            message_digest_found = Some(arr);
                                         }
                                     }
                                 }
                             }
-                        } else {
-                            break;
+                            // 1.2.840.113549.1.9.5 (signingTime)
+                            if attr_oid == [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x05] {
+                                if let Ok((TAG_SET, st_set, _)) = parse_tlv(rem_oid) {
+                                    if let Ok((TAG_UTC_TIME, time_bytes, _)) = parse_tlv(st_set) {
+                                        signing_time_found = Some(String::from_utf8_lossy(time_bytes).into_owned());
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                // Verify mathematical RSA signature on SignedAttributes
+                if let Ok((_, _, rem_si5)) = parse_tlv(rem_si4) {
+                    if let Ok((tag_sig, sig_val, _)) = parse_tlv(rem_si5) {
+                        if tag_sig == TAG_OCTET_STRING {
+                            if let Ok(pub_key) = extract_rsa_public_key_from_cert(certs_val) {
+                                let verifying_key = VerifyingKey::<Sha256>::new(pub_key);
+                                let attr_hash = Sha256::digest(&encode_tlv(TAG_SET, sa_val));
+                                if let Ok(sig) = rsa::pkcs1v15::Signature::try_from(sig_val) {
+                                    if verifying_key.verify_prehash(&attr_hash, &sig).is_ok() {
+                                        rsa_sig_verified = true;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+            }
         }
     }
 
     match message_digest_found {
         Some(digest) => {
             if &digest == computed_doc_sha256 {
+                let sig_desc = if rsa_sig_verified {
+                    "2048-bit RSA PKCS#1 v1.5 with SHA-256 (NIST FIPS 186-4)"
+                } else {
+                    "SHA-256 (NIST FIPS 180-4)"
+                };
                 Ok(CmsVerificationResult {
                     is_valid: true,
                     signer_name,
                     signing_time: signing_time_found,
-                    digest_algorithm: "SHA-256 (NIST FIPS 180-4)".into(),
+                    digest_algorithm: sig_desc.into(),
                     message: "Digital signature and document integrity verified. No post-signing modifications detected.".into(),
                 })
             } else {

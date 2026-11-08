@@ -1992,6 +1992,7 @@ fn main() -> Result<()> {
                 zoom,
                 rotation: 0,
                 background_color: Color::WHITE,
+                hidden_ocgs: std::collections::HashSet::new(),
             };
 
             let pixmap = render_page(&doc, page - 1, &options)?;
@@ -2010,6 +2011,27 @@ fn main() -> Result<()> {
             let doc = PdfDocument::load_from_file(&input)?;
             let fmt_lower = format.to_lowercase();
             match fmt_lower.as_str() {
+                "docx" | "word" => {
+                    let bytes = ravpdf_tools::export_pdf_to_docx(&doc)?;
+                    fs::write(&output, bytes)?;
+                    println!("Exported Word document (.docx) to {}", output.display());
+                }
+                "xlsx" | "excel" => {
+                    let bytes = ravpdf_tools::export_pdf_to_xlsx(&doc)?;
+                    fs::write(&output, bytes)?;
+                    println!("Exported Excel spreadsheet (.xlsx) to {}", output.display());
+                }
+                "pptx" | "powerpoint" => {
+                    let bytes = ravpdf_tools::export_pdf_to_pptx(&doc)?;
+                    fs::write(&output, bytes)?;
+                    println!("Exported PowerPoint presentation (.pptx) to {}", output.display());
+                }
+                "ps" | "postscript" => {
+                    let config = ravpdf_tools::PrintJobConfig::default();
+                    let ps = ravpdf_tools::generate_postscript(&doc, &config)?;
+                    fs::write(&output, ps)?;
+                    println!("Exported PostScript (.ps) to {}", output.display());
+                }
                 "html" => {
                     let html = export_to_html(&doc, None)?;
                     fs::write(&output, html)?;
@@ -2060,7 +2082,7 @@ fn main() -> Result<()> {
                 }
                 other => {
                     eprintln!(
-                        "Error: Unsupported export format '{}'. Choose from: html, txt, rtf, csv, png, jpg",
+                        "Error: Unsupported export format '{}'. Choose from: docx, xlsx, pptx, ps, html, txt, rtf, csv, png, jpg",
                         other
                     );
                     std::process::exit(1);
@@ -4046,6 +4068,18 @@ fn main() -> Result<()> {
                     let content = fs::read_to_string(&input)?;
                     let opts = TextPdfOptions::default();
                     create_pdf_from_rtf(&content, &opts)?
+                }
+                "docx" | "doc" => {
+                    let bytes = fs::read(&input)?;
+                    ravpdf_tools::import_docx_from_bytes(&bytes, &ravpdf_tools::OfficeImportOptions::default())?
+                }
+                "xlsx" | "xls" => {
+                    let bytes = fs::read(&input)?;
+                    ravpdf_tools::import_xlsx_from_bytes(&bytes, &ravpdf_tools::OfficeImportOptions::default())?
+                }
+                "pptx" | "ppt" => {
+                    let bytes = fs::read(&input)?;
+                    ravpdf_tools::import_pptx_from_bytes(&bytes, &ravpdf_tools::OfficeImportOptions::default())?
                 }
                 _ => {
                     let content = fs::read_to_string(&input)?;

@@ -14,7 +14,16 @@ use ravpdf_tools::{
     apply_plate_separations, apply_soft_proof, get_document_info, DocumentInfo,
     PlateSeparationConfig, SeparationAnalysis, SoftProofConfig,
 };
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+
+/// Represents an Optional Content Group (OCG) / Layer conforming to ISO 32000-1 Section 8.11 (EI-01.4, FR-35.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfLayer {
+    pub id: String,
+    pub name: String,
+    pub visible: bool,
+}
 
 /// Represents an individual opened PDF document in a tab.
 pub struct DocumentTab {
@@ -31,8 +40,9 @@ pub struct DocumentTab {
     pub metadata: Option<DocumentInfo>,
     pub bookmarks: Vec<Bookmark>,
     pub page_texture: Option<egui::TextureHandle>,
-    pub thumbnail_textures: std::collections::HashMap<usize, egui::TextureHandle>,
-    pub continuous_page_textures: std::collections::HashMap<usize, egui::TextureHandle>,
+    pub thumbnail_textures: HashMap<usize, egui::TextureHandle>,
+    pub continuous_page_textures: HashMap<usize, egui::TextureHandle>,
+    pub continuous_page_order: VecDeque<usize>,
     pub cached_page_index: Option<usize>,
     pub cached_zoom: Option<f32>,
     pub cached_render_zoom: Option<f32>,
@@ -40,6 +50,7 @@ pub struct DocumentTab {
     pub cached_plate_config: Option<PlateSeparationConfig>,
     pub cached_soft_proof: Option<SoftProofConfig>,
     pub raw_file_bytes: Option<Vec<u8>>,
+    pub hidden_ocgs: HashSet<String>,
 }
 
 impl DocumentTab {
@@ -62,8 +73,9 @@ impl DocumentTab {
             metadata,
             bookmarks,
             page_texture: None,
-            thumbnail_textures: std::collections::HashMap::new(),
-            continuous_page_textures: std::collections::HashMap::new(),
+            thumbnail_textures: HashMap::new(),
+            continuous_page_textures: HashMap::new(),
+            continuous_page_order: VecDeque::new(),
             cached_page_index: None,
             cached_zoom: None,
             cached_render_zoom: None,
@@ -71,6 +83,7 @@ impl DocumentTab {
             cached_plate_config: None,
             cached_soft_proof: None,
             raw_file_bytes: None,
+            hidden_ocgs: HashSet::new(),
         }
     }
 
@@ -79,21 +92,34 @@ impl DocumentTab {
         self.page_texture = None;
         self.thumbnail_textures.clear();
         self.continuous_page_textures.clear();
+        self.continuous_page_order.clear();
         self.cached_zoom = None;
         self.cached_render_zoom = None;
     }
 
-    /// Retrieves an existing page texture or rasterizes it on demand for continuous scrolling (FR-01.2.2).
+    /// Retrieves an existing page texture or rasterizes it on demand for continuous scrolling with bounded LRU cache (FR-01.2.2, NFR-01.3, NFR-01.8).
     pub fn get_or_render_continuous_page(
         &mut self,
         ctx: &egui::Context,
         page_idx: usize,
     ) -> Option<egui::TextureHandle> {
         if let Some(tex) = self.continuous_page_textures.get(&page_idx) {
+            if let Some(pos) = self.continuous_page_order.iter().position(|&p| p == page_idx) {
+                self.continuous_page_order.remove(pos);
+            }
+            self.continuous_page_order.push_back(page_idx);
             return Some(tex.clone());
         }
         if page_idx >= self.doc.page_count() {
             return None;
+        }
+
+        // Bounded LRU cache eviction (NFR-01.8: max 10 cached continuous pages)
+        const MAX_CACHED_PAGES: usize = 10;
+        while self.continuous_page_order.len() >= MAX_CACHED_PAGES {
+            if let Some(oldest) = self.continuous_page_order.pop_front() {
+                self.continuous_page_textures.remove(&oldest);
+            }
         }
 
         let ppp = ctx.pixels_per_point();
@@ -102,6 +128,7 @@ impl DocumentTab {
             zoom: render_zoom,
             rotation: self.rotation,
             background_color: Color::WHITE,
+            hidden_ocgs: self.hidden_ocgs.clone(),
         };
 
         if let Ok(pixmap) = render_page(&self.doc, page_idx, &options) {
@@ -127,6 +154,7 @@ impl DocumentTab {
                 TextureOptions::LINEAR,
             );
             self.continuous_page_textures.insert(page_idx, tex.clone());
+            self.continuous_page_order.push_back(page_idx);
             Some(tex)
         } else {
             None
@@ -212,6 +240,7 @@ impl DocumentTab {
                 zoom: render_zoom,
                 rotation: self.rotation,
                 background_color: Color::WHITE,
+                hidden_ocgs: self.hidden_ocgs.clone(),
             };
 
             if let Ok(pixmap) = render_page(&self.doc, self.current_page, &options) {
@@ -304,5 +333,175 @@ impl DocumentTab {
                 "No file path specified for tab".into(),
             ))
         }
+    }
+
+    /// Extracts Optional Content Groups (OCGs) / Layers defined in the document catalog (EI-01.4, FR-35.5).
+    pub fn get_document_layers(&self) -> Vec<PdfLayer> {
+        let catalog = match self.doc.catalog() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+
+        let oc_props = match catalog.get("OCProperties").and_then(|obj| {
+            match obj {
+                ravpdf_core::object::Object::Dictionary(d) => Some(d.clone()),
+                ravpdf_core::object::Object::Reference(id) => {
+                    self.doc.get_object(*id).and_then(|o| o.as_dict().cloned())
+                }
+                _ => None,
+            }
+        }) {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+
+        // Extract default OFF state from /D dictionary
+        let mut default_off_ids = HashSet::new();
+        if let Some(d_obj) = oc_props.get("D") {
+            let d_dict = match d_obj {
+                ravpdf_core::object::Object::Dictionary(d) => Some(d),
+                ravpdf_core::object::Object::Reference(id) => self.doc.get_object(*id).and_then(|o| o.as_dict()),
+                _ => None,
+            };
+            if let Some(d) = d_dict {
+                if let Some(off_arr) = d.get_array("OFF") {
+                    for off_item in off_arr {
+                        if let ravpdf_core::object::Object::Reference(id) = off_item {
+                            default_off_ids.insert(format!("{}_{}", id.number, id.generation));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut layers = Vec::new();
+        if let Some(ocgs_arr) = oc_props.get_array("OCGs") {
+            for ocg_ref in ocgs_arr {
+                let (ocg_id_str, ocg_dict) = match ocg_ref {
+                    ravpdf_core::object::Object::Reference(id) => {
+                        let id_str = format!("{}_{}", id.number, id.generation);
+                        let dict = self.doc.get_object(*id).and_then(|o| o.as_dict().cloned());
+                        (id_str, dict)
+                    }
+                    ravpdf_core::object::Object::Dictionary(d) => {
+                        ("inline_ocg".to_string(), Some(d.clone()))
+                    }
+                    _ => continue,
+                };
+
+                if let Some(dict) = ocg_dict {
+                    let name = dict.get_str("Name").unwrap_or_else(|| "Unnamed Layer".to_string());
+                    let is_default_off = default_off_ids.contains(&ocg_id_str);
+                    let is_hidden_by_user = self.hidden_ocgs.contains(&ocg_id_str) || self.hidden_ocgs.contains(&name);
+                    let visible = if is_hidden_by_user {
+                        false
+                    } else if is_default_off {
+                        false
+                    } else {
+                        true
+                    };
+
+                    layers.push(PdfLayer {
+                        id: ocg_id_str,
+                        name,
+                        visible,
+                    });
+                }
+            }
+        }
+
+        layers
+    }
+
+    /// Toggles the visibility of a layer by its ID and Name (EI-01.4).
+    pub fn toggle_layer_visibility(&mut self, layer_id: &str, layer_name: &str) {
+        let is_hidden = self.hidden_ocgs.contains(layer_id) || self.hidden_ocgs.contains(layer_name);
+        if is_hidden {
+            self.hidden_ocgs.remove(layer_id);
+            self.hidden_ocgs.remove(layer_name);
+        } else {
+            self.hidden_ocgs.insert(layer_id.to_string());
+            self.hidden_ocgs.insert(layer_name.to_string());
+        }
+        self.invalidate_render();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ravpdf_core::object::{Object, PdfDictionary, PdfName, PdfString};
+
+    #[test]
+    fn test_layer_parsing_and_toggle() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(612.0, 792.0);
+
+        // Add 2 OCGs to document
+        let ocg1_id = doc.next_object_id();
+        let mut ocg1_dict = PdfDictionary::new();
+        ocg1_dict.insert("Type", PdfName::new("OCG"));
+        ocg1_dict.insert("Name", PdfString::from_str("Architectural Plans"));
+        doc.objects.insert(ocg1_id, Object::Dictionary(ocg1_dict));
+
+        let ocg2_id = doc.next_object_id();
+        let mut ocg2_dict = PdfDictionary::new();
+        ocg2_dict.insert("Type", PdfName::new("OCG"));
+        ocg2_dict.insert("Name", PdfString::from_str("Electrical Wiring"));
+        doc.objects.insert(ocg2_id, Object::Dictionary(ocg2_dict));
+
+        // Add OCProperties to Catalog
+        let mut oc_props = PdfDictionary::new();
+        oc_props.insert(
+            "OCGs",
+            Object::Array(vec![
+                Object::Reference(ocg1_id),
+                Object::Reference(ocg2_id),
+            ]),
+        );
+
+        let mut d_dict = PdfDictionary::new();
+        d_dict.insert("ON", Object::Array(vec![Object::Reference(ocg1_id)]));
+        d_dict.insert("OFF", Object::Array(vec![Object::Reference(ocg2_id)]));
+        oc_props.insert("D", Object::Dictionary(d_dict));
+
+        let catalog_id = doc.root_id;
+        if let Some(Object::Dictionary(ref mut cat)) = doc.objects.get_mut(&catalog_id) {
+            cat.insert("OCProperties", Object::Dictionary(oc_props));
+        }
+
+        let mut tab = DocumentTab::new(1, "Test Doc".to_string(), doc, None);
+        let layers = tab.get_document_layers();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].name, "Architectural Plans");
+        assert!(layers[0].visible);
+        assert_eq!(layers[1].name, "Electrical Wiring");
+        assert!(!layers[1].visible); // Default OFF
+
+        // Toggle first layer to hidden
+        tab.toggle_layer_visibility(&layers[0].id, &layers[0].name);
+        let updated = tab.get_document_layers();
+        assert!(!updated[0].visible);
+
+        // Toggle back to visible
+        tab.toggle_layer_visibility(&layers[0].id, &layers[0].name);
+        let updated2 = tab.get_document_layers();
+        assert!(updated2[0].visible);
+    }
+
+    #[test]
+    fn test_bounded_lru_texture_order() {
+        let mut order = VecDeque::new();
+        const MAX_PAGES: usize = 5;
+
+        for page in 0..10 {
+            if order.len() >= MAX_PAGES {
+                order.pop_front();
+            }
+            order.push_back(page);
+        }
+
+        assert_eq!(order.len(), MAX_PAGES);
+        assert_eq!(order.into_iter().collect::<Vec<_>>(), vec![5, 6, 7, 8, 9]);
     }
 }

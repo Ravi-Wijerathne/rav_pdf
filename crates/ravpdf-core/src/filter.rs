@@ -12,6 +12,16 @@ use std::io::{Cursor, Read, Write};
 /// Decodes raw stream data using the named PDF filter.
 /// Supports standard names and ISO 32000-1 Table 6 abbreviations.
 pub fn decode_stream(filter_name: &str, data: &[u8]) -> Result<Vec<u8>> {
+    decode_stream_with_dict(filter_name, data, None)
+}
+
+/// Decodes raw stream data with an optional `/DecodeParms` dictionary.
+/// Conforms to ISO 32000-1 Section 7.4 (Table 6, Table 11).
+pub fn decode_stream_with_dict(
+    filter_name: &str,
+    data: &[u8],
+    params: Option<&crate::object::PdfDictionary>,
+) -> Result<Vec<u8>> {
     let name = filter_name.strip_prefix('/').unwrap_or(filter_name);
     match name {
         "FlateDecode" | "Fl" => decode_flate(data),
@@ -20,6 +30,11 @@ pub fn decode_stream(filter_name: &str, data: &[u8]) -> Result<Vec<u8>> {
         "RunLengthDecode" | "RL" => decode_run_length(data),
         "LZWDecode" | "LZW" => decode_lzw(data, true),
         "DCTDecode" | "DCT" => decode_dct(data),
+        "CCITTFaxDecode" | "CCF" => {
+            let p = params.map(CcittFaxParams::from_dict).unwrap_or_default();
+            decode_ccitt_fax(data, &p)
+        }
+        "JBIG2Decode" => decode_jbig2(data, None),
         other => Err(PdfError::FilterError(format!(
             "Unsupported or unhandled stream filter: {}",
             other
@@ -39,6 +54,9 @@ pub fn encode_stream(filter_name: &str, data: &[u8]) -> Result<Vec<u8>> {
         "LZWDecode" | "LZW" => encode_lzw(data, true),
         "DCTDecode" | "DCT" => Err(PdfError::FilterError(
             "DCTEncode requires image dimensions; call encode_dct(rgb_data, width, height, quality) directly".into(),
+        )),
+        "CCITTFaxDecode" | "CCF" => Err(PdfError::FilterError(
+            "CCITTFaxEncode requires image dimensions; call encode_ccitt_fax(data, width, height, black_is_1) directly".into(),
         )),
         other => Err(PdfError::FilterError(format!(
             "Unsupported encoding filter: {}",
@@ -583,6 +601,197 @@ pub fn encode_dct(rgb_data: &[u8], width: u32, height: u32, quality: u8) -> Resu
     Ok(output)
 }
 
+/// Parameters for CCITTFaxDecode filter conforming to ISO 32000-1 Section 7.4.6 Table 11.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CcittFaxParams {
+    /// A code selecting the encoding scheme.
+    /// K < 0: Pure two-dimensional encoding (Group 4 / T.6 MMR).
+    /// K = 0: Pure one-dimensional encoding (Group 3 1D / T.4).
+    /// K > 0: Mixed one- and two-dimensional encoding (Group 3 2D / T.4).
+    pub k: i32,
+    /// A flag indicating whether end-of-line bit patterns are present. Default: false.
+    pub end_of_line: bool,
+    /// A flag indicating whether byte alignment precedes each end-of-line. Default: false.
+    pub encoded_byte_align: bool,
+    /// The width of the image in pixels. Default: 1728.
+    pub columns: u32,
+    /// The height of the image in scanlines. Default: 0 (decoded until EOFB or data end).
+    pub rows: u32,
+    /// A flag indicating whether an end-of-block code is expected. Default: true.
+    pub end_of_block: bool,
+    /// A flag indicating whether 1 bits are black (true) or 1 bits are white (false). Default: false.
+    pub black_is_1: bool,
+}
+
+impl Default for CcittFaxParams {
+    fn default() -> Self {
+        Self {
+            k: 0,
+            end_of_line: false,
+            encoded_byte_align: false,
+            columns: 1728,
+            rows: 0,
+            end_of_block: true,
+            black_is_1: false,
+        }
+    }
+}
+
+impl CcittFaxParams {
+    pub fn from_dict(dict: &crate::object::PdfDictionary) -> Self {
+        let mut params = Self::default();
+        if let Some(k) = dict.get_i64("K") {
+            params.k = k as i32;
+        }
+        if let Some(eol) = dict.get_bool("EndOfLine") {
+            params.end_of_line = eol;
+        }
+        if let Some(eba) = dict.get_bool("EncodedByteAlign") {
+            params.encoded_byte_align = eba;
+        }
+        if let Some(cols) = dict.get_i64("Columns") {
+            params.columns = cols.max(1) as u32;
+        }
+        if let Some(rows) = dict.get_i64("Rows") {
+            params.rows = rows.max(0) as u32;
+        }
+        if let Some(eob) = dict.get_bool("EndOfBlock") {
+            params.end_of_block = eob;
+        }
+        if let Some(b1) = dict.get_bool("BlackIs1") {
+            params.black_is_1 = b1;
+        }
+        params
+    }
+}
+
+/// CCITTFaxDecode: Decompresses facsimile bi-level image data conforming to ISO 32000-1 Section 7.4.6.
+pub fn decode_ccitt_fax(data: &[u8], params: &CcittFaxParams) -> Result<Vec<u8>> {
+    let width = params.columns.max(1);
+    let height = if params.rows > 0 { Some(params.rows) } else { None };
+    let bytes_per_row = (width as usize + 7) / 8;
+    let mut output = Vec::new();
+
+    let mut line_decoder = |line: &[u32]| {
+        let mut row = vec![0u8; bytes_per_row];
+        for (i, c) in fax::decoder::pels(line, width).enumerate() {
+            let is_one = match c {
+                fax::Color::Black => params.black_is_1,
+                fax::Color::White => !params.black_is_1,
+            };
+            if is_one {
+                let byte_idx = i / 8;
+                let bit_idx = 7 - (i % 8);
+                if byte_idx < row.len() {
+                    row[byte_idx] |= 1 << bit_idx;
+                }
+            }
+        }
+        output.extend_from_slice(&row);
+    };
+
+    if params.k < 0 {
+        // Group 4 (2D MMR)
+        let _ = fax::decoder::decode_g4(data.iter().copied(), width, height, &mut line_decoder);
+    } else {
+        // Group 3 (1D)
+        let _ = fax::decoder::decode_g3(data.iter().copied(), &mut line_decoder);
+    }
+
+    Ok(output)
+}
+
+/// CCITTFaxEncode: Compresses bi-level raster bitmap data into CCITT Group 4 MMR facsimile format.
+pub fn encode_ccitt_fax(data: &[u8], width: u32, height: u32, black_is_1: bool) -> Result<Vec<u8>> {
+    let bytes_per_row = (width as usize + 7) / 8;
+    let writer = fax::VecWriter::new();
+    let mut encoder = fax::encoder::Encoder::new(writer);
+
+    for row_idx in 0..height as usize {
+        let start = row_idx * bytes_per_row;
+        let end = (start + bytes_per_row).min(data.len());
+        if start >= data.len() {
+            break;
+        }
+        let row_slice = &data[start..end];
+        let pel_iter = (0..width as usize).map(|col_idx| {
+            let byte = row_slice.get(col_idx / 8).copied().unwrap_or(0);
+            let bit = (byte >> (7 - (col_idx % 8))) & 1;
+            let is_black = if black_is_1 { bit == 1 } else { bit == 0 };
+            if is_black {
+                fax::Color::Black
+            } else {
+                fax::Color::White
+            }
+        });
+        encoder
+            .encode_line(pel_iter, width)
+            .map_err(|e| PdfError::FilterError(format!("CCITTFax encode error: {:?}", e)))?;
+    }
+
+    let finished_writer = encoder
+        .finish()
+        .map_err(|e| PdfError::FilterError(format!("CCITTFax finish error: {:?}", e)))?;
+    Ok(finished_writer.finish())
+}
+
+/// JBIG2Decode: Decompresses bi-level images encoded with JBIG2 (ISO 32000-1 Section 7.4.7).
+pub fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>> {
+    struct BitCollector {
+        rows: Vec<u8>,
+        current_byte: u8,
+        bits_in_current_byte: usize,
+    }
+
+    impl pdfluent_jbig2::Decoder for BitCollector {
+        fn push_pixel(&mut self, black: bool) {
+            if black {
+                self.current_byte |= 1 << (7 - self.bits_in_current_byte);
+            }
+            self.bits_in_current_byte += 1;
+            if self.bits_in_current_byte == 8 {
+                self.rows.push(self.current_byte);
+                self.current_byte = 0;
+                self.bits_in_current_byte = 0;
+            }
+        }
+
+        fn push_pixel_chunk(&mut self, black: bool, chunk_count: u32) {
+            let byte_val = if black { 0xFF } else { 0x00 };
+            for _ in 0..chunk_count {
+                self.rows.push(byte_val);
+            }
+        }
+
+        fn next_line(&mut self) {
+            if self.bits_in_current_byte > 0 {
+                self.rows.push(self.current_byte);
+                self.current_byte = 0;
+                self.bits_in_current_byte = 0;
+            }
+        }
+    }
+
+    // Try embedded format first (standard for PDF streams), fall back to standalone file format
+    let parse_embedded = pdfluent_jbig2::Image::new_embedded(data, globals);
+    let img = match parse_embedded {
+        Ok(img) => img,
+        Err(_) => pdfluent_jbig2::Image::new(data)
+            .map_err(|e| PdfError::FilterError(format!("JBIG2 decode error: {:?}", e)))?,
+    };
+
+    let mut collector = BitCollector {
+        rows: Vec::new(),
+        current_byte: 0,
+        bits_in_current_byte: 0,
+    };
+
+    img.decode(&mut collector)
+        .map_err(|e| PdfError::FilterError(format!("JBIG2 execution error: {:?}", e)))?;
+
+    Ok(collector.rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -867,5 +1076,60 @@ mod tests {
                 early_change
             );
         }
+    }
+
+    #[test]
+    fn test_ccitt_fax_roundtrip_g4() {
+        let width = 64u32;
+        let height = 8u32;
+        let bytes_per_row = (width as usize + 7) / 8;
+        let mut bitmap = vec![0u8; bytes_per_row * height as usize];
+        // Create an alternating checkerboard pattern
+        for y in 0..height as usize {
+            for x in 0..bytes_per_row {
+                bitmap[y * bytes_per_row + x] = if (y + x) % 2 == 0 { 0xAA } else { 0x55 };
+            }
+        }
+
+        let encoded = encode_ccitt_fax(&bitmap, width, height, false).expect("encode CCITT G4");
+        assert!(!encoded.is_empty(), "Encoded CCITT stream should not be empty");
+
+        let params = CcittFaxParams {
+            k: -1, // Group 4
+            columns: width,
+            rows: height,
+            black_is_1: false,
+            ..Default::default()
+        };
+        let decoded = decode_ccitt_fax(&encoded, &params).expect("decode CCITT G4");
+        assert_eq!(bitmap, decoded, "CCITT G4 decoded bitmap must match original bitmap");
+    }
+
+    #[test]
+    fn test_ccitt_fax_dispatch_and_aliases() {
+        let width = 32u32;
+        let height = 4u32;
+        let bytes_per_row = (width as usize + 7) / 8;
+        let bitmap = vec![0xF0; bytes_per_row * height as usize];
+
+        let encoded = encode_ccitt_fax(&bitmap, width, height, false).unwrap();
+
+        let mut dict = crate::object::PdfDictionary::new();
+        dict.insert("K", -1i64);
+        dict.insert("Columns", width as i64);
+        dict.insert("Rows", height as i64);
+
+        let decoded1 = decode_stream_with_dict("CCITTFaxDecode", &encoded, Some(&dict)).unwrap();
+        assert_eq!(bitmap, decoded1);
+
+        let decoded2 = decode_stream_with_dict("/CCF", &encoded, Some(&dict)).unwrap();
+        assert_eq!(bitmap, decoded2);
+    }
+
+    #[test]
+    fn test_jbig2_invalid_header_handling() {
+        let bad_data = b"NOT_A_VALID_JBIG2_STREAM";
+        let res = decode_jbig2(bad_data, None);
+        assert!(res.is_err(), "Invalid JBIG2 stream should return an error");
     }
 }

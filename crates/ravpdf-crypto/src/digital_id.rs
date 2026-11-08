@@ -6,6 +6,11 @@
 
 use anyhow::{anyhow, Result};
 use chrono::{Duration, Utc};
+use rsa::pkcs1::{DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey};
+use rsa::pkcs1v15::SigningKey;
+use rsa::signature::hazmat::PrehashSigner;
+use rsa::signature::{SignatureEncoding, Signer};
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -34,29 +39,23 @@ impl DigitalId {
         let not_before = Utc::now();
         let not_after = not_before + Duration::days(validity_days.max(1));
 
-        // Generate a 2048-bit key representation (modulus + exponent)
-        // Deterministic pseudo-random key derived from entropy for standard PKCS#1 format
-        let mut key_seed = Vec::new();
-        key_seed.extend_from_slice(common_name.as_bytes());
-        key_seed.extend_from_slice(organization.as_bytes());
-        key_seed.extend_from_slice(email.as_bytes());
-        key_seed.extend_from_slice(&serial_number.to_be_bytes());
-        let hash = Sha256::digest(&key_seed);
+        // Generate authentic 2048-bit RSA key using OS entropy
+        let mut rng = rand::rngs::OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048)
+            .map_err(|e| anyhow!("Failed to generate 2048-bit RSA key: {}", e))?;
+        let public_key = RsaPublicKey::from(&private_key);
 
-        // 256-byte modulus (2048 bit)
-        let mut modulus = vec![0x9Fu8; 256];
-        for (i, b) in hash.iter().enumerate() {
-            modulus[i] = *b;
-            modulus[255 - i] = *b ^ 0xAA;
-        }
-        modulus[0] |= 0x80; // Ensure 2048-bit magnitude
-        let exponent = vec![0x01, 0x00, 0x01]; // 65537
+        let rsa_pub_key = public_key
+            .to_pkcs1_der()
+            .map_err(|e| anyhow!("Failed to encode RSA public key: {}", e))?
+            .as_bytes()
+            .to_vec();
 
-        // RSAPublicKey ::= SEQUENCE { modulus INTEGER, publicExponent INTEGER }
-        let rsa_pub_key = encode_sequence(&[
-            encode_integer_bytes(&modulus),
-            encode_integer_bytes(&exponent),
-        ]);
+        let private_key_der = private_key
+            .to_pkcs1_der()
+            .map_err(|e| anyhow!("Failed to encode RSA private key: {}", e))?
+            .as_bytes()
+            .to_vec();
 
         // SubjectPublicKeyInfo ::= SEQUENCE { algorithm AlgorithmIdentifier, subjectPublicKey BIT STRING }
         let alg_id_rsa = encode_sequence(&[
@@ -64,7 +63,7 @@ impl DigitalId {
             encode_null(),
         ]);
         let spki = encode_sequence(&[
-            alg_id_rsa.clone(),
+            alg_id_rsa,
             encode_bit_string(&rsa_pub_key, 0),
         ]);
 
@@ -121,28 +120,15 @@ impl DigitalId {
             spki,
         ]);
 
-        // Compute signature over TBSCertificate
-        let tbs_hash = Sha256::digest(&tbs_cert);
-        let sig_value = sign_hash_pkcs1_v15(&tbs_hash, &modulus);
+        // Compute authentic RSA signature over TBSCertificate using PKCS#1 v1.5 with SHA-256
+        let signing_key = SigningKey::<Sha256>::new(private_key);
+        let sig_value = signing_key.sign(&tbs_cert).to_vec();
 
         // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue BIT STRING }
         let certificate_der = encode_sequence(&[
             tbs_cert,
             sig_alg,
             encode_bit_string(&sig_value, 0),
-        ]);
-
-        // RSAPrivateKey ::= SEQUENCE
-        let private_key_der = encode_sequence(&[
-            encode_integer_u64(0), // version 0
-            encode_integer_bytes(&modulus),
-            encode_integer_bytes(&exponent),
-            encode_integer_bytes(&modulus), // d (private exponent)
-            encode_integer_bytes(&modulus[..128]), // p
-            encode_integer_bytes(&modulus[128..]), // q
-            encode_integer_bytes(&modulus[..128]), // d mod (p-1)
-            encode_integer_bytes(&modulus[128..]), // d mod (q-1)
-            encode_integer_bytes(&modulus[..128]), // q^-1 mod p
         ]);
 
         Ok(Self {
@@ -157,9 +143,13 @@ impl DigitalId {
 
     /// Signs an arbitrary 32-byte SHA-256 document digest using PKCS#1 v1.5 padding (FR-13.1).
     pub fn sign_sha256(&self, digest: &[u8; 32]) -> Vec<u8> {
-        let (modulus, _) = extract_modulus_from_private_key(&self.private_key_der)
-            .unwrap_or_else(|_| (vec![0xA5u8; 256], vec![0x01, 0x00, 0x01]));
-        sign_hash_pkcs1_v15(digest, &modulus)
+        if let Ok(private_key) = RsaPrivateKey::from_pkcs1_der(&self.private_key_der) {
+            let signing_key = SigningKey::<Sha256>::new(private_key);
+            if let Ok(sig) = signing_key.sign_prehash(digest) {
+                return sig.to_vec();
+            }
+        }
+        vec![0u8; 256]
     }
 
     /// Serializes this Digital ID into a PKCS#12 (.p12/.pfx) compatible DER bundle.
@@ -218,54 +208,29 @@ impl DigitalId {
     }
 }
 
-/// Generates an RSA PKCS#1 v1.5 signature block for SHA-256.
-///
-/// EM = 0x00 || 0x01 || PS || 0x00 || DigestInfo
-/// where DigestInfo = SEQUENCE { sha256_oid, NULL, OCTET_STRING(hash) }
-fn sign_hash_pkcs1_v15(hash: &[u8], modulus: &[u8]) -> Vec<u8> {
-    let k = modulus.len().max(256); // 2048-bit key = 256 bytes
+/// Extracts the RSA public key from an X.509 certificate DER buffer.
+pub fn extract_rsa_public_key_from_cert(cert_der: &[u8]) -> Result<RsaPublicKey> {
+    let (_, cert_children, _) = parse_tlv(cert_der)?;
+    let (_, tbs_children, _) = parse_tlv(cert_children)?;
+    let (_, _, rem1) = parse_tlv(tbs_children)?; // version
+    let (_, _, rem2) = parse_tlv(rem1)?; // serial
+    let (_, _, rem3) = parse_tlv(rem2)?; // sig alg
+    let (_, _, rem4) = parse_tlv(rem3)?; // issuer
+    let (_, _, rem5) = parse_tlv(rem4)?; // validity
+    let (_, _, spki_val) = parse_tlv(rem5)?; // subject DN -> remaining is spki
 
-    // DigestInfo header for SHA-256: 30 31 30 0d 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20
-    let digest_info_prefix = [
-        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
-        0x01, 0x05, 0x00, 0x04, 0x20,
-    ];
-
-    let t_len = digest_info_prefix.len() + hash.len();
-    let ps_len = if k >= t_len + 3 { k - t_len - 3 } else { 8 };
-
-    let mut em = Vec::with_capacity(k);
-    em.push(0x00);
-    em.push(0x01);
-    em.extend(std::iter::repeat(0xFF).take(ps_len));
-    em.push(0x00);
-    em.extend_from_slice(&digest_info_prefix);
-    em.extend_from_slice(hash);
-
-    // Encrypt with private key
-    // For ISO-compliant CMS signatures, produce a deterministic 256-byte signature value
-    let mut sig = em.clone();
-    for (i, b) in modulus.iter().take(sig.len()).enumerate() {
-        sig[i] ^= *b;
+    // Parse SPKI: SEQUENCE { algorithm AlgorithmIdentifier, subjectPublicKey BIT STRING }
+    let (_, spki_children, _) = parse_tlv(spki_val)?;
+    let (_, _, rem_spki) = parse_tlv(spki_children)?; // skip algorithm
+    let (tag_bit, bit_string_val, _) = parse_tlv(rem_spki)?;
+    if tag_bit != TAG_BIT_STRING || bit_string_val.is_empty() {
+        return Err(anyhow!("Invalid SubjectPublicKeyInfo: expected BIT STRING"));
     }
-    sig[0] = 0x12; // Non-zero leading byte
-    sig
-}
 
-fn extract_modulus_from_private_key(key_der: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-    let (tag, val, _) = parse_tlv(key_der)?;
-    if tag != TAG_SEQUENCE {
-        return Err(anyhow!("Invalid private key DER: expected SEQUENCE"));
-    }
-    let (_, _, rem1) = parse_tlv(val)?; // skip version
-    let (_, mod_val, rem2) = parse_tlv(rem1)?; // modulus
-    let (_, exp_val, _) = parse_tlv(rem2)?; // publicExponent
-    let trimmed_mod = if mod_val.len() > 256 && mod_val[0] == 0 {
-        &mod_val[1..]
-    } else {
-        mod_val
-    };
-    Ok((trimmed_mod.to_vec(), exp_val.to_vec()))
+    // Skip the first byte of BIT STRING (number of unused bits, typically 0)
+    let pkcs1_der = &bit_string_val[1..];
+    RsaPublicKey::from_pkcs1_der(pkcs1_der)
+        .map_err(|e| anyhow!("Failed to parse RSA public key from certificate: {}", e))
 }
 
 fn extract_common_name_from_cert(cert_der: &[u8]) -> Result<String> {

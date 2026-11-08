@@ -156,12 +156,169 @@ enum SidebarTab {
     Bookmarks,
     Destinations,
     Annotations,
+    Layers,
     Attachments,
     Signatures,
     Forms,
     Properties,
     Search,
     Accessibility,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
+pub enum GuiLanguage {
+    #[default]
+    English,
+    German,
+    French,
+    Spanish,
+    Japanese,
+    Chinese,
+}
+
+impl GuiLanguage {
+    pub fn tr<'a>(&self, key: &'a str) -> &'a str {
+        match self {
+            GuiLanguage::English => match key {
+                "layers" => "Layers",
+                "thumbnails" => "Pages (Thumbnails)",
+                "bookmarks" => "Bookmarks & Outline",
+                "destinations" => "Named Destinations",
+                "annotations" => "Comments & Markup",
+                "attachments" => "Embedded Attachments",
+                "signatures" => "Digital Signatures",
+                "forms" => "Form Fields",
+                "properties" => "Properties",
+                "search" => "Search",
+                "accessibility" => "Accessibility",
+                "file" => "File",
+                "edit" => "Edit",
+                "view" => "View",
+                "tools" => "Tools",
+                "help" => "Help",
+                "recovery_title" => "Restore Unsaved Documents",
+                "recovery_prompt" => "RavPDF detected unsaved document drafts from an unexpected previous session termination. Would you like to restore them?",
+                "restore" => "Restore Drafts",
+                "discard" => "Discard",
+                _ => key,
+            },
+            GuiLanguage::German => match key {
+                "layers" => "Ebenen",
+                "thumbnails" => "Seiten (Miniaturen)",
+                "bookmarks" => "Lesezeichen",
+                "destinations" => "Ziele",
+                "annotations" => "Kommentare",
+                "attachments" => "Anhänge",
+                "signatures" => "Signaturen",
+                "forms" => "Formularfelder",
+                "properties" => "Eigenschaften",
+                "search" => "Suche",
+                "accessibility" => "Barrierefreiheit",
+                "file" => "Datei",
+                "edit" => "Bearbeiten",
+                "view" => "Ansicht",
+                "tools" => "Werkzeuge",
+                "help" => "Hilfe",
+                "recovery_title" => "Nicht gespeicherte Dokumente wiederherstellen",
+                "recovery_prompt" => "Es wurden ungespeicherte Dokumententwürfe aus einer vorherigen Sitzung gefunden. Möchten Sie diese wiederherstellen?",
+                "restore" => "Entwürfe wiederherstellen",
+                "discard" => "Verwerfen",
+                _ => key,
+            },
+            GuiLanguage::French => match key {
+                "layers" => "Calques",
+                "thumbnails" => "Pages (Vignettes)",
+                "bookmarks" => "Signets",
+                "destinations" => "Destinations",
+                "annotations" => "Commentaires",
+                "attachments" => "Pièces jointes",
+                "signatures" => "Signatures numériques",
+                "forms" => "Formulaires",
+                "properties" => "Propriétés",
+                "search" => "Recherche",
+                "accessibility" => "Accessibilité",
+                "file" => "Fichier",
+                "edit" => "Édition",
+                "view" => "Affichage",
+                "tools" => "Outils",
+                "help" => "Aide",
+                "recovery_title" => "Restaurer les documents non enregistrés",
+                "recovery_prompt" => "Des brouillons non enregistrés d'une session précédente ont été trouvés. Voulez-vous les restaurer ?",
+                "restore" => "Restaurer",
+                "discard" => "Ignorer",
+                _ => key,
+            },
+            GuiLanguage::Spanish => match key {
+                "layers" => "Capas",
+                "thumbnails" => "Páginas (Miniaturas)",
+                "bookmarks" => "Marcadores",
+                "destinations" => "Destinos",
+                "annotations" => "Comentarios",
+                "attachments" => "Adjuntos",
+                "signatures" => "Firmas digitales",
+                "forms" => "Formularios",
+                "properties" => "Propiedades",
+                "search" => "Búsqueda",
+                "accessibility" => "Accesibilidad",
+                "file" => "Archivo",
+                "edit" => "Edición",
+                "view" => "Ver",
+                "tools" => "Herramientas",
+                "help" => "Ayuda",
+                "recovery_title" => "Restaurar documentos no guardados",
+                "recovery_prompt" => "Se encontraron borradores de documentos no guardados de una sesión anterior. ¿Desea restaurarlos?",
+                "restore" => "Restaurar",
+                "discard" => "Descartar",
+                _ => key,
+            },
+            GuiLanguage::Japanese => match key {
+                "layers" => "レイヤー",
+                "thumbnails" => "ページ (サムネイル)",
+                "bookmarks" => "しおり",
+                "destinations" => "移動先",
+                "annotations" => "注釈",
+                "attachments" => "添付ファイル",
+                "signatures" => "デジタル署名",
+                "forms" => "フォームフィールド",
+                "properties" => "プロパティ",
+                "search" => "検索",
+                "accessibility" => "アクセシビリティ",
+                "file" => "ファイル",
+                "edit" => "編集",
+                "view" => "表示",
+                "tools" => "ツール",
+                "help" => "ヘルプ",
+                "recovery_title" => "未保存のドキュメントを復元",
+                "recovery_prompt" => "前回のセッションで未保存のドラフトが見つかりました。復元しますか？",
+                "restore" => "復元する",
+                "discard" => "破棄する",
+                _ => key,
+            },
+            GuiLanguage::Chinese => match key {
+                "layers" => "图层",
+                "thumbnails" => "页面 (缩略图)",
+                "bookmarks" => "书签",
+                "destinations" => "命名位置",
+                "annotations" => "注释与标记",
+                "attachments" => "附件",
+                "signatures" => "数字签名",
+                "forms" => "表单域",
+                "properties" => "属性",
+                "search" => "搜索",
+                "accessibility" => "无障碍辅助",
+                "file" => "文件",
+                "edit" => "编辑",
+                "view" => "视图",
+                "tools" => "工具",
+                "help" => "帮助",
+                "recovery_title" => "恢复未保存的文档",
+                "recovery_prompt" => "检测到上一次非正常退出的未保存文档草稿。是否恢复？",
+                "restore" => "恢复草稿",
+                "discard" => "放弃",
+                _ => key,
+            },
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -723,10 +880,33 @@ struct RavPdfApp {
     dark_theme: bool,
     two_page_cover_page: bool,
     marquee_zoom_start: Option<Pos2>,
+
+    // Auto-Save and Crash Recovery (NFR-03.1, NFR-03.2)
+    last_auto_save: std::time::Instant,
+    auto_save_interval: std::time::Duration,
+    show_recovery_modal: bool,
+    recovery_files: Vec<PathBuf>,
+
+    // Localization (NFR-09.2)
+    current_language: GuiLanguage,
 }
 
 impl Default for RavPdfApp {
     fn default() -> Self {
+        let temp_dir = std::env::temp_dir();
+        let mut rec_files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&temp_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Some(file_name) = p.file_name().and_then(|f| f.to_str()) {
+                    if file_name.starts_with("ravpdf_recovery_") && file_name.ends_with(".pdf") {
+                        rec_files.push(p);
+                    }
+                }
+            }
+        }
+        let show_recovery = !rec_files.is_empty();
+
         Self {
             tabs: Vec::new(),
             active_tab_idx: None,
@@ -740,6 +920,12 @@ impl Default for RavPdfApp {
             dark_theme: true,
             two_page_cover_page: false,
             marquee_zoom_start: None,
+
+            last_auto_save: std::time::Instant::now(),
+            auto_save_interval: std::time::Duration::from_secs(300),
+            show_recovery_modal: show_recovery,
+            recovery_files: rec_files,
+            current_language: GuiLanguage::default(),
 
             search_bar_open: false,
             search_query: String::new(),
@@ -1500,6 +1686,7 @@ impl RavPdfApp {
                     zoom: 2.0, // 144 DPI
                     rotation: 0,
                     background_color: ravpdf_render::Color::WHITE,
+                    hidden_ocgs: tab.hidden_ocgs.clone(),
                 };
                 for i in 0..page_count {
                     if let Ok(pixmap) = render_page(&tab.doc, i, &options) {
@@ -2489,6 +2676,33 @@ impl RavPdfApp {
                         setup_custom_theme(ctx, self.dark_theme);
                         ui.close_menu();
                     }
+                    ui.separator();
+                    ui.menu_button("🌐 UI Language (NFR-09.2)", |ui| {
+                        if ui.selectable_label(self.current_language == GuiLanguage::English, "English").clicked() {
+                            self.current_language = GuiLanguage::English;
+                            ui.close_menu();
+                        }
+                        if ui.selectable_label(self.current_language == GuiLanguage::German, "Deutsch (German)").clicked() {
+                            self.current_language = GuiLanguage::German;
+                            ui.close_menu();
+                        }
+                        if ui.selectable_label(self.current_language == GuiLanguage::French, "Français (French)").clicked() {
+                            self.current_language = GuiLanguage::French;
+                            ui.close_menu();
+                        }
+                        if ui.selectable_label(self.current_language == GuiLanguage::Spanish, "Español (Spanish)").clicked() {
+                            self.current_language = GuiLanguage::Spanish;
+                            ui.close_menu();
+                        }
+                        if ui.selectable_label(self.current_language == GuiLanguage::Japanese, "日本語 (Japanese)").clicked() {
+                            self.current_language = GuiLanguage::Japanese;
+                            ui.close_menu();
+                        }
+                        if ui.selectable_label(self.current_language == GuiLanguage::Chinese, "中文 (Chinese)").clicked() {
+                            self.current_language = GuiLanguage::Chinese;
+                            ui.close_menu();
+                        }
+                    });
                     ui.separator();
                     if ui
                         .add_enabled(has_doc, Button::new("Rotate Clockwise 90°"))
@@ -3873,6 +4087,7 @@ impl RavPdfApp {
                         (SidebarTab::Destinations, "📌", "Named Destinations"),
                         (SidebarTab::Annotations, "💬", "Comments & Markup"),
                         (SidebarTab::Forms, "📝", "Interactive Form Fields"),
+                        (SidebarTab::Layers, "🥞", "Layers / Optional Content Groups"),
                     ];
                     for (tab, icon, tip) in row1 {
                         let selected = self.sidebar_tab == tab;
@@ -5001,6 +5216,49 @@ impl RavPdfApp {
 
                         if open_dialog {
                             self.show_accessibility_dialog = true;
+                        }
+                    }
+
+                    SidebarTab::Layers => {
+                        ui.horizontal(|ui| {
+                            ui.heading("Layers (OCG)");
+                        });
+                        ui.add_space(4.0);
+                        ui.separator();
+
+                        if let Some(tab) = self.active_tab_mut() {
+                            let layers = tab.get_document_layers();
+                            if layers.is_empty() {
+                                ui.add_space(20.0);
+                                ui.weak("No Optional Content Groups (Layers) in this document.");
+                            } else {
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    for layer in layers {
+                                        ui.horizontal(|ui| {
+                                            let eye_icon = if layer.visible { "👁" } else { "🚫" };
+                                            if ui
+                                                .button(eye_icon)
+                                                .on_hover_text(if layer.visible {
+                                                    "Click to hide layer"
+                                                } else {
+                                                    "Click to show layer"
+                                                })
+                                                .clicked()
+                                            {
+                                                tab.toggle_layer_visibility(&layer.id, &layer.name);
+                                            }
+                                            let label_text = if layer.visible {
+                                                egui::RichText::new(&layer.name)
+                                            } else {
+                                                egui::RichText::new(&layer.name)
+                                                    .color(Color32::from_rgb(140, 140, 140))
+                                                    .strikethrough()
+                                            };
+                                            ui.label(label_text);
+                                        });
+                                    }
+                                });
+                            }
                         }
                     }
                 }
@@ -15454,6 +15712,72 @@ impl RavPdfApp {
                 self.show_xfdf_dialog = false;
             }
         }
+
+        // Crash Recovery Prompt Modal (NFR-03.2)
+        if self.show_recovery_modal {
+            let mut close = false;
+            let mut restore_all = false;
+            let mut discard_all = false;
+
+            egui::Window::new(self.current_language.tr("recovery_title"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(self.current_language.tr("recovery_prompt"));
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                        for path in &self.recovery_files {
+                            ui.monospace(path.display().to_string());
+                        }
+                    });
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(
+                                egui::RichText::new(self.current_language.tr("restore"))
+                                    .strong()
+                                    .color(Color32::from_rgb(37, 99, 235)),
+                            )
+                            .clicked()
+                        {
+                            restore_all = true;
+                            close = true;
+                        }
+                        if ui.button(self.current_language.tr("discard")).clicked() {
+                            discard_all = true;
+                            close = true;
+                        }
+                    });
+                });
+
+            if restore_all {
+                let to_restore = std::mem::take(&mut self.recovery_files);
+                for path in to_restore {
+                    self.open_file(path);
+                }
+            }
+            if discard_all {
+                let to_discard = std::mem::take(&mut self.recovery_files);
+                for path in to_discard {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            if close {
+                self.show_recovery_modal = false;
+            }
+        }
+    }
+
+    /// Automatically saves drafts of modified open documents to the temporary journal directory (NFR-03.1).
+    fn trigger_auto_save(&mut self) {
+        let temp_dir = std::env::temp_dir();
+        for tab in &self.tabs {
+            if tab.is_modified {
+                let rec_path = temp_dir.join(format!("ravpdf_recovery_tab_{}.pdf", tab.id));
+                let _ = tab.doc.save_to_file(&rec_path);
+            }
+        }
     }
 }
 
@@ -15499,6 +15823,12 @@ impl eframe::App for RavPdfApp {
 
         // 4. Render Modals (Watermark, Bates, Headers & Footers, Text Box)
         self.render_dialogs(ctx);
+
+        // 5. Periodic Auto-Save (every 5 minutes) (NFR-03.1)
+        if self.last_auto_save.elapsed() >= self.auto_save_interval {
+            self.last_auto_save = std::time::Instant::now();
+            self.trigger_auto_save();
+        }
     }
 }
 

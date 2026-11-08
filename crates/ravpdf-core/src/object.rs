@@ -3,7 +3,7 @@
 //! Traceability: Section 7.1 PDF Internal Structure, DR-01.
 
 use crate::error::{PdfError, Result};
-use crate::filter::{decode_stream, encode_flate};
+use crate::filter::{decode_stream_with_dict, encode_flate};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -237,17 +237,26 @@ impl PdfStream {
         }
     }
 
-    /// Decompresses and returns the decoded payload using the stream's `/Filter` settings.
+    /// Decompresses and returns the decoded payload using the stream's `/Filter` and `/DecodeParms`.
     pub fn decode(&self) -> Result<Vec<u8>> {
         let filter_obj = self.dict.get("Filter");
+        let parms_obj = self.dict.get("DecodeParms");
         match filter_obj {
             None => Ok(self.raw_data.clone()),
-            Some(Object::Name(name)) => decode_stream(name.as_str(), &self.raw_data),
+            Some(Object::Name(name)) => {
+                let dict_parm = parms_obj.and_then(Object::as_dict);
+                decode_stream_with_dict(name.as_str(), &self.raw_data, dict_parm)
+            }
             Some(Object::Array(arr)) => {
                 let mut data = self.raw_data.clone();
-                for item in arr {
+                for (i, item) in arr.iter().enumerate() {
                     if let Some(name) = item.as_name() {
-                        data = decode_stream(name, &data)?;
+                        let dict_parm = match parms_obj {
+                            Some(Object::Array(parms_arr)) => parms_arr.get(i).and_then(Object::as_dict),
+                            Some(Object::Dictionary(d)) => Some(d),
+                            _ => None,
+                        };
+                        data = decode_stream_with_dict(name, &data, dict_parm)?;
                     }
                 }
                 Ok(data)
