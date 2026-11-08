@@ -23,6 +23,24 @@ pub enum ExportImageFormat {
     Jpeg,
 }
 
+/// Exports a PDF document to Microsoft Word (.docx) OpenXML binary format (FR-03.2.1).
+pub fn export_to_docx(doc: &PdfDocument) -> Result<Vec<u8>> {
+    crate::office::export_pdf_to_docx(doc)
+        .map_err(|e| PdfError::InvalidStructure(e.to_string()))
+}
+
+/// Exports a PDF document to Microsoft Excel (.xlsx) OpenXML binary format (FR-03.2.2).
+pub fn export_to_xlsx(doc: &PdfDocument) -> Result<Vec<u8>> {
+    crate::office::export_pdf_to_xlsx(doc)
+        .map_err(|e| PdfError::InvalidStructure(e.to_string()))
+}
+
+/// Exports a PDF document to Microsoft PowerPoint (.pptx) OpenXML binary format (FR-03.2.3).
+pub fn export_to_pptx(doc: &PdfDocument) -> Result<Vec<u8>> {
+    crate::office::export_pdf_to_pptx(doc)
+        .map_err(|e| PdfError::InvalidStructure(e.to_string()))
+}
+
 /// Exports specified pages (or all pages if None) to formatted plain text (FR-03.2.5, FR-03.2.9).
 pub fn export_to_plain_text(
     doc: &PdfDocument,
@@ -322,6 +340,7 @@ pub fn export_page_to_image(
         zoom,
         rotation: 0,
         background_color: Color::WHITE,
+        hidden_ocgs: std::collections::HashSet::new(),
     };
 
     let pixmap = render_page(doc, page_index, &options)?;

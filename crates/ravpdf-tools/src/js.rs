@@ -331,7 +331,8 @@ impl JsExecutionContext {
 // Sandboxing & Lexical / Expression Evaluation Engine (FR-12.1, FR-12.10)
 // ============================================================================
 
-/// Execute JavaScript code within the sandboxed environment (FR-12.1, FR-12.10, FR-12.11).
+/// Execute JavaScript code within the sandboxed environment (FR-12.1, FR-12.10, FR-12.11)
+/// powered by Boa ECMAScript Engine.
 pub fn execute_script(ctx: &mut JsExecutionContext, script: &str) -> Result<JsValue> {
     if !ctx.js_enabled {
         return Ok(JsValue::Undefined);
@@ -347,62 +348,331 @@ pub fn execute_script(ctx: &mut JsExecutionContext, script: &str) -> Result<JsVa
         validate_sandbox_safety(trimmed)?;
     }
 
-    // 2. Parse and execute statements
-    let mut local_vars: HashMap<String, JsValue> = HashMap::new();
-    let statements = split_statements(trimmed);
-    let mut last_val = JsValue::Undefined;
+    // 2. Prepare Boa ECMAScript Context
+    let mut boa_ctx = boa_engine::Context::default();
 
-    for stmt in statements {
-        let stmt = stmt.trim();
-        if stmt.is_empty() {
-            continue;
-        }
+    // 3. Serialize initial state
+    let fields_json = serde_json::to_string(&ctx.fields).unwrap_or_else(|_| "{}".to_string());
+    let prompt_responses_json = serde_json::to_string(&ctx.prompt_responses).unwrap_or_else(|_| "{}".to_string());
+    let event_val_json = serde_json::to_string(&ctx.event.value).unwrap_or_else(|_| "null".to_string());
 
-        // Return statement
-        if stmt.starts_with("return ") || stmt == "return" {
-            let expr = stmt.trim_start_matches("return").trim();
-            return eval_expression(ctx, &mut local_vars, expr);
-        }
+    let preamble = format!(
+        r#"
+        var _rav_fields = {fields_json};
+        var _rav_prompt_responses = {prompt_responses_json};
+        var _rav_logs = [];
+        var _rav_alerts = [];
+        var _rav_beeps = 0;
+        var _rav_submissions = [];
+        var _rav_mails = [];
 
-        // If statement: if (condition) { ... } else { ... }
-        if stmt.starts_with("if") && stmt.contains('(') {
-            if let Some(handled) = handle_if_statement(ctx, &mut local_vars, stmt)? {
-                last_val = handled;
-                continue;
-            }
-        }
+        function _unwrap_val(v) {{
+            if (v === null || v === undefined) return "";
+            if (typeof v === "object") {{
+                if ("String" in v) return v.String;
+                if ("Number" in v) return v.Number;
+                if ("Boolean" in v) return v.Boolean;
+                return "";
+            }}
+            return v;
+        }}
 
-        // Variable declaration: var name = expr; or let/const
-        if stmt.starts_with("var ") || stmt.starts_with("let ") || stmt.starts_with("const ") {
-            let decl = stmt
-                .trim_start_matches("var ")
-                .trim_start_matches("let ")
-                .trim_start_matches("const ")
-                .trim();
-            if let Some((name, expr)) = decl.split_once('=') {
-                let name = name.trim().to_string();
-                let val = eval_expression(ctx, &mut local_vars, expr.trim())?;
-                local_vars.insert(name, val.clone());
-                last_val = val;
+        var event = {{
+            value: {event_val_json},
+            target_name: "{target_name}",
+            change: "{change}",
+            rc: {rc},
+            name: "{event_name}",
+            type: "{event_type}"
+        }};
+
+        var console = {{
+            println: function(msg) {{ _rav_logs.push(String(msg)); }},
+            clear: function() {{ _rav_logs.length = 0; }}
+        }};
+
+        var app = {{
+            alert: function(msg, title, icon, dialogType) {{
+                var m = String(msg);
+                var t = title !== undefined ? String(title) : "Alert";
+                var ic = typeof icon === "number" ? icon : 0;
+                var dt = typeof dialogType === "number" ? dialogType : 0;
+                _rav_alerts.push({{ message: m, title: t, icon: ic, dialog_type: dt }});
+                return 1;
+            }},
+            beep: function() {{ _rav_beeps++; }},
+            response: function(cQuestion, cTitle, cDefault) {{
+                return _rav_prompt_responses[String(cQuestion)] || (cDefault !== undefined ? String(cDefault) : "");
+            }}
+        }};
+
+        function AFSimple_Calculate(cFunction, cFields) {{
+            var vals = [];
+            for (var i = 0; i < cFields.length; i++) {{
+                var f = getField(cFields[i]);
+                if (f) {{
+                    var n = parseFloat(f.value);
+                    if (!isNaN(n)) vals.push(n);
+                }}
+            }}
+            var res = 0;
+            if (cFunction === "SUM") {{
+                for (var i = 0; i < vals.length; i++) res += vals[i];
+            }} else if (cFunction === "AVG") {{
+                var s = 0;
+                for (var i = 0; i < vals.length; i++) s += vals[i];
+                res = vals.length ? (s / vals.length) : 0;
+            }} else if (cFunction === "PRD") {{
+                res = vals.length ? 1 : 0;
+                for (var i = 0; i < vals.length; i++) res *= vals[i];
+            }} else if (cFunction === "MIN") {{
+                res = vals.length ? Math.min.apply(null, vals) : 0;
+            }} else if (cFunction === "MAX") {{
+                res = vals.length ? Math.max.apply(null, vals) : 0;
+            }}
+            event.value = res;
+            return res;
+        }}
+
+        function AFNumber_Format(nDec, sepStyle, negStyle, currSymbol, bPrepend) {{
+            var raw = _unwrap_val(event.value);
+            var num = parseFloat(raw);
+            if (isNaN(num)) num = 0.0;
+            var formatted = num.toFixed(nDec);
+            var res = currSymbol ? (bPrepend ? currSymbol + formatted : formatted + currSymbol) : formatted;
+            event.value = res;
+            return res;
+        }}
+
+        var this_doc = {{
+            numPages: {num_pages},
+            pageNum: {page_num},
+            title: "{doc_title}",
+            author: "{doc_author}",
+            subject: "{doc_subject}",
+            getField: function(name) {{
+                var f = _rav_fields[name];
+                if (!f) return null;
+                return {{
+                    get value() {{ return _unwrap_val(f.value); }},
+                    set value(v) {{ f.value = v; }}
+                }};
+            }},
+            resetForm: function(names) {{
+                var targets = names || Object.keys(_rav_fields);
+                for (var i = 0; i < targets.length; i++) {{
+                    var k = targets[i];
+                    if (_rav_fields[k]) {{
+                        _rav_fields[k].value = _rav_fields[k].default_value;
+                    }}
+                }}
+            }},
+            mailDoc: function(bUI, cTo, cCc, cBcc, cSubject, cMessage) {{
+                _rav_mails.push({{
+                    interactive: !!bUI,
+                    to: cTo || "",
+                    cc: cCc || "",
+                    bcc: cBcc || "",
+                    subject: cSubject || "",
+                    message: cMessage || ""
+                }});
+            }},
+            submitForm: function(cURL, bFDF, bEmpty) {{
+                _rav_submissions.push({{
+                    url: cURL || "",
+                    fdf: !!bFDF,
+                    empty_fields: !!bEmpty
+                }});
+            }}
+        }};
+
+        var getField = this_doc.getField.bind(this_doc);
+        globalThis.getField = getField;
+        globalThis.app = app;
+        globalThis.event = event;
+        globalThis.console = console;
+        globalThis.AFSimple_Calculate = AFSimple_Calculate;
+        globalThis.AFNumber_Format = AFNumber_Format;
+        globalThis.numPages = this_doc.numPages;
+        globalThis.pageNum = this_doc.pageNum;
+
+        for (var _fn in _rav_fields) {{
+            (function(fieldName) {{
+                try {{
+                    Object.defineProperty(globalThis, fieldName, {{
+                        get: function() {{
+                            var f = this_doc.getField(fieldName);
+                            return f ? f.value : undefined;
+                        }},
+                        set: function(val) {{
+                            var f = this_doc.getField(fieldName);
+                            if (f) {{ f.value = val; }}
+                        }},
+                        configurable: true
+                    }});
+                }} catch(e) {{}}
+            }})(_fn);
+        }}
+    "#,
+        fields_json = fields_json,
+        prompt_responses_json = prompt_responses_json,
+        event_val_json = event_val_json,
+        target_name = ctx.event.target_name,
+        change = ctx.event.change,
+        rc = ctx.event.rc,
+        event_name = ctx.event.name,
+        event_type = ctx.event.event_type,
+        num_pages = ctx.num_pages,
+        page_num = ctx.page_num,
+        doc_title = ctx.title,
+        doc_author = ctx.author,
+        doc_subject = ctx.subject,
+    );
+
+    let setup_source = boa_engine::Source::from_bytes(preamble.as_bytes());
+    boa_ctx
+        .eval(setup_source)
+        .map_err(|e| anyhow!("JS Preamble Error: {:?}", e))?;
+
+    // Try evaluating directly, or wrap in function if top-level return is used
+    let user_source = boa_engine::Source::from_bytes(trimmed.as_bytes());
+    let eval_res = match boa_ctx.eval(user_source) {
+        Ok(v) => v,
+        Err(err) => {
+            let err_str = format!("{:?}", err);
+            if err_str.contains("return") {
+                let wrapped = format!("(function() {{\n{}\n}})()", trimmed);
+                let wrapped_src = boa_engine::Source::from_bytes(wrapped.as_bytes());
+                boa_ctx
+                    .eval(wrapped_src)
+                    .map_err(|e| anyhow!("JS Execution Error: {:?}", e))?
             } else {
-                local_vars.insert(decl.to_string(), JsValue::Undefined);
+                return Err(anyhow!("JS Execution Error: {}", err_str));
             }
-            continue;
         }
+    };
 
-        // Assignment: target = expr
-        if let Some((target, expr)) = split_assignment(stmt) {
-            let val = eval_expression(ctx, &mut local_vars, expr.trim())?;
-            apply_assignment(ctx, &mut local_vars, target.trim(), val.clone())?;
-            last_val = val;
-            continue;
+    // Extract updated context state via JSON
+    let extract_code = r#"
+        JSON.stringify({
+            event_val: event.value,
+            event_rc: event.rc,
+            event_change: event.change,
+            fields: _rav_fields,
+            logs: _rav_logs,
+            alerts: _rav_alerts,
+            beeps: _rav_beeps,
+            submissions: _rav_submissions,
+            mails: _rav_mails
+        });
+    "#;
+    let extract_source = boa_engine::Source::from_bytes(extract_code.as_bytes());
+    let extracted_val = boa_ctx
+        .eval(extract_source)
+        .map_err(|e| anyhow!("JS State Sync Error: {:?}", e))?;
+
+    // Update ctx with extracted state
+    if let Some(json_str) = extracted_val.as_string() {
+        let rust_str = json_str.to_std_string_escaped();
+        if let Ok(synced) = serde_json::from_str::<serde_json::Value>(&rust_str) {
+            if let Some(logs) = synced.get("logs").and_then(|v| v.as_array()) {
+                for log in logs {
+                    if let Some(s) = log.as_str() {
+                        ctx.console_log.push(s.to_string());
+                    }
+                }
+            }
+            if let Some(beeps) = synced.get("beeps").and_then(|v| v.as_u64()) {
+                ctx.beeps += beeps as usize;
+            }
+            if let Some(alerts) = synced.get("alerts").and_then(|v| v.as_array()) {
+                for alert in alerts {
+                    let msg = alert
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let title = alert
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Alert")
+                        .to_string();
+                    let icon = alert.get("icon").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let dt = alert.get("dialog_type").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    ctx.alerts.push(JsAlert {
+                        message: msg,
+                        title,
+                        icon,
+                        dialog_type: dt,
+                    });
+                }
+            }
+            if let Some(rc) = synced.get("event_rc").and_then(|v| v.as_bool()) {
+                ctx.event.rc = rc;
+            }
+            if let Some(change) = synced.get("event_change").and_then(|v| v.as_str()) {
+                ctx.event.change = change.to_string();
+            }
+            if let Some(ev_val) = synced.get("event_val") {
+                ctx.event.value = json_to_js_value(ev_val);
+            }
+            if let Some(fields_obj) = synced.get("fields").and_then(|v| v.as_object()) {
+                for (name, val) in fields_obj {
+                    if let Some(f) = ctx.fields.get_mut(name) {
+                        if let Some(new_val) = val.get("value") {
+                            f.value = json_to_js_value(new_val);
+                        }
+                    }
+                }
+            }
         }
-
-        // Standard expression evaluation
-        last_val = eval_expression(ctx, &mut local_vars, stmt)?;
     }
 
-    Ok(last_val)
+    // Convert eval_res to JsValue
+    let res = if !eval_res.is_undefined() {
+        boa_val_to_js_value(&eval_res, &mut boa_ctx)
+    } else {
+        ctx.event.value.clone()
+    };
+
+    Ok(res)
+}
+
+fn json_to_js_value(val: &serde_json::Value) -> JsValue {
+    match val {
+        serde_json::Value::Null => JsValue::Null,
+        serde_json::Value::Bool(b) => JsValue::Boolean(*b),
+        serde_json::Value::Number(n) => JsValue::Number(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(s) => JsValue::String(s.clone()),
+        serde_json::Value::Array(arr) => JsValue::Array(arr.iter().map(json_to_js_value).collect()),
+        serde_json::Value::Object(map) => {
+            let mut obj = HashMap::new();
+            for (k, v) in map {
+                obj.insert(k.clone(), json_to_js_value(v));
+            }
+            JsValue::Object(obj)
+        }
+    }
+}
+
+fn boa_val_to_js_value(val: &boa_engine::JsValue, context: &mut boa_engine::Context) -> JsValue {
+    if val.is_null() {
+        JsValue::Null
+    } else if val.is_undefined() {
+        JsValue::Undefined
+    } else if let Some(b) = val.as_boolean() {
+        JsValue::Boolean(b)
+    } else if let Some(n) = val.as_number() {
+        JsValue::Number(n)
+    } else if let Some(s) = val.as_string() {
+        JsValue::String(s.to_std_string_escaped())
+    } else {
+        let s = val
+            .to_string(context)
+            .map(|s| s.to_std_string_escaped())
+            .unwrap_or_default();
+        JsValue::String(s)
+    }
 }
 
 /// Validates that script does not contain dangerous forbidden primitives (FR-12.10).
@@ -436,6 +706,7 @@ fn validate_sandbox_safety(script: &str) -> Result<()> {
 }
 
 /// Splits script text into top-level statements respecting string literals and parentheses/braces.
+#[allow(dead_code)]
 fn split_statements(code: &str) -> Vec<String> {
     let mut statements = Vec::new();
     let mut current = String::new();
@@ -500,6 +771,7 @@ fn split_statements(code: &str) -> Vec<String> {
 }
 
 /// Splits assignment statement (e.g. `event.value = 123` or `x += 5`).
+#[allow(dead_code)]
 fn split_assignment(stmt: &str) -> Option<(&str, &str)> {
     let bytes = stmt.as_bytes();
     let mut in_single = false;
@@ -538,6 +810,7 @@ fn split_assignment(stmt: &str) -> Option<(&str, &str)> {
 }
 
 /// Applies assignment to local variable, event, or form field.
+#[allow(dead_code)]
 fn apply_assignment(
     ctx: &mut JsExecutionContext,
     locals: &mut HashMap<String, JsValue>,
@@ -585,6 +858,7 @@ fn apply_assignment(
 }
 
 /// Handles conditional if (...) { ... } else { ... } statement.
+#[allow(dead_code)]
 fn handle_if_statement(
     ctx: &mut JsExecutionContext,
     locals: &mut HashMap<String, JsValue>,
@@ -632,6 +906,7 @@ fn handle_if_statement(
     }
 }
 
+#[allow(dead_code)]
 fn extract_then_else_blocks(code: &str) -> (String, Option<String>) {
     let trimmed = code.trim();
     if trimmed.starts_with('{') {
@@ -669,6 +944,7 @@ fn extract_then_else_blocks(code: &str) -> (String, Option<String>) {
     }
 }
 
+#[allow(dead_code)]
 fn execute_script_subcontext(
     ctx: &mut JsExecutionContext,
     locals: &mut HashMap<String, JsValue>,

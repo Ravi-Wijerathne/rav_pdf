@@ -9,7 +9,8 @@ use ravpdf_core::lexer::{Lexer, Token};
 use ravpdf_core::object::{Object, PdfDictionary};
 use std::collections::HashMap;
 use tiny_skia::{
-    Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform,
+    BlendMode, Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint,
+    PathBuilder, Pixmap, Point, RadialGradient, Rect, SpreadMode, Stroke, Transform,
 };
 
 /// The graphics state stack element conforming to ISO 32000-1 Section 8.4.
@@ -24,6 +25,7 @@ pub struct GraphicsState {
     pub line_cap: LineCap,
     pub line_join: LineJoin,
     pub miter_limit: f32,
+    pub blend_mode: BlendMode,
     pub text_matrix: Transform,
     pub text_line_matrix: Transform,
     pub font_name: String,
@@ -43,6 +45,7 @@ impl Default for GraphicsState {
             line_cap: LineCap::Butt,
             line_join: LineJoin::Miter,
             miter_limit: 10.0,
+            blend_mode: BlendMode::SourceOver,
             text_matrix: Transform::identity(),
             text_line_matrix: Transform::identity(),
             font_name: "Helvetica".into(),
@@ -61,6 +64,8 @@ pub struct RenderOptions {
     pub rotation: i64,
     /// Background color of the rendered page.
     pub background_color: Color,
+    /// Optional Content Groups (OCGs) to suppress / hide during rendering (FR-35.5).
+    pub hidden_ocgs: std::collections::HashSet<String>,
 }
 
 impl Default for RenderOptions {
@@ -69,6 +74,7 @@ impl Default for RenderOptions {
             zoom: 1.0,
             rotation: 0,
             background_color: Color::WHITE,
+            hidden_ocgs: std::collections::HashSet::new(),
         }
     }
 }
@@ -78,6 +84,9 @@ pub struct ContentInterpreter<'a> {
     doc: Option<&'a ravpdf_core::document::PdfDocument>,
     state: GraphicsState,
     state_stack: Vec<GraphicsState>,
+    current_mask: Option<Mask>,
+    mask_stack: Vec<Option<Mask>>,
+    pending_clip: Option<FillRule>,
     path_builder: Option<PathBuilder>,
     current_point: Option<(f32, f32)>,
     in_text_object: bool,
@@ -85,6 +94,8 @@ pub struct ContentInterpreter<'a> {
     pub zoom: f32,
     resources: Option<&'a PdfDictionary>,
     fonts: HashMap<String, FontEncodingInfo>,
+    pub hidden_ocgs: std::collections::HashSet<String>,
+    oc_suppression_depth: usize,
 }
 
 impl<'a> ContentInterpreter<'a> {
@@ -108,6 +119,9 @@ impl<'a> ContentInterpreter<'a> {
             doc: None,
             state: initial_state,
             state_stack: Vec::new(),
+            current_mask: None,
+            mask_stack: Vec::new(),
+            pending_clip: None,
             path_builder: None,
             current_point: None,
             in_text_object: false,
@@ -115,6 +129,8 @@ impl<'a> ContentInterpreter<'a> {
             zoom,
             resources: None,
             fonts: HashMap::new(),
+            hidden_ocgs: std::collections::HashSet::new(),
+            oc_suppression_depth: 0,
         }
     }
 
@@ -206,10 +222,14 @@ impl<'a> ContentInterpreter<'a> {
             // Graphics State Operators
             "q" => {
                 self.state_stack.push(self.state.clone());
+                self.mask_stack.push(self.current_mask.clone());
             }
             "Q" => {
                 if let Some(prev) = self.state_stack.pop() {
                     self.state = prev;
+                }
+                if let Some(prev_mask) = self.mask_stack.pop() {
+                    self.current_mask = prev_mask;
                 }
             }
             "cm" => {
@@ -459,8 +479,17 @@ impl<'a> ContentInterpreter<'a> {
                 }
                 self.paint_path(true, true, FillRule::EvenOdd);
             }
+            "W" => {
+                // Clipping path operator (nonzero winding rule) ISO 32000-1 Section 8.5.4
+                self.pending_clip = Some(FillRule::Winding);
+            }
+            "W*" => {
+                // Clipping path operator (even-odd rule) ISO 32000-1 Section 8.5.4
+                self.pending_clip = Some(FillRule::EvenOdd);
+            }
             "n" => {
-                // Clear path without painting
+                // Clear path after applying any pending clipping
+                self.apply_pending_clip();
                 self.path_builder = None;
             }
 
@@ -576,6 +605,28 @@ impl<'a> ContentInterpreter<'a> {
                     }
                 }
             }
+            // Smooth Shading (ISO 32000-1 Section 8.7.4)
+            "sh" => {
+                if let Some(name_obj) = args.first().and_then(Object::as_name) {
+                    let _ = self.render_shading(name_obj);
+                }
+            }
+            // Marked Content and Optional Content Groups / Layers (ISO 32000-1 Section 8.11, FR-35.5)
+            "BDC" | "BMC" => {
+                if args.first().and_then(Object::as_name) == Some("OC") {
+                    if let Some(prop_name) = args.get(1).and_then(Object::as_name) {
+                        let prop_name = prop_name.strip_prefix('/').unwrap_or(prop_name);
+                        if self.hidden_ocgs.contains(prop_name) {
+                            self.oc_suppression_depth += 1;
+                        }
+                    }
+                }
+            }
+            "EMC" => {
+                if self.oc_suppression_depth > 0 {
+                    self.oc_suppression_depth -= 1;
+                }
+            }
             _ => {
                 // Ignore unrecognized operators gracefully (NFR-03.3)
             }
@@ -584,15 +635,41 @@ impl<'a> ContentInterpreter<'a> {
         Ok(())
     }
 
+    fn apply_pending_clip(&mut self) {
+        if let Some(rule) = self.pending_clip.take() {
+            if let Some(ref pb) = self.path_builder {
+                if let Some(path) = pb.clone().finish() {
+                    let mut mask = match self.current_mask.take() {
+                        Some(m) => m,
+                        None => {
+                            let mut m = Mask::new(self.pixmap.width(), self.pixmap.height())
+                                .unwrap_or_else(|| Mask::new(1, 1).unwrap());
+                            m.data_mut().fill(255);
+                            m
+                        }
+                    };
+                    mask.intersect_path(&path, rule, true, self.state.ctm);
+                    self.current_mask = Some(mask);
+                }
+            }
+        }
+    }
+
     fn paint_path(&mut self, fill: bool, stroke: bool, rule: FillRule) {
+        self.apply_pending_clip();
+        if self.oc_suppression_depth > 0 {
+            self.path_builder = None;
+            return;
+        }
         if let Some(pb) = self.path_builder.take() {
             if let Some(path) = pb.finish() {
                 if fill {
                     let mut paint = Paint::default();
                     paint.set_color(self.state.fill_color.to_skia_color(self.state.fill_alpha));
+                    paint.blend_mode = self.state.blend_mode;
                     paint.anti_alias = true;
                     self.pixmap
-                        .fill_path(&path, &paint, rule, self.state.ctm, None);
+                        .fill_path(&path, &paint, rule, self.state.ctm, self.current_mask.as_ref());
                 }
                 if stroke {
                     let mut paint = Paint::default();
@@ -601,6 +678,7 @@ impl<'a> ContentInterpreter<'a> {
                             .stroke_color
                             .to_skia_color(self.state.stroke_alpha),
                     );
+                    paint.blend_mode = self.state.blend_mode;
                     paint.anti_alias = true;
 
                     let skia_stroke = Stroke {
@@ -612,7 +690,7 @@ impl<'a> ContentInterpreter<'a> {
                     };
 
                     self.pixmap
-                        .stroke_path(&path, &paint, &skia_stroke, self.state.ctm, None);
+                        .stroke_path(&path, &paint, &skia_stroke, self.state.ctm, self.current_mask.as_ref());
                 }
             }
         }
@@ -658,9 +736,20 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn render_image_xobject(&mut self, stream: &'a ravpdf_core::object::PdfStream) -> Result<()> {
+        if self.oc_suppression_depth > 0 {
+            return Ok(());
+        }
+        if let Some(oc_name) = stream.dict.get_name("OC") {
+            let oc_name = oc_name.strip_prefix('/').unwrap_or(oc_name);
+            if self.hidden_ocgs.contains(oc_name) {
+                return Ok(());
+            }
+        }
+
         let width = stream.dict.get_i64("Width").unwrap_or(0).max(1) as u32;
         let height = stream.dict.get_i64("Height").unwrap_or(0).max(1) as u32;
         let color_space = stream.dict.get_name("ColorSpace").unwrap_or("DeviceRGB");
+        let bpc = stream.dict.get_i64("BitsPerComponent").unwrap_or(8);
 
         let is_jpeg = stream.dict.get_name("Filter") == Some("DCTDecode")
             || (stream.raw_data.len() >= 2
@@ -687,32 +776,47 @@ impl<'a> ContentInterpreter<'a> {
         }
 
         let mut rgba_pixels = Vec::with_capacity((width * height * 4) as usize);
-        match color_space {
-            "DeviceGray" => {
-                for &g in &decoded_bytes {
-                    rgba_pixels.extend_from_slice(&[g, g, g, 255]);
+
+        if bpc == 1 {
+            // Bi-level 1-bit image (e.g. CCITTFaxDecode or JBIG2Decode)
+            let row_bytes = (width as usize + 7) / 8;
+            for y in 0..height {
+                let row_start = (y as usize) * row_bytes;
+                for x in 0..width {
+                    let byte = decoded_bytes.get(row_start + (x as usize / 8)).copied().unwrap_or(0);
+                    let bit = (byte >> (7 - (x % 8))) & 1;
+                    let val = if bit == 1 { 0u8 } else { 255u8 };
+                    rgba_pixels.extend_from_slice(&[val, val, val, 255]);
                 }
             }
-            "DeviceCMYK" => {
-                for chunk in decoded_bytes.chunks_exact(4) {
-                    let (c, m, y, k) = (
-                        chunk[0] as f32 / 255.0,
-                        chunk[1] as f32 / 255.0,
-                        chunk[2] as f32 / 255.0,
-                        chunk[3] as f32 / 255.0,
-                    );
-                    let (r, g, b) = PdfColor::Cmyk(c, m, y, k).to_rgb();
-                    rgba_pixels.extend_from_slice(&[
-                        (r * 255.0).round() as u8,
-                        (g * 255.0).round() as u8,
-                        (b * 255.0).round() as u8,
-                        255,
-                    ]);
+        } else {
+            match color_space {
+                "DeviceGray" => {
+                    for &g in &decoded_bytes {
+                        rgba_pixels.extend_from_slice(&[g, g, g, 255]);
+                    }
                 }
-            }
-            _ => {
-                for chunk in decoded_bytes.chunks_exact(3) {
-                    rgba_pixels.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+                "DeviceCMYK" => {
+                    for chunk in decoded_bytes.chunks_exact(4) {
+                        let (c, m, y, k) = (
+                            chunk[0] as f32 / 255.0,
+                            chunk[1] as f32 / 255.0,
+                            chunk[2] as f32 / 255.0,
+                            chunk[3] as f32 / 255.0,
+                        );
+                        let (r, g, b) = PdfColor::Cmyk(c, m, y, k).to_rgb();
+                        rgba_pixels.extend_from_slice(&[
+                            (r * 255.0).round() as u8,
+                            (g * 255.0).round() as u8,
+                            (b * 255.0).round() as u8,
+                            255,
+                        ]);
+                    }
+                }
+                _ => {
+                    for chunk in decoded_bytes.chunks_exact(3) {
+                        rgba_pixels.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+                    }
                 }
             }
         }
@@ -725,7 +829,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn draw_rgba_image(&mut self, img_w: u32, img_h: u32, rgba_bytes: &[u8]) -> Result<()> {
-        if img_w == 0 || img_h == 0 {
+        if img_w == 0 || img_h == 0 || self.oc_suppression_depth > 0 {
             return Ok(());
         }
 
@@ -758,11 +862,12 @@ impl<'a> ContentInterpreter<'a> {
         let paint = tiny_skia::PixmapPaint {
             quality: tiny_skia::FilterQuality::Bicubic,
             opacity: self.state.fill_alpha,
+            blend_mode: self.state.blend_mode,
             ..Default::default()
         };
 
         self.pixmap
-            .draw_pixmap(0, 0, img_pixmap.as_ref(), &paint, final_transform, None);
+            .draw_pixmap(0, 0, img_pixmap.as_ref(), &paint, final_transform, self.current_mask.as_ref());
 
         Ok(())
     }
@@ -824,11 +929,143 @@ impl<'a> ContentInterpreter<'a> {
                 if let Some(lw) = gs.get_f64("LW") {
                     self.state.line_width = (lw as f32).max(0.1);
                 }
+                if let Some(bm_obj) = gs.get("BM") {
+                    let mode_name = match bm_obj {
+                        Object::Name(n) => Some(n.as_str()),
+                        Object::Array(arr) => arr.first().and_then(Object::as_name),
+                        _ => None,
+                    };
+                    if let Some(bm) = mode_name {
+                        let bm = bm.strip_prefix('/').unwrap_or(bm);
+                        self.state.blend_mode = match bm {
+                            "Multiply" => BlendMode::Multiply,
+                            "Screen" => BlendMode::Screen,
+                            "Overlay" => BlendMode::Overlay,
+                            "Darken" => BlendMode::Darken,
+                            "Lighten" => BlendMode::Lighten,
+                            "ColorDodge" => BlendMode::ColorDodge,
+                            "ColorBurn" => BlendMode::ColorBurn,
+                            "HardLight" => BlendMode::HardLight,
+                            "SoftLight" => BlendMode::SoftLight,
+                            "Difference" => BlendMode::Difference,
+                            "Exclusion" => BlendMode::Exclusion,
+                            "Hue" => BlendMode::Hue,
+                            "Saturation" => BlendMode::Saturation,
+                            "Color" => BlendMode::Color,
+                            "Luminosity" => BlendMode::Luminosity,
+                            _ => BlendMode::SourceOver,
+                        };
+                    }
+                }
             }
         }
     }
 
+    fn render_shading(&mut self, name: &str) -> Result<()> {
+        if self.oc_suppression_depth > 0 {
+            return Ok(());
+        }
+        let doc = match self.doc {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+        let resources = match self.resources {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+        let shading_dict = match resources.get("Shading") {
+            Some(Object::Dictionary(d)) => Some(d),
+            Some(Object::Reference(id)) => doc.objects.get(id).and_then(Object::as_dict),
+            _ => None,
+        };
+        let shading_dict = match shading_dict {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+        let sh_obj = match shading_dict.get(name) {
+            Some(Object::Dictionary(d)) => Some(d),
+            Some(Object::Reference(id)) => doc.objects.get(id).and_then(Object::as_dict),
+            _ => None,
+        };
+        let sh = match sh_obj {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        let shading_type = sh.get_i64("ShadingType").unwrap_or(2);
+        let coords: Vec<f32> = sh
+            .get_array("Coords")
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Object::as_f64)
+                    .map(|v| v as f32)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let stops = vec![
+            GradientStop::new(0.0, Color::from_rgba8(240, 240, 240, 255)),
+            GradientStop::new(1.0, Color::from_rgba8(50, 50, 50, 255)),
+        ];
+
+        let shader = match shading_type {
+            2 => {
+                // Axial shading (LinearGradient)
+                if coords.len() >= 4 {
+                    LinearGradient::new(
+                        Point::from_xy(coords[0], coords[1]),
+                        Point::from_xy(coords[2], coords[3]),
+                        stops,
+                        SpreadMode::Pad,
+                        Transform::identity(),
+                    )
+                } else {
+                    None
+                }
+            }
+            3 => {
+                // Radial shading (RadialGradient)
+                if coords.len() >= 6 {
+                    RadialGradient::new(
+                        Point::from_xy(coords[0], coords[1]),
+                        Point::from_xy(coords[3], coords[4]),
+                        coords[5].max(coords[2]).max(1.0),
+                        stops,
+                        SpreadMode::Pad,
+                        Transform::identity(),
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(shader) = shader {
+            let mut paint = Paint::default();
+            paint.shader = shader;
+            paint.blend_mode = self.state.blend_mode;
+            paint.anti_alias = true;
+
+            let rect = Rect::from_xywh(
+                self.crop_box[0] as f32,
+                self.crop_box[1] as f32,
+                (self.crop_box[2] - self.crop_box[0]).abs() as f32,
+                (self.crop_box[3] - self.crop_box[1]).abs() as f32,
+            )
+            .unwrap_or_else(|| Rect::from_xywh(0.0, 0.0, 1000.0, 1000.0).unwrap());
+
+            self.pixmap
+                .fill_rect(rect, &paint, self.state.ctm, self.current_mask.as_ref());
+        }
+
+        Ok(())
+    }
+
     fn draw_text(&mut self, bytes: &[u8], text: &str) {
+        if self.oc_suppression_depth > 0 {
+            return;
+        }
         let font_key = self
             .state
             .font_name
@@ -1029,9 +1266,15 @@ impl<'a> ContentInterpreter<'a> {
                         let py = bounds.min.y as i32 + gy as i32;
                         if px >= 0 && px < pixmap_w && py >= 0 && py < pixmap_h {
                             let idx = (py * pixmap_w + px) as usize;
+                            let mask_alpha = if let Some(ref mask) = self.current_mask {
+                                let m_idx = (py as usize) * (pixmap_w as usize) + (px as usize);
+                                mask.data().get(m_idx).copied().unwrap_or(0) as f32 / 255.0
+                            } else {
+                                1.0
+                            };
                             // Apply perceptual stem darkening (gamma correction for crisp high-contrast anti-aliasing)
                             let boosted_cov = coverage.powf(0.85);
-                            let eff_a = boosted_cov * a_base;
+                            let eff_a = boosted_cov * a_base * mask_alpha;
                             if eff_a > 0.005 {
                                 let existing = pixels[idx];
                                 let inv_a = 1.0 - eff_a;

@@ -44,6 +44,7 @@ pub fn render_page(
     if !content_bytes.is_empty() {
         let mut interpreter =
             ContentInterpreter::with_doc(&mut pixmap, doc, page.crop_box, options.zoom);
+        interpreter.hidden_ocgs = options.hidden_ocgs.clone();
         let _ = interpreter.interpret(&content_bytes, page.resources.as_ref());
     }
 
@@ -73,6 +74,7 @@ pub fn render_thumbnail(
         zoom,
         rotation: page.rotate,
         background_color: Color::WHITE,
+        hidden_ocgs: std::collections::HashSet::new(),
     };
 
     render_page(doc, page_index, &options)
@@ -207,5 +209,50 @@ mod tests {
         assert_eq!(px.red(), 255);
         assert_eq!(px.green(), 0);
         assert_eq!(px.blue(), 0);
+    }
+
+    #[test]
+    fn test_render_clipping_path_w_operator() {
+        let mut doc = PdfDocument::new();
+        // Set a 50x50 clipping rectangle, then try to fill a 200x200 red rectangle
+        let content = b"q\n 0 0 50 50 re\n W\n n\n 1 0 0 rg\n 0 0 200 200 re\n f\n Q\n";
+        doc.add_page_with_content(200.0, 200.0, content.to_vec());
+
+        let options = RenderOptions::default();
+        let pixmap = render_page(&doc, 0, &options).expect("render clipping");
+
+        // Pixel inside clipping region (e.g. at x: 25, y: 200 - 25 = 175) should be red
+        let inside = pixmap.pixel(25, 175).unwrap();
+        assert_eq!(inside.red(), 255);
+        assert_eq!(inside.green(), 0);
+
+        // Pixel outside clipping region (e.g. at x: 100, y: 100) should remain white background
+        let outside = pixmap.pixel(100, 100).unwrap();
+        assert_eq!(outside.red(), 255);
+        assert_eq!(outside.green(), 255);
+        assert_eq!(outside.blue(), 255);
+    }
+
+    #[test]
+    fn test_render_optional_content_layer_suppression() {
+        let mut doc = PdfDocument::new();
+        // Layer1 has a green rectangle; outside has a blue rectangle
+        let content = b"/OC /HiddenLayer BDC\n 0 1 0 rg\n 0 0 100 100 re\n f\n EMC\n";
+        doc.add_page_with_content(100.0, 100.0, content.to_vec());
+
+        let mut hidden = std::collections::HashSet::new();
+        hidden.insert("HiddenLayer".to_string());
+
+        let options = RenderOptions {
+            hidden_ocgs: hidden,
+            ..Default::default()
+        };
+        let pixmap = render_page(&doc, 0, &options).expect("render hidden layer");
+
+        // The layer was suppressed, so the canvas remains white
+        let px = pixmap.pixel(50, 50).unwrap();
+        assert_eq!(px.red(), 255);
+        assert_eq!(px.green(), 255);
+        assert_eq!(px.blue(), 255);
     }
 }

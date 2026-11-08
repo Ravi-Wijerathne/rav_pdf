@@ -18,3 +18,5 @@ sha2.workspace = true
 md-5.workspace = true
 serde.workspace = true
 chrono.workspace = true
+rsa.workspace = true
+rand.workspace = true

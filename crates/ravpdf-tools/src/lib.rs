@@ -25,6 +25,7 @@ pub mod linearize;
 pub mod measure;
 pub mod metadata;
 pub mod ocr;
+pub mod office;
 pub mod optimize;
 pub mod plugin;
 pub mod portfolio;
@@ -82,6 +83,10 @@ pub use metadata::{get_document_info, set_document_info, DocumentInfo};
 pub use ocr::{
     create_pdf_from_image_with_ocr, perform_ocr_document, perform_ocr_on_page, OcrConfig,
     OcrDocumentResult, OcrLine, OcrOutputMode, OcrPageResult, OcrWord,
+};
+pub use office::{
+    export_pdf_to_docx, export_pdf_to_pptx, export_pdf_to_xlsx, import_docx_from_bytes,
+    import_pptx_from_bytes, import_xlsx_from_bytes, OfficeImportOptions,
 };
 pub use optimize::{audit_space_usage, optimize_document, OptimizationStats, SpaceAudit};
 pub use plugin::{

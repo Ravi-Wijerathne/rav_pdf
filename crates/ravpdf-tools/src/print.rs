@@ -465,7 +465,7 @@ pub fn generate_postscript(doc: &PdfDocument, config: &PrintJobConfig) -> Result
     let (target_w, target_h) = config.target_sheet_size;
 
     let mut ps = String::new();
-    // 1. PostScript Header and DSC Comments
+    // 1. PostScript Header and DSC Comments (conforming to DSC 3.0)
     ps.push_str("%!PS-Adobe-3.0\n");
     ps.push_str("%%Title: RavPDF Printed Document\n");
     ps.push_str("%%Creator: RavPDF Document Engine\n");
@@ -474,41 +474,263 @@ pub fn generate_postscript(doc: &PdfDocument, config: &PrintJobConfig) -> Result
         "%%BoundingBox: 0 0 {:.0} {:.0}\n",
         target_w, target_h
     ));
+    ps.push_str("%%DocumentData: Clean7Bit\n");
+    ps.push_str("%%LanguageLevel: 2\n");
     ps.push_str("%%EndComments\n\n");
 
-    // 2. Document Setup
+    // 2. Document Setup and Definitions Prolog
     ps.push_str("%%BeginProlog\n");
+    ps.push_str("/rectpath { 4 2 roll moveto 1 index 0 rlineto 0 exch rlineto neg 0 rlineto closepath } bind def\n");
+    ps.push_str("/rectfill { rectpath fill } bind def\n");
+    ps.push_str("/rectstroke { rectpath stroke } bind def\n");
+    ps.push_str("/picstr 4096 string def\n");
     ps.push_str("/Courier findfont 12 scalefont setfont\n");
     ps.push_str("%%EndProlog\n\n");
 
     // 3. Page Loop
     for (seq_idx, &page_idx) in pages.iter().enumerate() {
         ps.push_str(&format!("%%Page: {} {}\n", page_idx + 1, seq_idx + 1));
+        ps.push_str("%%BeginPageSetup\n");
         ps.push_str("gsave\n");
-
-        // Set clipping and background
         ps.push_str(&format!(
             "0 0 {:.2} {:.2} rectclip\n",
             target_w, target_h
         ));
+        ps.push_str("%%EndPageSetup\n\n");
 
-        // Draw header text
-        ps.push_str("50 750 moveto\n");
-        ps.push_str(&format!(
-            "(RavPDF Print Output - Page {}) show\n",
-            page_idx + 1
-        ));
+        // Attempt vector translation of page content stream (FR-35.10)
+        let mut vector_rendered = false;
+        if let Ok(content_bytes) = doc.get_page_content(page_idx) {
+            if !content_bytes.is_empty() {
+                let vector_ps = translate_content_stream_to_postscript(&content_bytes);
+                if !vector_ps.trim().is_empty() {
+                    ps.push_str(&vector_ps);
+                    vector_rendered = true;
+                }
+            }
+        }
 
-        // Draw decorative border
-        ps.push_str("0.5 setlinewidth\n");
-        ps.push_str("40 40 532 712 rectstroke\n");
+        // If no vector content was present, render high-fidelity PostScript Level 2 colorimage
+        if !vector_rendered {
+            if let Ok(pixmap) = ravpdf_render::render_page(
+                doc,
+                page_idx,
+                &ravpdf_render::RenderOptions {
+                    zoom: 1.0,
+                    ..Default::default()
+                },
+            ) {
+                let px_w = pixmap.width();
+                let px_h = pixmap.height();
+                let raw_rgba = pixmap.data();
+
+                ps.push_str("gsave\n");
+                ps.push_str(&format!("0 0 translate\n{:.2} {:.2} scale\n", target_w, target_h));
+                ps.push_str(&format!(
+                    "{} {} 8 [{} 0 0 -{} 0 {}]\n",
+                    px_w, px_h, px_w, px_h, px_h
+                ));
+                ps.push_str("{ currentfile picstr readhexstring pop } false 3 colorimage\n");
+
+                let mut col = 0;
+                for chunk in raw_rgba.chunks(4) {
+                    if chunk.len() >= 3 {
+                        ps.push_str(&format!("{:02x}{:02x}{:02x}", chunk[0], chunk[1], chunk[2]));
+                        col += 6;
+                        if col >= 72 {
+                            ps.push('\n');
+                            col = 0;
+                        }
+                    }
+                }
+                if col > 0 {
+                    ps.push('\n');
+                }
+                ps.push_str("grestore\n");
+            }
+        }
 
         ps.push_str("grestore\n");
-        ps.push_str("showpage\n\n");
+        ps.push_str("showpage\n");
+        ps.push_str("%%PageTrailer\n\n");
     }
 
+    ps.push_str("%%Trailer\n");
     ps.push_str("%%EOF\n");
     Ok(ps)
+}
+
+/// Translates PDF content stream operators into equivalent Level 2/3 PostScript operators.
+fn translate_content_stream_to_postscript(data: &[u8]) -> String {
+    use ravpdf_core::lexer::{Lexer, Token};
+
+    let mut lexer = Lexer::new(data);
+    let mut ps = String::new();
+    let mut stack: Vec<Token> = Vec::new();
+
+    while let Ok(token) = lexer.next_token() {
+        match token {
+            Token::Eof => break,
+            Token::Keyword(ref op) => {
+                match op.as_str() {
+                    "q" => ps.push_str("gsave\n"),
+                    "Q" => ps.push_str("grestore\n"),
+                    "cm" => {
+                        if stack.len() >= 6 {
+                            let f = pop_num(&mut stack);
+                            let e = pop_num(&mut stack);
+                            let d = pop_num(&mut stack);
+                            let c = pop_num(&mut stack);
+                            let b = pop_num(&mut stack);
+                            let a = pop_num(&mut stack);
+                            ps.push_str(&format!("[{:.4} {:.4} {:.4} {:.4} {:.4} {:.4}] concat\n", a, b, c, d, e, f));
+                        }
+                    }
+                    "w" => {
+                        let w = pop_num(&mut stack);
+                        ps.push_str(&format!("{:.2} setlinewidth\n", w));
+                    }
+                    "J" => {
+                        let cap = pop_num(&mut stack) as i64;
+                        ps.push_str(&format!("{} setlinecap\n", cap));
+                    }
+                    "j" => {
+                        let join = pop_num(&mut stack) as i64;
+                        ps.push_str(&format!("{} setlinejoin\n", join));
+                    }
+                    "M" => {
+                        let m = pop_num(&mut stack);
+                        ps.push_str(&format!("{:.2} setmiterlimit\n", m));
+                    }
+                    "m" => {
+                        let y = pop_num(&mut stack);
+                        let x = pop_num(&mut stack);
+                        ps.push_str(&format!("{:.2} {:.2} moveto\n", x, y));
+                    }
+                    "l" => {
+                        let y = pop_num(&mut stack);
+                        let x = pop_num(&mut stack);
+                        ps.push_str(&format!("{:.2} {:.2} lineto\n", x, y));
+                    }
+                    "c" => {
+                        let y3 = pop_num(&mut stack);
+                        let x3 = pop_num(&mut stack);
+                        let y2 = pop_num(&mut stack);
+                        let x2 = pop_num(&mut stack);
+                        let y1 = pop_num(&mut stack);
+                        let x1 = pop_num(&mut stack);
+                        ps.push_str(&format!(
+                            "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} curveto\n",
+                            x1, y1, x2, y2, x3, y3
+                        ));
+                    }
+                    "h" => ps.push_str("closepath\n"),
+                    "re" => {
+                        let h = pop_num(&mut stack);
+                        let w = pop_num(&mut stack);
+                        let y = pop_num(&mut stack);
+                        let x = pop_num(&mut stack);
+                        ps.push_str(&format!("{:.2} {:.2} {:.2} {:.2} rectpath\n", x, y, w, h));
+                    }
+                    "S" => ps.push_str("stroke\n"),
+                    "s" => ps.push_str("closepath stroke\n"),
+                    "f" | "F" => ps.push_str("fill\n"),
+                    "f*" => ps.push_str("eofill\n"),
+                    "B" => ps.push_str("gsave fill grestore stroke\n"),
+                    "B*" => ps.push_str("gsave eofill grestore stroke\n"),
+                    "b" => ps.push_str("closepath gsave fill grestore stroke\n"),
+                    "b*" => ps.push_str("closepath gsave eofill grestore stroke\n"),
+                    "n" => ps.push_str("newpath\n"),
+                    "W" => ps.push_str("clip\n"),
+                    "W*" => ps.push_str("eoclip\n"),
+                    "g" | "G" => {
+                        let g = pop_num(&mut stack);
+                        ps.push_str(&format!("{:.3} setgray\n", g));
+                    }
+                    "rg" | "RG" => {
+                        let b = pop_num(&mut stack);
+                        let g = pop_num(&mut stack);
+                        let r = pop_num(&mut stack);
+                        ps.push_str(&format!("{:.3} {:.3} {:.3} setrgbcolor\n", r, g, b));
+                    }
+                    "k" | "K" => {
+                        let k = pop_num(&mut stack);
+                        let y = pop_num(&mut stack);
+                        let m = pop_num(&mut stack);
+                        let c = pop_num(&mut stack);
+                        ps.push_str(&format!("{:.3} {:.3} {:.3} {:.3} setcmykcolor\n", c, m, y, k));
+                    }
+                    "BT" => ps.push_str("% BT\n"),
+                    "ET" => ps.push_str("% ET\n"),
+                    "Tf" => {
+                        let sz = pop_num(&mut stack);
+                        let font_name = match stack.pop() {
+                            Some(Token::Name(n)) => n,
+                            _ => "Helvetica".to_string(),
+                        };
+                        let ps_font = match font_name.as_str() {
+                            "F2" => "Helvetica-Bold",
+                            "F3" => "Times-Roman",
+                            "F4" => "Courier",
+                            _ => "Helvetica",
+                        };
+                        ps.push_str(&format!("/{} findfont {:.2} scalefont setfont\n", ps_font, sz));
+                    }
+                    "Td" | "TD" => {
+                        let ty = pop_num(&mut stack);
+                        let tx = pop_num(&mut stack);
+                        ps.push_str(&format!("{:.2} {:.2} moveto\n", tx, ty));
+                    }
+                    "Tj" => {
+                        if let Some(Token::StringLiteral(bytes)) = stack.pop() {
+                            let text = String::from_utf8_lossy(&bytes);
+                            ps.push_str(&format!("({}) show\n", escape_ps_string(&text)));
+                        }
+                    }
+                    "'" => {
+                        if let Some(Token::StringLiteral(bytes)) = stack.pop() {
+                            let text = String::from_utf8_lossy(&bytes);
+                            ps.push_str(&format!("0 -14 rmoveto ({}) show\n", escape_ps_string(&text)));
+                        }
+                    }
+                    _ => {
+                        // Clear stack for unhandled operator
+                        stack.clear();
+                    }
+                }
+            }
+            other => {
+                stack.push(other);
+            }
+        }
+    }
+
+    ps
+}
+
+fn pop_num(stack: &mut Vec<ravpdf_core::lexer::Token>) -> f64 {
+    use ravpdf_core::lexer::Token;
+    match stack.pop() {
+        Some(Token::Real(r)) => r,
+        Some(Token::Integer(i)) => i as f64,
+        _ => 0.0,
+    }
+}
+
+fn escape_ps_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '(' => out.push_str("\\("),
+            ')' => out.push_str("\\)"),
+            '\\' => out.push_str("\\\\"),
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str(" "),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Generates a print preview summary and layout metrics (FR-35.9).
@@ -677,5 +899,21 @@ mod tests {
         assert!(ps.contains("%%Pages: 2"));
         assert!(ps.contains("showpage"));
         assert!(ps.contains("%%EOF"));
+    }
+
+    #[test]
+    fn test_postscript_vector_operator_translation() {
+        let content = b"q 1 0 0 rg 50 100 200 150 re f 0 0 1 RG 2 w 10 20 m 100 200 l S Q";
+        let ps = translate_content_stream_to_postscript(content);
+        assert!(ps.contains("gsave"));
+        assert!(ps.contains("1.000 0.000 0.000 setrgbcolor"));
+        assert!(ps.contains("50.00 100.00 200.00 150.00 rectpath"));
+        assert!(ps.contains("fill"));
+        assert!(ps.contains("0.000 0.000 1.000 setrgbcolor"));
+        assert!(ps.contains("2.00 setlinewidth"));
+        assert!(ps.contains("10.00 20.00 moveto"));
+        assert!(ps.contains("100.00 200.00 lineto"));
+        assert!(ps.contains("stroke"));
+        assert!(ps.contains("grestore"));
     }
 }
