@@ -43,10 +43,13 @@ pub struct DocumentTab {
     pub thumbnail_textures: HashMap<usize, egui::TextureHandle>,
     pub continuous_page_textures: HashMap<usize, egui::TextureHandle>,
     pub continuous_page_order: VecDeque<usize>,
+    pub page_dimensions: Vec<(f32, f32)>,
     pub cached_page_index: Option<usize>,
     pub cached_zoom: Option<f32>,
     pub cached_render_zoom: Option<f32>,
+    pub cached_continuous_render_zoom: Option<f32>,
     pub cached_rotation: Option<i64>,
+    pub cached_continuous_rotation: Option<i64>,
     pub cached_plate_config: Option<PlateSeparationConfig>,
     pub cached_soft_proof: Option<SoftProofConfig>,
     pub raw_file_bytes: Option<Vec<u8>>,
@@ -54,10 +57,40 @@ pub struct DocumentTab {
 }
 
 impl DocumentTab {
+    /// Computes dimensions (width, height in pt) for every page in the document in a single pass.
+    pub fn compute_page_dimensions(doc: &PdfDocument) -> Vec<(f32, f32)> {
+        let page_ids = doc.page_ids();
+        let mut dims = Vec::with_capacity(page_ids.len());
+        for &id in &page_ids {
+            if let Some(dict) = doc.get_object(id).and_then(|o| o.as_dict()) {
+                let media_box = doc
+                    .resolve_box(dict, "MediaBox")
+                    .unwrap_or([0.0, 0.0, 612.0, 792.0]);
+                let crop_box = doc.resolve_box(dict, "CropBox").unwrap_or(media_box);
+                let w = (crop_box[2] - crop_box[0]).abs() as f32;
+                let h = (crop_box[3] - crop_box[1]).abs() as f32;
+                dims.push((w, h));
+            } else {
+                dims.push((612.0, 792.0));
+            }
+        }
+        dims
+    }
+
+    /// Fast O(1) dimension lookup for any page in points.
+    pub fn get_page_dim(&self, page_idx: usize) -> (f32, f32) {
+        if let Some(dim) = self.page_dimensions.get(page_idx) {
+            *dim
+        } else {
+            (612.0, 792.0)
+        }
+    }
+
     /// Creates a new document tab with the provided document.
     pub fn new(id: usize, title: String, doc: PdfDocument, file_path: Option<PathBuf>) -> Self {
         let bookmarks = get_document_bookmarks(&doc).unwrap_or_default();
         let metadata = get_document_info(&doc).ok();
+        let page_dimensions = Self::compute_page_dimensions(&doc);
 
         Self {
             id,
@@ -76,10 +109,13 @@ impl DocumentTab {
             thumbnail_textures: HashMap::new(),
             continuous_page_textures: HashMap::new(),
             continuous_page_order: VecDeque::new(),
+            page_dimensions,
             cached_page_index: None,
             cached_zoom: None,
             cached_render_zoom: None,
+            cached_continuous_render_zoom: None,
             cached_rotation: None,
+            cached_continuous_rotation: None,
             cached_plate_config: None,
             cached_soft_proof: None,
             raw_file_bytes: None,
@@ -95,6 +131,14 @@ impl DocumentTab {
         self.continuous_page_order.clear();
         self.cached_zoom = None;
         self.cached_render_zoom = None;
+        self.cached_continuous_render_zoom = None;
+        self.cached_continuous_rotation = None;
+        self.page_dimensions = Self::compute_page_dimensions(&self.doc);
+    }
+
+    /// Invalidates only the single-page texture when navigating pages (preserving continuous & thumbnail caches).
+    pub fn invalidate_page_texture(&mut self) {
+        self.page_texture = None;
     }
 
     /// Retrieves an existing page texture or rasterizes it on demand for continuous scrolling with bounded LRU cache (FR-01.2.2, NFR-01.3, NFR-01.8).
@@ -103,6 +147,19 @@ impl DocumentTab {
         ctx: &egui::Context,
         page_idx: usize,
     ) -> Option<egui::TextureHandle> {
+        let ppp = ctx.pixels_per_point();
+        let render_zoom = self.zoom * ppp;
+
+        // If zoom or rotation changed, invalidate continuous cache so pages render at the new resolution
+        if self.cached_continuous_render_zoom != Some(render_zoom)
+            || self.cached_continuous_rotation != Some(self.rotation)
+        {
+            self.continuous_page_textures.clear();
+            self.continuous_page_order.clear();
+            self.cached_continuous_render_zoom = Some(render_zoom);
+            self.cached_continuous_rotation = Some(self.rotation);
+        }
+
         if let Some(tex) = self.continuous_page_textures.get(&page_idx) {
             if let Some(pos) = self.continuous_page_order.iter().position(|&p| p == page_idx) {
                 self.continuous_page_order.remove(pos);
@@ -114,16 +171,14 @@ impl DocumentTab {
             return None;
         }
 
-        // Bounded LRU cache eviction (NFR-01.8: max 10 cached continuous pages)
-        const MAX_CACHED_PAGES: usize = 10;
+        // Bounded LRU cache eviction (NFR-01.8: max 32 cached continuous pages)
+        const MAX_CACHED_PAGES: usize = 32;
         while self.continuous_page_order.len() >= MAX_CACHED_PAGES {
             if let Some(oldest) = self.continuous_page_order.pop_front() {
                 self.continuous_page_textures.remove(&oldest);
             }
         }
 
-        let ppp = ctx.pixels_per_point();
-        let render_zoom = self.zoom * ppp;
         let options = RenderOptions {
             zoom: render_zoom,
             rotation: self.rotation,

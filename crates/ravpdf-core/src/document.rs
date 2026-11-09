@@ -309,7 +309,7 @@ impl PdfDocument {
         })
     }
 
-    fn resolve_box(&self, page_dict: &PdfDictionary, box_name: &str) -> Option<[f64; 4]> {
+    pub fn resolve_box(&self, page_dict: &PdfDictionary, box_name: &str) -> Option<[f64; 4]> {
         if let Some(arr) = page_dict.get_array(box_name) {
             if arr.len() >= 4 {
                 let x1 = arr[0].as_f64()?;
