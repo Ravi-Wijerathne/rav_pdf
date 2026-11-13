@@ -171,4 +171,5 @@ jobs:
       base64-subjects: "${{ needs.publish-release.outputs.hashes }}"
       upload-assets: true
       upload-tag-name: "${{ needs.publish-release.outputs.release_tag }}"
+      private-repository: true
 
