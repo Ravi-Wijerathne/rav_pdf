@@ -11,9 +11,6 @@ on:
         required: false
         default: ""
 
-permissions:
-  contents: read
-
 jobs:
   build-matrix:
     name: Build (${{ matrix.name }})
@@ -35,7 +32,7 @@ jobs:
             archive: tar.gz
             binary_ext: ""
           # macOS Intel x86_64 (NFR-06.1)
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             name: macos-x86_64
             archive: tar.gz

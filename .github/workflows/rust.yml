@@ -2,9 +2,10 @@ name: Rust
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "edit" ]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "edit" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
