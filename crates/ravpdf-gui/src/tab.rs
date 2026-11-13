@@ -67,8 +67,12 @@ impl DocumentTab {
                     .resolve_box(dict, "MediaBox")
                     .unwrap_or([0.0, 0.0, 612.0, 792.0]);
                 let crop_box = doc.resolve_box(dict, "CropBox").unwrap_or(media_box);
-                let w = (crop_box[2] - crop_box[0]).abs() as f32;
-                let h = (crop_box[3] - crop_box[1]).abs() as f32;
+                let mut w = (crop_box[2] - crop_box[0]).abs() as f32;
+                let mut h = (crop_box[3] - crop_box[1]).abs() as f32;
+                let rot = doc.resolve_i64(dict, "Rotate").unwrap_or(0).rem_euclid(360);
+                if rot == 90 || rot == 270 {
+                    std::mem::swap(&mut w, &mut h);
+                }
                 dims.push((w, h));
             } else {
                 dims.push((612.0, 792.0));
@@ -77,13 +81,14 @@ impl DocumentTab {
         dims
     }
 
-    /// Fast O(1) dimension lookup for any page in points.
+    /// Fast O(1) dimension lookup for any page in points, taking view display rotation into account.
     pub fn get_page_dim(&self, page_idx: usize) -> (f32, f32) {
-        if let Some(dim) = self.page_dimensions.get(page_idx) {
-            *dim
-        } else {
-            (612.0, 792.0)
+        let (mut w, mut h) = self.page_dimensions.get(page_idx).copied().unwrap_or((612.0, 792.0));
+        let view_rot = self.rotation.rem_euclid(360);
+        if view_rot == 90 || view_rot == 270 {
+            std::mem::swap(&mut w, &mut h);
         }
+        (w, h)
     }
 
     /// Creates a new document tab with the provided document.
