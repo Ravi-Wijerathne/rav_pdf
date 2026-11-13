@@ -453,13 +453,7 @@ impl DocumentTab {
                     let name = dict.get_str("Name").unwrap_or_else(|| "Unnamed Layer".to_string());
                     let is_default_off = default_off_ids.contains(&ocg_id_str);
                     let is_hidden_by_user = self.hidden_ocgs.contains(&ocg_id_str) || self.hidden_ocgs.contains(&name);
-                    let visible = if is_hidden_by_user {
-                        false
-                    } else if is_default_off {
-                        false
-                    } else {
-                        true
-                    };
+                    let visible = !is_hidden_by_user && !is_default_off;
 
                     layers.push(PdfLayer {
                         id: ocg_id_str,

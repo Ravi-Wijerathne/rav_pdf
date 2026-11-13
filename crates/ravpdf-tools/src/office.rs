@@ -557,26 +557,23 @@ fn parse_xlsx_worksheet(xml: &str, shared_strings: &[String]) -> Result<BTreeMap
                 cell_val.push_str(&e.unescape().unwrap_or_default());
             }
             Ok(Event::End(ref e)) => {
-                match e.name().as_ref() {
-                    b"v" => {
-                        in_v = false;
-                        let final_str = if is_shared_string {
-                            if let Ok(idx) = cell_val.parse::<usize>() {
-                                shared_strings.get(idx).cloned().unwrap_or(cell_val.clone())
-                            } else {
-                                cell_val.clone()
-                            }
+                if e.name().as_ref() == b"v" {
+                    in_v = false;
+                    let final_str = if is_shared_string {
+                        if let Ok(idx) = cell_val.parse::<usize>() {
+                            shared_strings.get(idx).cloned().unwrap_or(cell_val.clone())
                         } else {
                             cell_val.clone()
-                        };
+                        }
+                    } else {
+                        cell_val.clone()
+                    };
 
-                        rows.entry(current_row).or_default().push(SheetCell {
-                            col: current_col,
-                            val: final_str,
-                        });
-                        cell_val.clear();
-                    }
-                    _ => {}
+                    rows.entry(current_row).or_default().push(SheetCell {
+                        col: current_col,
+                        val: final_str,
+                    });
+                    cell_val.clear();
                 }
             }
             Ok(Event::Eof) => break,
@@ -622,7 +619,7 @@ fn render_xlsx_grid_to_pdf(
         .max()
         .unwrap_or(0)
         + 1;
-    let num_cols = max_col.max(4).min(10); // Clamp to printable columns
+    let num_cols = max_col.clamp(4, 10); // Clamp to printable columns
     let col_w = content_w / (num_cols as f64);
     let row_h = 20.0;
     let mut cursor_y = page_h - margin;

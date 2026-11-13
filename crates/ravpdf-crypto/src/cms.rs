@@ -230,7 +230,7 @@ pub fn verify_cms_signed_data(
                         if tag_sig == TAG_OCTET_STRING {
                             if let Ok(pub_key) = extract_rsa_public_key_from_cert(certs_val) {
                                 let verifying_key = VerifyingKey::<Sha256>::new(pub_key);
-                                let attr_hash = Sha256::digest(&encode_tlv(TAG_SET, sa_val));
+                                let attr_hash = Sha256::digest(encode_tlv(TAG_SET, sa_val));
                                 if let Ok(sig) = rsa::pkcs1v15::Signature::try_from(sig_val) {
                                     if verifying_key.verify_prehash(&attr_hash, &sig).is_ok() {
                                         rsa_sig_verified = true;
