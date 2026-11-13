@@ -669,7 +669,7 @@ impl CcittFaxParams {
 pub fn decode_ccitt_fax(data: &[u8], params: &CcittFaxParams) -> Result<Vec<u8>> {
     let width = params.columns.max(1);
     let height = if params.rows > 0 { Some(params.rows) } else { None };
-    let bytes_per_row = (width as usize + 7) / 8;
+    let bytes_per_row = (width as usize).div_ceil(8);
     let mut output = Vec::new();
 
     let mut line_decoder = |line: &[u32]| {
@@ -703,7 +703,7 @@ pub fn decode_ccitt_fax(data: &[u8], params: &CcittFaxParams) -> Result<Vec<u8>>
 
 /// CCITTFaxEncode: Compresses bi-level raster bitmap data into CCITT Group 4 MMR facsimile format.
 pub fn encode_ccitt_fax(data: &[u8], width: u32, height: u32, black_is_1: bool) -> Result<Vec<u8>> {
-    let bytes_per_row = (width as usize + 7) / 8;
+    let bytes_per_row = (width as usize).div_ceil(8);
     let writer = fax::VecWriter::new();
     let mut encoder = fax::encoder::Encoder::new(writer);
 
@@ -1082,7 +1082,7 @@ mod tests {
     fn test_ccitt_fax_roundtrip_g4() {
         let width = 64u32;
         let height = 8u32;
-        let bytes_per_row = (width as usize + 7) / 8;
+        let bytes_per_row = (width as usize).div_ceil(8);
         let mut bitmap = vec![0u8; bytes_per_row * height as usize];
         // Create an alternating checkerboard pattern
         for y in 0..height as usize {
@@ -1109,7 +1109,7 @@ mod tests {
     fn test_ccitt_fax_dispatch_and_aliases() {
         let width = 32u32;
         let height = 4u32;
-        let bytes_per_row = (width as usize + 7) / 8;
+        let bytes_per_row = (width as usize).div_ceil(8);
         let bitmap = vec![0xF0; bytes_per_row * height as usize];
 
         let encoded = encode_ccitt_fax(&bitmap, width, height, false).unwrap();

@@ -162,7 +162,7 @@ impl PdfColor {
 /// Converts CIE 1931 XYZ tristimulus values to sRGB.
 fn xyz_to_srgb(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
     let r_lin = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z;
-    let g_lin = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z;
+    let g_lin = -0.969_266 * x + 1.8760108 * y + 0.041556 * z;
     let b_lin = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z;
 
     let gamma_map = |c: f32| -> f32 {

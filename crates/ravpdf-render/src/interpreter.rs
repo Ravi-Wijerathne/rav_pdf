@@ -622,10 +622,8 @@ impl<'a> ContentInterpreter<'a> {
                     }
                 }
             }
-            "EMC" => {
-                if self.oc_suppression_depth > 0 {
-                    self.oc_suppression_depth -= 1;
-                }
+            "EMC" if self.oc_suppression_depth > 0 => {
+                self.oc_suppression_depth -= 1;
             }
             _ => {
                 // Ignore unrecognized operators gracefully (NFR-03.3)
@@ -779,7 +777,7 @@ impl<'a> ContentInterpreter<'a> {
 
         if bpc == 1 {
             // Bi-level 1-bit image (e.g. CCITTFaxDecode or JBIG2Decode)
-            let row_bytes = (width as usize + 7) / 8;
+            let row_bytes = (width as usize).div_ceil(8);
             for y in 0..height {
                 let row_start = (y as usize) * row_bytes;
                 for x in 0..width {
@@ -863,7 +861,6 @@ impl<'a> ContentInterpreter<'a> {
             quality: tiny_skia::FilterQuality::Bicubic,
             opacity: self.state.fill_alpha,
             blend_mode: self.state.blend_mode,
-            ..Default::default()
         };
 
         self.pixmap
@@ -1042,10 +1039,12 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         if let Some(shader) = shader {
-            let mut paint = Paint::default();
-            paint.shader = shader;
-            paint.blend_mode = self.state.blend_mode;
-            paint.anti_alias = true;
+            let paint = Paint {
+                shader,
+                blend_mode: self.state.blend_mode,
+                anti_alias: true,
+                ..Default::default()
+            };
 
             let rect = Rect::from_xywh(
                 self.crop_box[0] as f32,

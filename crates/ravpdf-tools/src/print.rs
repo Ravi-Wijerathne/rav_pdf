@@ -726,7 +726,7 @@ fn escape_ps_string(s: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\r' => out.push_str("\\r"),
             '\n' => out.push_str("\\n"),
-            '\t' => out.push_str(" "),
+            '\t' => out.push(' '),
             _ => out.push(c),
         }
     }
