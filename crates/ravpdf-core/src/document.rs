@@ -270,7 +270,7 @@ impl PdfDocument {
             .resolve_box(page_dict, "CropBox")
             .unwrap_or(media_box);
 
-        let rotate = page_dict.get_i64("Rotate").unwrap_or(0);
+        let rotate = self.resolve_i64(page_dict, "Rotate").unwrap_or(0);
 
         // Collect content stream IDs
         let mut contents_ids = Vec::new();
@@ -323,6 +323,19 @@ impl PdfDocument {
         if let Some(parent_id) = page_dict.get_ref("Parent") {
             if let Some(parent_dict) = self.get_object(parent_id).and_then(Object::as_dict) {
                 return self.resolve_box(parent_dict, box_name);
+            }
+        }
+        None
+    }
+
+    /// Resolves an inheritable integer property (e.g. /Rotate) searching upward through parent /Pages nodes (ISO 32000-1 Clause 7.7.3.3).
+    pub fn resolve_i64(&self, page_dict: &PdfDictionary, key: &str) -> Option<i64> {
+        if let Some(val) = page_dict.get_i64(key) {
+            return Some(val);
+        }
+        if let Some(parent_id) = page_dict.get_ref("Parent") {
+            if let Some(parent_dict) = self.get_object(parent_id).and_then(Object::as_dict) {
+                return self.resolve_i64(parent_dict, key);
             }
         }
         None

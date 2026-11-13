@@ -19,6 +19,63 @@ pub use tiny_skia::{Color, Pixmap};
 use ravpdf_core::document::PdfDocument;
 use ravpdf_core::error::{PdfError, Result};
 
+/// Rotates a Pixmap by 0, 90, 180, or 270 degrees clockwise (FR-01.3.4, FR-06.6).
+pub fn rotate_pixmap(src: Pixmap, angle: i64) -> Result<Pixmap> {
+    let rot = angle.rem_euclid(360);
+    if rot == 0 {
+        return Ok(src);
+    }
+
+    let w = src.width() as usize;
+    let h = src.height() as usize;
+
+    let (dst_w, dst_h) = match rot {
+        90 | 270 => (h, w),
+        _ => (w, h),
+    };
+
+    let mut dst = Pixmap::new(dst_w as u32, dst_h as u32)
+        .ok_or_else(|| PdfError::ParseError("Failed to allocate rotated Pixmap buffer".into()))?;
+
+    let src_pixels = src.pixels();
+    let dst_pixels = dst.pixels_mut();
+
+    match rot {
+        90 => {
+            for y in 0..h {
+                for x in 0..w {
+                    let src_idx = y * w + x;
+                    let dst_idx = x * h + (h - 1 - y);
+                    dst_pixels[dst_idx] = src_pixels[src_idx];
+                }
+            }
+        }
+        180 => {
+            for y in 0..h {
+                for x in 0..w {
+                    let src_idx = y * w + x;
+                    let dst_idx = (h - 1 - y) * w + (w - 1 - x);
+                    dst_pixels[dst_idx] = src_pixels[src_idx];
+                }
+            }
+        }
+        270 => {
+            for y in 0..h {
+                for x in 0..w {
+                    let src_idx = y * w + x;
+                    let dst_idx = (w - 1 - x) * h + y;
+                    dst_pixels[dst_idx] = src_pixels[src_idx];
+                }
+            }
+        }
+        _ => {
+            dst_pixels.copy_from_slice(src_pixels);
+        }
+    }
+
+    Ok(dst)
+}
+
 /// Renders a single PDF page into a high-resolution software `tiny_skia::Pixmap`.
 pub fn render_page(
     doc: &PdfDocument,
@@ -51,7 +108,8 @@ pub fn render_page(
     // Render annotations on top of content streams (FR-01.1.1, FR-08, FR-09, FR-10)
     render_page_annotations(&mut pixmap, doc, page_index, page.crop_box, options.zoom);
 
-    Ok(pixmap)
+    let effective_rotation = (page.rotate + options.rotation).rem_euclid(360);
+    rotate_pixmap(pixmap, effective_rotation)
 }
 
 /// Renders a fast preview thumbnail for page navigation panels.
@@ -72,7 +130,7 @@ pub fn render_thumbnail(
 
     let options = RenderOptions {
         zoom,
-        rotation: page.rotate,
+        rotation: 0,
         background_color: Color::WHITE,
         hidden_ocgs: std::collections::HashSet::new(),
     };
@@ -254,5 +312,79 @@ mod tests {
         assert_eq!(px.red(), 255);
         assert_eq!(px.green(), 255);
         assert_eq!(px.blue(), 255);
+    }
+
+    #[test]
+    fn test_rotate_pixmap_dimensions_and_pixels() {
+        let mut src = Pixmap::new(10, 20).unwrap();
+        src.fill(Color::WHITE);
+        // Paint pixel at x: 2, y: 4 with red
+        src.pixels_mut()[4 * 10 + 2] = tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 0, 255).unwrap();
+
+        // 90 deg clockwise: dimensions swap to 20x10.
+        // Formula: x' = h - 1 - y = 20 - 1 - 4 = 15; y' = x = 2
+        let rot90 = rotate_pixmap(src.clone(), 90).unwrap();
+        assert_eq!(rot90.width(), 20);
+        assert_eq!(rot90.height(), 10);
+        let px90 = rot90.pixel(15, 2).unwrap();
+        assert_eq!(px90.red(), 255);
+        assert_eq!(px90.green(), 0);
+
+        // 180 deg: dimensions 10x20.
+        // Formula: x' = w - 1 - x = 10 - 1 - 2 = 7; y' = h - 1 - y = 20 - 1 - 4 = 15
+        let rot180 = rotate_pixmap(src.clone(), 180).unwrap();
+        assert_eq!(rot180.width(), 10);
+        assert_eq!(rot180.height(), 20);
+        let px180 = rot180.pixel(7, 15).unwrap();
+        assert_eq!(px180.red(), 255);
+        assert_eq!(px180.green(), 0);
+
+        // 270 deg clockwise (90 deg CCW): dimensions swap to 20x10.
+        // Formula: x' = y = 4; y' = w - 1 - x = 10 - 1 - 2 = 7
+        let rot270 = rotate_pixmap(src.clone(), 270).unwrap();
+        assert_eq!(rot270.width(), 20);
+        assert_eq!(rot270.height(), 10);
+        let px270 = rot270.pixel(4, 7).unwrap();
+        assert_eq!(px270.red(), 255);
+        assert_eq!(px270.green(), 0);
+    }
+
+    #[test]
+    fn test_render_page_with_rotation() {
+        let mut doc = PdfDocument::new();
+        doc.add_blank_page(100.0, 200.0);
+
+        // Unrotated: 100x200
+        let opt0 = RenderOptions::default();
+        let p0 = render_page(&doc, 0, &opt0).unwrap();
+        assert_eq!(p0.width(), 100);
+        assert_eq!(p0.height(), 200);
+
+        // Rotated 90 deg: 200x100
+        let opt90 = RenderOptions {
+            rotation: 90,
+            ..Default::default()
+        };
+        let p90 = render_page(&doc, 0, &opt90).unwrap();
+        assert_eq!(p90.width(), 200);
+        assert_eq!(p90.height(), 100);
+
+        // Rotated 180 deg: 100x200
+        let opt180 = RenderOptions {
+            rotation: 180,
+            ..Default::default()
+        };
+        let p180 = render_page(&doc, 0, &opt180).unwrap();
+        assert_eq!(p180.width(), 100);
+        assert_eq!(p180.height(), 200);
+
+        // Rotated 270 deg: 200x100
+        let opt270 = RenderOptions {
+            rotation: 270,
+            ..Default::default()
+        };
+        let p270 = render_page(&doc, 0, &opt270).unwrap();
+        assert_eq!(p270.width(), 200);
+        assert_eq!(p270.height(), 100);
     }
 }

@@ -849,6 +849,11 @@ struct RavPdfApp {
     sanitize_options: SanitizeOptions,
     sanitize_report: Option<SanitizeReport>,
 
+    // Unsaved Changes Confirmation Dialog (NFR-03.1, NFR-03.2)
+    show_unsaved_changes_dialog: bool,
+    pending_close_tab_idx: Option<usize>,
+    pending_close_all: bool,
+
     // Organize Pages Multi-Page Selection (FR-06.1 - FR-06.11)
     organize_selected_pages: HashSet<usize>,
 
@@ -1296,6 +1301,10 @@ impl Default for RavPdfApp {
             sanitize_options: SanitizeOptions::default(),
             sanitize_report: None,
 
+            show_unsaved_changes_dialog: false,
+            pending_close_tab_idx: None,
+            pending_close_all: false,
+
             organize_selected_pages: HashSet::new(),
 
             text_selection: TextSelectionState::default(),
@@ -1443,6 +1452,65 @@ impl RavPdfApp {
         self.tabs.push(tab);
         self.active_tab_idx = Some(self.tabs.len() - 1);
         self.status_message = "Created new blank document".into();
+    }
+
+    /// Requests closing a tab by index. If modified, displays a confirmation dialog (NFR-03.1, NFR-03.2).
+    pub fn request_close_tab(&mut self, idx: usize) {
+        if idx < self.tabs.len() {
+            if self.tabs[idx].is_modified {
+                self.pending_close_tab_idx = Some(idx);
+                self.pending_close_all = false;
+                self.show_unsaved_changes_dialog = true;
+            } else {
+                self.close_tab(idx);
+            }
+        }
+    }
+
+    /// Requests application exit. If any open tabs are modified, asks user to save first.
+    pub fn request_exit(&mut self, ctx: &egui::Context) {
+        if let Some(idx) = self.tabs.iter().position(|t| t.is_modified) {
+            self.pending_close_tab_idx = Some(idx);
+            self.pending_close_all = true;
+            self.show_unsaved_changes_dialog = true;
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Saves a tab by index. Returns true on success.
+    pub fn save_tab(&mut self, idx: usize) -> bool {
+        if idx >= self.tabs.len() {
+            return false;
+        }
+        let has_path = self.tabs[idx].file_path.is_some();
+        if has_path {
+            let tab = &mut self.tabs[idx];
+            if tab.save().is_ok() {
+                self.status_message = format!("Saved: {}", tab.title);
+                return true;
+            }
+            return false;
+        }
+
+        // Needs file dialog
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("PDF Document", &["pdf"])
+            .save_file()
+        {
+            let tab = &mut self.tabs[idx];
+            tab.file_path = Some(path.clone());
+            tab.title = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Document.pdf")
+                .to_string();
+            if tab.save().is_ok() {
+                self.status_message = format!("Saved: {}", path.display());
+                return true;
+            }
+        }
+        false
     }
 
     /// Closes a tab by index.
@@ -1940,7 +2008,7 @@ impl RavPdfApp {
             }
             if i.modifiers.ctrl && i.key_pressed(Key::W) && has_doc {
                 if let Some(idx) = self.active_tab_idx {
-                    self.close_tab(idx);
+                    self.request_close_tab(idx);
                 }
             }
 
@@ -2143,7 +2211,7 @@ impl RavPdfApp {
             self.status_message = format!("Active: {}", self.tabs[idx].title);
         }
         if let Some(idx) = tab_to_close {
-            self.close_tab(idx);
+            self.request_close_tab(idx);
         }
         if create_new {
             self.create_new_blank_document();
@@ -2308,13 +2376,14 @@ impl RavPdfApp {
                         .clicked()
                     {
                         if let Some(idx) = self.active_tab_idx {
-                            self.close_tab(idx);
+                            self.request_close_tab(idx);
                         }
                         ui.close_menu();
                     }
                     ui.separator();
                     if ui.button("Exit").clicked() {
-                        std::process::exit(0);
+                        self.request_exit(ctx);
+                        ui.close_menu();
                     }
                 });
 
@@ -6728,21 +6797,13 @@ impl RavPdfApp {
             // Read properties of current active page
             let (page_size, page_h, zoom) = {
                 let tab = self.active_tab().unwrap();
-                let page = tab.doc.get_page(tab.current_page);
-                let page_h = page
-                    .as_ref()
-                    .map(|p| (p.crop_box[3] - p.crop_box[1]).abs() as f32)
-                    .unwrap_or(792.0);
-                let page_w = page
-                    .as_ref()
-                    .map(|p| (p.crop_box[2] - p.crop_box[0]).abs() as f32)
-                    .unwrap_or(612.0);
+                let (pw, ph) = tab.get_page_dim(tab.current_page);
                 let tex_size = tab
                     .page_texture
                     .as_ref()
                     .map(|t| t.size_vec2() / ctx.pixels_per_point())
-                    .unwrap_or_else(|| Vec2::new(page_w * tab.zoom, page_h * tab.zoom));
-                (tex_size, page_h, tab.zoom)
+                    .unwrap_or_else(|| Vec2::new(pw * tab.zoom, ph * tab.zoom));
+                (tex_size, ph, tab.zoom)
             };
 
             ScrollArea::both()
@@ -16651,6 +16712,137 @@ impl RavPdfApp {
                 self.show_recovery_modal = false;
             }
         }
+
+        // 56. Unsaved Changes Warning Dialog (NFR-03.1, NFR-03.2)
+        if self.show_unsaved_changes_dialog {
+            let mut action: Option<u8> = None; // 1 = Save, 2 = Discard, 3 = Cancel
+            let tab_title = self
+                .pending_close_tab_idx
+                .and_then(|idx| self.tabs.get(idx))
+                .map(|t| t.title.clone())
+                .unwrap_or_else(|| "document".to_string());
+
+            egui::Window::new(format!("{} Unsaved Changes", egui_phosphor::regular::WARNING))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_width(440.0)
+                .show(ctx, |ui| {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(egui_phosphor::regular::WARNING_CIRCLE)
+                                .size(32.0)
+                                .color(Color32::from_rgb(234, 179, 8)),
+                        );
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Do you want to save changes to \"{}\" before closing?",
+                                    tab_title
+                                ))
+                                .strong()
+                                .size(14.0),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(
+                                    "If you close without saving, your recent edits will be permanently discarded.",
+                                )
+                                .size(12.0)
+                                .weak(),
+                            );
+                        });
+                    });
+
+                    ui.add_space(16.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button(RichText::new("Cancel").size(13.0))
+                                .clicked()
+                            {
+                                action = Some(3);
+                            }
+
+                            if ui
+                                .button(
+                                    RichText::new("Don't Save")
+                                        .size(13.0)
+                                        .color(Color32::from_rgb(239, 68, 68)),
+                                )
+                                .clicked()
+                            {
+                                action = Some(2);
+                            }
+
+                            if ui
+                                .button(
+                                    RichText::new("Save")
+                                        .size(13.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(59, 130, 246)),
+                                )
+                                .clicked()
+                            {
+                                action = Some(1);
+                            }
+                        });
+                    });
+                });
+
+            match action {
+                Some(1) => {
+                    // Save
+                    if let Some(idx) = self.pending_close_tab_idx {
+                        if self.save_tab(idx) {
+                            self.close_tab(idx);
+                            if self.pending_close_all {
+                                if let Some(next_idx) = self.tabs.iter().position(|t| t.is_modified) {
+                                    self.pending_close_tab_idx = Some(next_idx);
+                                } else {
+                                    self.show_unsaved_changes_dialog = false;
+                                    self.pending_close_tab_idx = None;
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                }
+                            } else {
+                                self.show_unsaved_changes_dialog = false;
+                                self.pending_close_tab_idx = None;
+                            }
+                        }
+                    }
+                }
+                Some(2) => {
+                    // Don't save (Discard)
+                    if let Some(idx) = self.pending_close_tab_idx {
+                        self.close_tab(idx);
+                        if self.pending_close_all {
+                            if let Some(next_idx) = self.tabs.iter().position(|t| t.is_modified) {
+                                self.pending_close_tab_idx = Some(next_idx);
+                            } else {
+                                self.show_unsaved_changes_dialog = false;
+                                self.pending_close_tab_idx = None;
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        } else {
+                            self.show_unsaved_changes_dialog = false;
+                            self.pending_close_tab_idx = None;
+                        }
+                    }
+                }
+                Some(3) => {
+                    // Cancel
+                    self.show_unsaved_changes_dialog = false;
+                    self.pending_close_tab_idx = None;
+                    self.pending_close_all = false;
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Automatically saves drafts of modified open documents to the temporary journal directory (NFR-03.1).
@@ -16669,6 +16861,16 @@ impl eframe::App for RavPdfApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Enforce window title header strictly as "RAV PDF"
         ctx.send_viewport_cmd(egui::ViewportCommand::Title("RAV PDF".to_string()));
+
+        // 0. Intercept Window Close if there are unsaved changes (NFR-03.1, NFR-03.2)
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if let Some(idx) = self.tabs.iter().position(|t| t.is_modified) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.pending_close_tab_idx = Some(idx);
+                self.pending_close_all = true;
+                self.show_unsaved_changes_dialog = true;
+            }
+        }
 
         // 1. Handle Drag-and-Drop files onto the window (EI-01.7)
         let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
