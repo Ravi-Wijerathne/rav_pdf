@@ -321,6 +321,17 @@ impl GuiLanguage {
     }
 }
 
+/// Category tabs for primary toolbar (EI-01.2, NFR-05.1).
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
+pub enum ToolbarCategory {
+    #[default]
+    View,
+    Annotate,
+    Edit,
+    Forms,
+    Tools,
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum ActiveTool {
     Select,
@@ -422,6 +433,7 @@ struct RavPdfApp {
     sidebar_tab: SidebarTab,
     sidebar_open: bool,
     active_tool: ActiveTool,
+    toolbar_category: ToolbarCategory,
     status_message: String,
 
     // Search bar state (FR-34)
@@ -920,6 +932,7 @@ impl Default for RavPdfApp {
             sidebar_tab: SidebarTab::Thumbnails,
             sidebar_open: true,
             active_tool: ActiveTool::Select,
+            toolbar_category: ToolbarCategory::View,
             status_message: "Ready • No document open".into(),
 
             dark_theme: true,
@@ -3253,10 +3266,24 @@ impl RavPdfApp {
         });
     }
 
-    /// Renders primary toolbar (EI-01.2).
+    /// Renders primary categorized toolbar (EI-01.2, NFR-05.1, NFR-05.6).
     fn render_toolbar(&mut self, ctx: &egui::Context) {
+        let has_doc = self.active_tab().is_some();
+        let total_pages = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
+        let current_page = self.active_tab().map(|t| t.current_page).unwrap_or(0);
+        let can_prev = has_doc && current_page > 0;
+        let can_next = has_doc && current_page + 1 < total_pages;
+        let nav_step = if self.page_view_mode == PageViewMode::TwoPageFacing { 2 } else { 1 };
+        let can_back = self.nav_history_idx > 0 && !self.nav_history.is_empty();
+        let can_fwd = self.nav_history_idx + 1 < self.nav_history.len();
+        let zoom_pct = self.active_tab().map(|t| t.zoom * 100.0).unwrap_or(100.0);
+
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            // ==========================================
+            // ROW 1: PRIMARY UTILITY & CATEGORY BAR
+            // ==========================================
             ui.horizontal(|ui| {
+                // Left group: File actions & Sidebar toggle
                 if ui
                     .button(egui::RichText::new(egui_phosphor::regular::FOLDER_OPEN).size(15.0))
                     .on_hover_text("Open PDF document (Ctrl+O)")
@@ -3264,8 +3291,6 @@ impl RavPdfApp {
                 {
                     self.open_file_dialog();
                 }
-
-                let has_doc = self.active_tab().is_some();
 
                 if ui
                     .add_enabled(
@@ -3276,6 +3301,17 @@ impl RavPdfApp {
                     .clicked()
                 {
                     self.save_file_dialog();
+                }
+
+                if ui
+                    .add_enabled(
+                        has_doc,
+                        Button::new(egui::RichText::new(egui_phosphor::regular::PRINTER).size(15.0)),
+                    )
+                    .on_hover_text("Print document (Ctrl+P)")
+                    .clicked()
+                {
+                    self.show_print_dialog = true;
                 }
 
                 ui.separator();
@@ -3295,103 +3331,7 @@ impl RavPdfApp {
 
                 ui.separator();
 
-                let total_pages = self.active_tab().map(|t| t.doc.page_count()).unwrap_or(0);
-                let current_page = self.active_tab().map(|t| t.current_page).unwrap_or(0);
-                let can_prev = has_doc && current_page > 0;
-                let can_next = has_doc && current_page + 1 < total_pages;
-                let nav_step = if self.page_view_mode == PageViewMode::TwoPageFacing {
-                    2
-                } else {
-                    1
-                };
-
-                if ui
-                    .add_enabled(
-                        can_prev,
-                        Button::new(egui::RichText::new(egui_phosphor::regular::CARET_DOUBLE_LEFT).size(14.0)),
-                    )
-                    .on_hover_text("First page (Home)")
-                    .clicked()
-                {
-                    self.record_page_navigation(0);
-                }
-                if ui
-                    .add_enabled(
-                        can_prev,
-                        Button::new(egui::RichText::new(egui_phosphor::regular::CARET_LEFT).size(14.0)),
-                    )
-                    .on_hover_text("Previous page (Left Arrow)")
-                    .clicked()
-                {
-                    self.record_page_navigation(current_page.saturating_sub(nav_step));
-                }
-
-                // Go to page quick input box (FR-01.2.6) with Page Label support (FR-06.9)
-                if has_doc {
-                    let page_label_opt = self
-                        .active_tab()
-                        .map(|t| get_page_label(&t.doc, current_page));
-                    ui.label("Page");
-                    let mut jump_target = None;
-                    if let Some(tab) = self.active_tab_mut() {
-                        let text_edit = ui.add(
-                            egui::TextEdit::singleline(&mut tab.page_input_buffer)
-                                .desired_width(32.0),
-                        );
-                        if text_edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                            if let Ok(p) = tab.page_input_buffer.trim().parse::<usize>() {
-                                if p >= 1 && p <= total_pages {
-                                    jump_target = Some(p - 1);
-                                } else {
-                                    tab.page_input_buffer = (tab.current_page + 1).to_string();
-                                }
-                            }
-                        }
-                    }
-                    if let Some(target) = jump_target {
-                        self.record_page_navigation(target);
-                    }
-                    if let Some(lbl) = page_label_opt {
-                        if lbl != (current_page + 1).to_string() {
-                            ui.label(format!("(\"{}\") of {}", lbl, total_pages));
-                        } else {
-                            ui.label(format!("of {}", total_pages));
-                        }
-                    } else {
-                        ui.label(format!("of {}", total_pages));
-                    }
-                } else {
-                    ui.label("Page 0 of 0");
-                }
-
-                if ui
-                    .add_enabled(
-                        can_next,
-                        Button::new(egui::RichText::new(egui_phosphor::regular::CARET_RIGHT).size(14.0)),
-                    )
-                    .on_hover_text("Next page (Right Arrow)")
-                    .clicked()
-                {
-                    self.record_page_navigation(
-                        (current_page + nav_step).min(total_pages.saturating_sub(1)),
-                    );
-                }
-                if ui
-                    .add_enabled(
-                        can_next,
-                        Button::new(egui::RichText::new(egui_phosphor::regular::CARET_DOUBLE_RIGHT).size(14.0)),
-                    )
-                    .on_hover_text("Last page (End)")
-                    .clicked()
-                {
-                    self.record_page_navigation(total_pages.saturating_sub(1));
-                }
-
-                ui.separator();
-
                 // Navigation History Buttons (FR-01.2.7)
-                let can_back = self.nav_history_idx > 0 && !self.nav_history.is_empty();
-                let can_fwd = self.nav_history_idx + 1 < self.nav_history.len();
                 if ui
                     .add_enabled(
                         can_back,
@@ -3415,536 +3355,346 @@ impl RavPdfApp {
 
                 ui.separator();
 
-                // Zoom controls & fit modes (FR-01.3.2)
-                let zoom_pct = self.active_tab().map(|t| t.zoom * 100.0).unwrap_or(100.0);
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        Button::new(egui::RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS_MINUS).size(14.0)),
-                    )
-                    .on_hover_text("Zoom out (Ctrl+-)")
-                    .clicked()
-                {
-                    if let Some(tab) = self.active_tab_mut() {
-                        tab.target_zoom = (tab.target_zoom / 1.2).max(0.1);
-                        ctx.request_repaint();
-                    }
-                }
-                ui.label(format!("{:.0}%", zoom_pct));
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        Button::new(egui::RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS_PLUS).size(14.0)),
-                    )
-                    .on_hover_text("Zoom in (Ctrl++)")
-                    .clicked()
-                {
-                    if let Some(tab) = self.active_tab_mut() {
-                        tab.target_zoom = (tab.target_zoom * 1.2).min(64.0);
-                        ctx.request_repaint();
-                    }
-                }
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        Button::new(egui::RichText::new(egui_phosphor::regular::ARROWS_IN).size(14.0)),
-                    )
-                    .on_hover_text("Fit to Page (Ctrl+0)")
-                    .clicked()
-                {
-                    let screen = ctx.screen_rect();
-                    let avail_w = screen.width() - (if self.sidebar_open { 260.0 } else { 60.0 });
-                    let avail_h = screen.height() - 140.0;
-                    if let Some(tab) = self.active_tab_mut() {
-                        tab.fit_to_page(avail_w, avail_h);
-                    }
-                }
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        Button::new(egui::RichText::new(egui_phosphor::regular::ARROWS_OUT).size(14.0)),
-                    )
-                    .on_hover_text("Fit to Width (Ctrl+9)")
-                    .clicked()
-                {
-                    let screen = ctx.screen_rect();
-                    let avail_w = screen.width() - (if self.sidebar_open { 240.0 } else { 40.0 });
-                    if let Some(tab) = self.active_tab_mut() {
-                        tab.fit_to_width(avail_w);
+                let is_dark = ctx.style().visuals.dark_mode;
+
+                // Center group: Workspace Category Switcher (Pill Style)
+                let categories = [
+                    (ToolbarCategory::View, egui_phosphor::regular::EYE, "View"),
+                    (ToolbarCategory::Annotate, egui_phosphor::regular::CHAT_TEARDROP_TEXT, "Annotate"),
+                    (ToolbarCategory::Edit, egui_phosphor::regular::NOTE_PENCIL, "Edit & Shapes"),
+                    (ToolbarCategory::Forms, egui_phosphor::regular::CHECK_SQUARE, "Forms"),
+                    (ToolbarCategory::Tools, egui_phosphor::regular::WRENCH, "Tools"),
+                ];
+
+                for (cat, icon, label) in categories {
+                    let is_active = self.toolbar_category == cat;
+                    let (bg_color, fg_color, stroke_color) = if is_active {
+                        (
+                            Color32::from_rgb(37, 99, 235), // Primary blue
+                            Color32::WHITE,                 // Always pure white on active blue
+                            Color32::from_rgb(29, 78, 216),
+                        )
+                    } else if is_dark {
+                        (
+                            Color32::from_rgb(39, 39, 44),    // Dark zinc
+                            Color32::from_rgb(228, 228, 231), // Clear light text
+                            Color32::from_rgb(58, 58, 66),
+                        )
+                    } else {
+                        (
+                            Color32::from_rgb(241, 245, 249), // Clean light slate
+                            Color32::from_rgb(15, 23, 42),    // Clean dark slate text
+                            Color32::from_rgb(203, 213, 225), // Subtle border
+                        )
+                    };
+
+                    let text = egui::RichText::new(format!("{} {}", icon, label))
+                        .size(12.5)
+                        .color(fg_color)
+                        .strong();
+                    let btn = egui::Button::new(text)
+                        .rounding(5.0)
+                        .fill(bg_color)
+                        .stroke(Stroke::new(1.0_f32, stroke_color));
+
+                    if ui.add(btn).clicked() {
+                        self.toolbar_category = cat;
                     }
                 }
 
-                ui.separator();
-
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        Button::new(format!("{} Rotate", egui_phosphor::regular::ARROW_CLOCKWISE)),
-                    )
-                    .on_hover_text("Rotate Clockwise 90°")
-                    .clicked()
-                {
-                    if let Some(tab) = self.active_tab_mut() {
-                        let curr = tab.current_page;
-                        let _ = rotate_page(&mut tab.doc, curr, 90);
-                        tab.is_modified = true;
-                        tab.invalidate_render();
+                // Right group: Search & Zoom & Theme
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Theme Switcher Button (NFR-05.7) using phosphor icons
+                    let (theme_icon, theme_tip) = if is_dark {
+                        (egui_phosphor::regular::SUN, "Switch to Clean Light Theme")
+                    } else {
+                        (egui_phosphor::regular::MOON, "Switch to Modern Dark Theme")
+                    };
+                    if ui
+                        .button(egui::RichText::new(theme_icon).size(15.0))
+                        .on_hover_text(theme_tip)
+                        .clicked()
+                    {
+                        self.dark_theme = !is_dark;
+                        setup_custom_theme(ctx, self.dark_theme);
                     }
-                }
 
-                ui.separator();
-
-                // View Mode selector (Single Page, Continuous, Two-Page Facing, Two-Page Continuous, Organize)
-                let is_single = self.page_view_mode == PageViewMode::SinglePage;
-                let is_cont = self.page_view_mode == PageViewMode::ContinuousScroll;
-                let is_facing = self.page_view_mode == PageViewMode::TwoPageFacing;
-                let is_two_cont = self.page_view_mode == PageViewMode::TwoPageContinuous;
-                let is_org = self.page_view_mode == PageViewMode::OrganizePages;
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        egui::SelectableLabel::new(
-                            is_single,
-                            format!("{} Single", egui_phosphor::regular::FILE),
-                        ),
-                    )
-                    .on_hover_text("Single Page View")
-                    .clicked()
-                {
-                    self.page_view_mode = PageViewMode::SinglePage;
-                }
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        egui::SelectableLabel::new(
-                            is_cont,
-                            format!("{} Continuous", egui_phosphor::regular::SCROLL),
-                        ),
-                    )
-                    .on_hover_text("Continuous Scroll View")
-                    .clicked()
-                {
-                    self.page_view_mode = PageViewMode::ContinuousScroll;
-                }
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        egui::SelectableLabel::new(
-                            is_facing,
-                            format!("{} Facing", egui_phosphor::regular::BOOK_OPEN),
-                        ),
-                    )
-                    .on_hover_text("Two-Page Facing View")
-                    .clicked()
-                {
-                    self.page_view_mode = PageViewMode::TwoPageFacing;
-                }
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        egui::SelectableLabel::new(
-                            is_two_cont,
-                            format!("{} 2-Page Scroll", egui_phosphor::regular::BOOKS),
-                        ),
-                    )
-                    .on_hover_text("Two-Page Continuous Scroll View")
-                    .clicked()
-                {
-                    self.page_view_mode = PageViewMode::TwoPageContinuous;
-                }
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        egui::SelectableLabel::new(
-                            is_org,
-                            format!("{} Organize", egui_phosphor::regular::GRID_FOUR),
-                        ),
-                    )
-                    .on_hover_text("Organize Pages Grid View")
-                    .clicked()
-                {
-                    self.page_view_mode = PageViewMode::OrganizePages;
-                }
-
-                ui.separator();
-
-                // Find & Replace in document triggers (FR-34.1, FR-04.8)
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        Button::new(format!("{} Find", egui_phosphor::regular::MAGNIFYING_GLASS)),
-                    )
-                    .on_hover_text("Find in document (Ctrl+F)")
-                    .clicked()
-                {
-                    self.search_bar_open = !self.search_bar_open;
-                    self.search_replace_mode = false;
-                }
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        Button::new(format!("{} Replace", egui_phosphor::regular::ARROWS_CLOCKWISE)),
-                    )
-                    .on_hover_text("Find and Replace (Ctrl+H)")
-                    .clicked()
-                {
-                    self.search_bar_open = true;
-                    self.search_replace_mode = true;
-                }
-                if ui
-                    .add_enabled(
-                        has_doc,
-                        Button::new(format!("{} Image", egui_phosphor::regular::IMAGE)),
-                    )
-                    .on_hover_text("Insert image onto page")
-                    .clicked()
-                {
-                    self.insert_image_dialog();
-                }
-
-                ui.separator();
-
-                // Tool Selector Buttons
-                ui.add_enabled_ui(has_doc, |ui| {
-                    ui.selectable_value(
-                        &mut self.active_tool,
-                        ActiveTool::Select,
-                        format!("{} Select", egui_phosphor::regular::CURSOR),
-                    );
-                    ui.selectable_value(
-                        &mut self.active_tool,
-                        ActiveTool::Hand,
-                        format!("{} Pan", egui_phosphor::regular::HAND),
-                    );
                     ui.separator();
 
-                    // Markup Tools
-                    let markup_label = match self.active_tool {
-                        ActiveTool::StickyNote => format!("{} Note", egui_phosphor::regular::CHAT_TEARDROP_TEXT),
-                        ActiveTool::Highlight => format!("{} Highlight", egui_phosphor::regular::HIGHLIGHTER),
-                        ActiveTool::Underline => format!("{} Underline", egui_phosphor::regular::TEXT_UNDERLINE),
-                        ActiveTool::Squiggly => format!("{} Squiggly", egui_phosphor::regular::WAVE_SINE),
-                        ActiveTool::StrikeOut => format!("{} Strike", egui_phosphor::regular::TEXT_STRIKETHROUGH),
-                        _ => format!("{} Markup", egui_phosphor::regular::CHAT_TEARDROP_TEXT),
-                    };
-                    ui.menu_button(markup_label, |ui| {
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::StickyNote,
-                                format!("{} Sticky Note", egui_phosphor::regular::CHAT_TEARDROP_TEXT),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::StickyNote;
-                            ui.close_menu();
+                    // Zoom Controls (FR-01.3.2)
+                    if ui
+                        .add_enabled(
+                            has_doc,
+                            Button::new(egui::RichText::new(egui_phosphor::regular::ARROWS_OUT).size(13.0)),
+                        )
+                        .on_hover_text("Fit to Width (Ctrl+9)")
+                        .clicked()
+                    {
+                        let screen = ctx.screen_rect();
+                        let avail_w = screen.width() - (if self.sidebar_open { 240.0 } else { 40.0 });
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.fit_to_width(avail_w);
                         }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Highlight,
-                                format!("{} Text Highlight", egui_phosphor::regular::HIGHLIGHTER),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Highlight;
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Underline,
-                                format!("{} Text Underline", egui_phosphor::regular::TEXT_UNDERLINE),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Underline;
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Squiggly,
-                                format!("{} Squiggly Underline", egui_phosphor::regular::WAVE_SINE),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Squiggly;
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::StrikeOut,
-                                format!("{} Strikethrough", egui_phosphor::regular::TEXT_STRIKETHROUGH),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::StrikeOut;
-                            ui.close_menu();
-                        }
-                    });
+                    }
 
-                    // Drawing Tools
-                    let draw_label = match self.active_tool {
-                        ActiveTool::Rectangle => format!("{} Rect", egui_phosphor::regular::SQUARE),
-                        ActiveTool::Circle => format!("{} Circle", egui_phosphor::regular::CIRCLE),
-                        ActiveTool::Line => format!("{} Line", egui_phosphor::regular::ARROW_UP_RIGHT),
-                        ActiveTool::Polygon => format!("{} Polygon", egui_phosphor::regular::POLYGON),
-                        ActiveTool::Polyline => format!("{} Polyline", egui_phosphor::regular::LIGHTNING),
-                        ActiveTool::Pencil => format!("{} Pencil", egui_phosphor::regular::PENCIL_SIMPLE),
-                        ActiveTool::Eraser => format!("{} Eraser", egui_phosphor::regular::ERASER),
-                        _ => format!("{} Shapes", egui_phosphor::regular::SQUARE),
-                    };
-                    ui.menu_button(draw_label, |ui| {
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Rectangle,
-                                format!("{} Rectangle", egui_phosphor::regular::SQUARE),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Rectangle;
-                            ui.close_menu();
+                    if ui
+                        .add_enabled(
+                            has_doc,
+                            Button::new(egui::RichText::new(egui_phosphor::regular::ARROWS_IN).size(13.0)),
+                        )
+                        .on_hover_text("Fit to Page (Ctrl+0)")
+                        .clicked()
+                    {
+                        let screen = ctx.screen_rect();
+                        let avail_w = screen.width() - (if self.sidebar_open { 260.0 } else { 60.0 });
+                        let avail_h = screen.height() - 140.0;
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.fit_to_page(avail_w, avail_h);
                         }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Circle,
-                                format!("{} Circle / Oval", egui_phosphor::regular::CIRCLE),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Circle;
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Line,
-                                format!("{} Arrow / Line", egui_phosphor::regular::ARROW_UP_RIGHT),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Line;
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Polygon,
-                                format!("{} Polygon", egui_phosphor::regular::POLYGON),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Polygon;
-                            self.polygon_vertices.clear();
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Polyline,
-                                format!("{} Polyline", egui_phosphor::regular::LIGHTNING),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Polyline;
-                            self.polygon_vertices.clear();
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Pencil,
-                                format!("{} Freehand Pencil", egui_phosphor::regular::PENCIL_SIMPLE),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Pencil;
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Eraser,
-                                format!("{} Stroke Eraser", egui_phosphor::regular::ERASER),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Eraser;
-                            ui.close_menu();
-                        }
-                    });
+                    }
 
-                    // Text & Callout Tools
-                    let text_label = match self.active_tool {
-                        ActiveTool::Text => format!("{} Text Box", egui_phosphor::regular::TEXT_T),
-                        ActiveTool::Typewriter => format!("{} Typewriter", egui_phosphor::regular::KEYBOARD),
-                        ActiveTool::Callout => format!("{} Callout", egui_phosphor::regular::CHAT_CIRCLE_TEXT),
-                        _ => format!("{} Text", egui_phosphor::regular::TEXT_T),
-                    };
-                    ui.menu_button(text_label, |ui| {
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Text,
-                                format!("{} Text Box", egui_phosphor::regular::TEXT_T),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Text;
-                            ui.close_menu();
+                    if ui
+                        .add_enabled(
+                            has_doc,
+                            Button::new(egui::RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS_PLUS).size(13.0)),
+                        )
+                        .on_hover_text("Zoom in (Ctrl++)")
+                        .clicked()
+                    {
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.target_zoom = (tab.target_zoom * 1.2).min(64.0);
+                            ctx.request_repaint();
                         }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Typewriter,
-                                format!("{} Typewriter", egui_phosphor::regular::KEYBOARD),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Typewriter;
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Callout,
-                                format!("{} Callout", egui_phosphor::regular::CHAT_CIRCLE_TEXT),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Callout;
-                            ui.close_menu();
-                        }
-                    });
+                    }
 
-                    // Forms Tools
-                    ui.menu_button(format!("{} Forms", egui_phosphor::regular::NOTE_PENCIL), |ui| {
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::FormField(FormFieldType::Text),
-                                format!("{} Text Field", egui_phosphor::regular::NOTE_PENCIL),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::FormField(FormFieldType::Text);
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::FormField(FormFieldType::Checkbox),
-                                format!("{} Checkbox", egui_phosphor::regular::CHECK_SQUARE),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::FormField(FormFieldType::Checkbox);
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::FormField(FormFieldType::Radio),
-                                format!("{} Radio Button", egui_phosphor::regular::RADIO_BUTTON),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::FormField(FormFieldType::Radio);
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::FormField(FormFieldType::Choice),
-                                format!("{} Dropdown List", egui_phosphor::regular::CARET_CIRCLE_DOWN),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::FormField(FormFieldType::Choice);
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool
-                                    == ActiveTool::FormField(FormFieldType::PushButton),
-                                format!("{} Push Button", egui_phosphor::regular::SQUARE),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::FormField(FormFieldType::PushButton);
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::FormField(FormFieldType::Signature),
-                                format!("{} Signature Field", egui_phosphor::regular::SIGNATURE),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::FormField(FormFieldType::Signature);
-                            ui.close_menu();
-                        }
-                    });
+                    ui.label(RichText::new(format!("{:.0}%", zoom_pct)).size(12.0));
 
-                    // More Tools Dropdown
-                    let more_label = match self.active_tool {
-                        ActiveTool::Link => format!("{} Link", egui_phosphor::regular::LINK),
-                        ActiveTool::Redact => format!("{} Redact", egui_phosphor::regular::RECTANGLE),
-                        ActiveTool::MeasureDistance => format!("{} Distance", egui_phosphor::regular::RULER),
-                        ActiveTool::MeasureArea => format!("{} Area", egui_phosphor::regular::POLYGON),
-                        ActiveTool::Loupe => format!("{} Loupe", egui_phosphor::regular::MAGNIFYING_GLASS_PLUS),
-                        ActiveTool::MarqueeZoom => format!("{} Marquee", egui_phosphor::regular::FRAME_CORNERS),
-                        _ => format!("{} Tools", egui_phosphor::regular::GEAR),
-                    };
-                    ui.menu_button(more_label, |ui| {
+                    if ui
+                        .add_enabled(
+                            has_doc,
+                            Button::new(egui::RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS_MINUS).size(13.0)),
+                        )
+                        .on_hover_text("Zoom out (Ctrl+-)")
+                        .clicked()
+                    {
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.target_zoom = (tab.target_zoom / 1.2).max(0.1);
+                            ctx.request_repaint();
+                        }
+                    }
+
+                    ui.separator();
+
+                    // Quick Find toggle
+                    if ui
+                        .add_enabled(
+                            has_doc,
+                            Button::new(egui::RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS).size(14.0)),
+                        )
+                        .on_hover_text("Find in document (Ctrl+F)")
+                        .clicked()
+                    {
+                        self.search_bar_open = !self.search_bar_open;
+                        self.search_replace_mode = false;
+                    }
+                });
+            });
+
+            ui.add_space(2.0);
+            ui.separator();
+            ui.add_space(2.0);
+
+            // ==========================================
+            // ROW 2: CATEGORY-SPECIFIC CONTEXTUAL RIBBON
+            // ==========================================
+            ui.horizontal(|ui| {
+                match self.toolbar_category {
+                    ToolbarCategory::View => {
+                        // Page navigation buttons (FR-01.2.1)
                         if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Link,
-                                format!("{} Add Hyperlink", egui_phosphor::regular::LINK),
+                            .add_enabled(
+                                can_prev,
+                                Button::new(egui::RichText::new(egui_phosphor::regular::CARET_DOUBLE_LEFT).size(14.0)),
                             )
+                            .on_hover_text("First page (Home)")
                             .clicked()
                         {
-                            self.active_tool = ActiveTool::Link;
-                            ui.close_menu();
+                            self.record_page_navigation(0);
                         }
                         if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Redact,
-                                format!("{} Mark Redaction", egui_phosphor::regular::RECTANGLE),
+                            .add_enabled(
+                                can_prev,
+                                Button::new(egui::RichText::new(egui_phosphor::regular::CARET_LEFT).size(14.0)),
                             )
+                            .on_hover_text("Previous page (Left Arrow)")
                             .clicked()
                         {
-                            self.active_tool = ActiveTool::Redact;
-                            ui.close_menu();
+                            self.record_page_navigation(current_page.saturating_sub(nav_step));
+                        }
+
+                        // Go to page quick input box (FR-01.2.6)
+                        if has_doc {
+                            let page_label_opt = self
+                                .active_tab()
+                                .map(|t| get_page_label(&t.doc, current_page));
+                            ui.label("Page");
+                            let mut jump_target = None;
+                            if let Some(tab) = self.active_tab_mut() {
+                                let text_edit = ui.add(
+                                    egui::TextEdit::singleline(&mut tab.page_input_buffer)
+                                        .desired_width(32.0),
+                                );
+                                if text_edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                    if let Ok(p) = tab.page_input_buffer.trim().parse::<usize>() {
+                                        if p >= 1 && p <= total_pages {
+                                            jump_target = Some(p - 1);
+                                        } else {
+                                            tab.page_input_buffer = (tab.current_page + 1).to_string();
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(target) = jump_target {
+                                self.record_page_navigation(target);
+                            }
+                            if let Some(lbl) = page_label_opt {
+                                if lbl != (current_page + 1).to_string() {
+                                    ui.label(format!("(\"{}\") of {}", lbl, total_pages));
+                                } else {
+                                    ui.label(format!("of {}", total_pages));
+                                }
+                            } else {
+                                ui.label(format!("of {}", total_pages));
+                            }
+                        } else {
+                            ui.label("Page 0 of 0");
+                        }
+
+                        if ui
+                            .add_enabled(
+                                can_next,
+                                Button::new(egui::RichText::new(egui_phosphor::regular::CARET_RIGHT).size(14.0)),
+                            )
+                            .on_hover_text("Next page (Right Arrow)")
+                            .clicked()
+                        {
+                            self.record_page_navigation(
+                                (current_page + nav_step).min(total_pages.saturating_sub(1)),
+                            );
                         }
                         if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::MeasureDistance,
-                                format!("{} Distance", egui_phosphor::regular::RULER),
+                            .add_enabled(
+                                can_next,
+                                Button::new(egui::RichText::new(egui_phosphor::regular::CARET_DOUBLE_RIGHT).size(14.0)),
                             )
+                            .on_hover_text("Last page (End)")
                             .clicked()
                         {
-                            self.active_tool = ActiveTool::MeasureDistance;
-                            ui.close_menu();
+                            self.record_page_navigation(total_pages.saturating_sub(1));
                         }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::MeasureArea,
-                                format!("{} Area", egui_phosphor::regular::POLYGON),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::MeasureArea;
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::Loupe,
-                                format!("{} Loupe Tool", egui_phosphor::regular::MAGNIFYING_GLASS_PLUS),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::Loupe;
-                            ui.close_menu();
-                        }
-                        if ui
-                            .selectable_label(
-                                self.active_tool == ActiveTool::MarqueeZoom,
-                                format!("{} Marquee Zoom", egui_phosphor::regular::FRAME_CORNERS),
-                            )
-                            .clicked()
-                        {
-                            self.active_tool = ActiveTool::MarqueeZoom;
-                            ui.close_menu();
-                        }
+
                         ui.separator();
+
+                        // View Mode selector (Single Page, Continuous, Two-Page Facing, Two-Page Continuous, Organize)
+                        let is_single = self.page_view_mode == PageViewMode::SinglePage;
+                        let is_cont = self.page_view_mode == PageViewMode::ContinuousScroll;
+                        let is_facing = self.page_view_mode == PageViewMode::TwoPageFacing;
+                        let is_two_cont = self.page_view_mode == PageViewMode::TwoPageContinuous;
+                        let is_org = self.page_view_mode == PageViewMode::OrganizePages;
+
                         if ui
-                            .selectable_label(self.split_view_enabled, format!("{} Split View", egui_phosphor::regular::COLUMNS))
+                            .add_enabled(
+                                has_doc,
+                                egui::SelectableLabel::new(
+                                    is_single,
+                                    format!("{} Single", egui_phosphor::regular::FILE),
+                                ),
+                            )
+                            .on_hover_text("Single Page View")
+                            .clicked()
+                        {
+                            self.page_view_mode = PageViewMode::SinglePage;
+                        }
+                        if ui
+                            .add_enabled(
+                                has_doc,
+                                egui::SelectableLabel::new(
+                                    is_cont,
+                                    format!("{} Continuous", egui_phosphor::regular::SCROLL),
+                                ),
+                            )
+                            .on_hover_text("Continuous Scroll View")
+                            .clicked()
+                        {
+                            self.page_view_mode = PageViewMode::ContinuousScroll;
+                        }
+                        if ui
+                            .add_enabled(
+                                has_doc,
+                                egui::SelectableLabel::new(
+                                    is_facing,
+                                    format!("{} Facing", egui_phosphor::regular::BOOK_OPEN),
+                                ),
+                            )
+                            .on_hover_text("Two-Page Facing View")
+                            .clicked()
+                        {
+                            self.page_view_mode = PageViewMode::TwoPageFacing;
+                        }
+                        if ui
+                            .add_enabled(
+                                has_doc,
+                                egui::SelectableLabel::new(
+                                    is_two_cont,
+                                    format!("{} 2-Page Scroll", egui_phosphor::regular::BOOKS),
+                                ),
+                            )
+                            .on_hover_text("Two-Page Continuous Scroll View")
+                            .clicked()
+                        {
+                            self.page_view_mode = PageViewMode::TwoPageContinuous;
+                        }
+                        if ui
+                            .add_enabled(
+                                has_doc,
+                                egui::SelectableLabel::new(
+                                    is_org,
+                                    format!("{} Organize", egui_phosphor::regular::GRID_FOUR),
+                                ),
+                            )
+                            .on_hover_text("Organize Pages Grid View")
+                            .clicked()
+                        {
+                            self.page_view_mode = PageViewMode::OrganizePages;
+                        }
+
+                        ui.separator();
+
+                        if ui
+                            .add_enabled(
+                                has_doc,
+                                Button::new(format!("{} Rotate", egui_phosphor::regular::ARROW_CLOCKWISE)),
+                            )
+                            .on_hover_text("Rotate Clockwise 90°")
+                            .clicked()
+                        {
+                            if let Some(tab) = self.active_tab_mut() {
+                                let curr = tab.current_page;
+                                let _ = rotate_page(&mut tab.doc, curr, 90);
+                                tab.is_modified = true;
+                                tab.invalidate_render();
+                            }
+                        }
+
+                        if ui
+                            .add_enabled(
+                                has_doc,
+                                egui::SelectableLabel::new(
+                                    self.split_view_enabled,
+                                    format!("{} Split", egui_phosphor::regular::COLUMNS),
+                                ),
+                            )
+                            .on_hover_text("Toggle Split View")
                             .clicked()
                         {
                             self.split_view_enabled = !self.split_view_enabled;
@@ -3955,145 +3705,412 @@ impl RavPdfApp {
                                 self.split_view_second_page =
                                     (curr + 1).min(total.saturating_sub(1));
                             }
-                            ui.close_menu();
                         }
-                        if ui.button(format!("{} Fullscreen Presentation", egui_phosphor::regular::ARROWS_OUT)).clicked() {
+
+                        if ui
+                            .add_enabled(
+                                has_doc,
+                                Button::new(format!("{} Fullscreen", egui_phosphor::regular::ARROWS_OUT)),
+                            )
+                            .on_hover_text("Fullscreen Presentation")
+                            .clicked()
+                        {
                             self.is_full_screen = true;
-                            ui.close_menu();
                         }
-                    });
-
-                    ui.checkbox(&mut self.form_test_mode, format!("{} Test Mode", egui_phosphor::regular::EYE))
-                        .on_hover_text("Toggle Form Test / Fill Preview Mode");
-
-                    if self.active_tool == ActiveTool::MeasureDistance
-                        || self.active_tool == ActiveTool::MeasureArea
-                    {
-                        ui.separator();
-                        if ui
-                            .button(egui::RichText::new(egui_phosphor::regular::GEAR).size(13.0))
-                            .on_hover_text("Configure scale ratio and measurement units")
-                            .clicked()
-                        {
-                            self.show_measure_scale_dialog = true;
-                        }
-                        ui.checkbox(&mut self.measure_bake_as_annot, "Annotate")
-                            .on_hover_text(
-                                "Bake measurements into document as annotations",
-                            );
                     }
 
-                    if has_doc && self.selected_annotation.is_some() {
-                        ui.separator();
-                        if ui
-                            .button(
-                                egui::RichText::new(egui_phosphor::regular::TRASH)
-                                    .size(14.0)
-                                    .color(Color32::from_rgb(239, 68, 68)),
-                            )
-                            .on_hover_text("Delete selected annotation (Del)")
-                            .clicked()
-                        {
-                            if let Some(sel) = self.selected_annotation.take() {
-                                if let Some(tab) = self.active_tab_mut() {
-                                    let _ = delete_annotation(&mut tab.doc, sel.page_index, sel.id);
-                                    tab.is_modified = true;
-                                    tab.invalidate_render();
-                                    self.status_message = "Deleted annotation".into();
+                    ToolbarCategory::Annotate => {
+                        ui.add_enabled_ui(has_doc, |ui| {
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Select,
+                                format!("{} Select", egui_phosphor::regular::CURSOR),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Hand,
+                                format!("{} Pan", egui_phosphor::regular::HAND),
+                            );
+
+                            ui.separator();
+
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Highlight,
+                                format!("{} Highlight", egui_phosphor::regular::HIGHLIGHTER),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Underline,
+                                format!("{} Underline", egui_phosphor::regular::TEXT_UNDERLINE),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::StrikeOut,
+                                format!("{} Strike", egui_phosphor::regular::TEXT_STRIKETHROUGH),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Squiggly,
+                                format!("{} Squiggly", egui_phosphor::regular::WAVE_SINE),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::StickyNote,
+                                format!("{} Note", egui_phosphor::regular::CHAT_TEARDROP_TEXT),
+                            );
+
+                            ui.separator();
+
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Pencil,
+                                format!("{} Pencil", egui_phosphor::regular::PENCIL_SIMPLE),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Eraser,
+                                format!("{} Eraser", egui_phosphor::regular::ERASER),
+                            );
+
+                            if self.selected_annotation.is_some() {
+                                ui.separator();
+                                if ui
+                                    .button(
+                                        egui::RichText::new(format!("{} Delete", egui_phosphor::regular::TRASH))
+                                            .size(13.0)
+                                            .color(Color32::from_rgb(239, 68, 68)),
+                                    )
+                                    .on_hover_text("Delete selected annotation (Del)")
+                                    .clicked()
+                                {
+                                    if let Some(sel) = self.selected_annotation.take() {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let _ = delete_annotation(&mut tab.doc, sel.page_index, sel.id);
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message = "Deleted annotation".into();
+                                        }
+                                    }
+                                }
+                                if ui
+                                    .button(format!("{} Properties", egui_phosphor::regular::GEAR))
+                                    .on_hover_text("Open annotation properties inspector")
+                                    .clicked()
+                                {
+                                    self.show_annot_inspector = true;
                                 }
                             }
-                        }
-                        if ui
-                            .button(egui::RichText::new(egui_phosphor::regular::GEAR).size(14.0))
-                            .on_hover_text("Open annotation properties inspector")
-                            .clicked()
-                        {
-                            self.show_annot_inspector = true;
-                        }
-                    }
 
-                    if has_doc && self.selected_form_field.is_some() {
-                        ui.separator();
-                        if ui
-                            .button(
-                                egui::RichText::new(egui_phosphor::regular::TRASH)
-                                    .size(14.0)
-                                    .color(Color32::from_rgb(239, 68, 68)),
-                            )
-                            .on_hover_text("Delete selected form field (Del)")
-                            .clicked()
-                        {
-                            if let Some(sel) = self.selected_form_field.take() {
-                                if let Some(tab) = self.active_tab_mut() {
-                                    let _ = delete_form_field(&mut tab.doc, sel.id);
-                                    tab.is_modified = true;
-                                    tab.invalidate_render();
-                                    self.status_message =
-                                        format!("Deleted form field '{}'", sel.name);
+                            if !self.text_selection.selected_text.is_empty() {
+                                ui.separator();
+                                if ui
+                                    .button(
+                                        egui::RichText::new(format!("{} Copy Text", egui_phosphor::regular::COPY))
+                                            .size(13.0)
+                                            .color(Color32::from_rgb(59, 130, 246)),
+                                    )
+                                    .on_hover_text("Copy selected text to clipboard (Ctrl+C)")
+                                    .clicked()
+                                {
+                                    ctx.output_mut(|o| {
+                                        o.copied_text = self.text_selection.selected_text.clone()
+                                    });
+                                    self.status_message = format!(
+                                        "Copied {} chars to clipboard",
+                                        self.text_selection.selected_text.len()
+                                    );
                                 }
-                                self.show_form_field_inspector = false;
                             }
-                        }
-                        if ui
-                            .button(egui::RichText::new(egui_phosphor::regular::GEAR).size(14.0))
-                            .on_hover_text("Configure form field properties")
-                            .clicked()
-                        {
-                            self.show_form_field_inspector = true;
-                        }
-                        if ui
-                            .button(egui::RichText::new(egui_phosphor::regular::COPY).size(14.0))
-                            .on_hover_text("Duplicate field across multiple pages")
-                            .clicked()
-                        {
-                            self.show_duplicate_field_dialog = true;
-                        }
+                        });
                     }
 
-                    if !self.marked_redactions.is_empty() {
-                        ui.separator();
-                        let count = self.marked_redactions.len();
-                        if ui
-                            .button(
-                                RichText::new(format!("{} Apply {} Redaction(s)", egui_phosphor::regular::WARNING, count))
-                                    .color(Color32::from_rgb(239, 68, 68))
-                                    .strong(),
-                            )
-                            .on_hover_text("Permanently apply marked redactions")
-                            .clicked()
-                        {
-                            self.show_apply_redactions_confirm_dialog = true;
-                        }
-                        if ui
-                            .button(egui::RichText::new(egui_phosphor::regular::X).size(12.0))
-                            .on_hover_text("Clear all marked redactions")
-                            .clicked()
-                        {
-                            self.marked_redactions.clear();
-                        }
-                    }
-
-                    if has_doc && !self.text_selection.selected_text.is_empty() {
-                        ui.separator();
-                        if ui
-                            .button(
-                                egui::RichText::new(egui_phosphor::regular::COPY)
-                                    .size(14.0)
-                                    .color(Color32::from_rgb(59, 130, 246)),
-                            )
-                            .on_hover_text("Copy selected text to clipboard (Ctrl+C)")
-                            .clicked()
-                        {
-                            ctx.output_mut(|o| {
-                                o.copied_text = self.text_selection.selected_text.clone()
-                            });
-                            self.status_message = format!(
-                                "Copied {} chars to clipboard",
-                                self.text_selection.selected_text.len()
+                    ToolbarCategory::Edit => {
+                        ui.add_enabled_ui(has_doc, |ui| {
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Select,
+                                format!("{} Select", egui_phosphor::regular::CURSOR),
                             );
-                        }
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Hand,
+                                format!("{} Pan", egui_phosphor::regular::HAND),
+                            );
+
+                            ui.separator();
+
+                            // Text Additions
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Text,
+                                format!("{} Text Box", egui_phosphor::regular::TEXT_T),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Typewriter,
+                                format!("{} Typewriter", egui_phosphor::regular::KEYBOARD),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Callout,
+                                format!("{} Callout", egui_phosphor::regular::CHAT_CIRCLE_TEXT),
+                            );
+
+                            ui.separator();
+
+                            // Shapes
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Rectangle,
+                                format!("{} Rectangle", egui_phosphor::regular::SQUARE),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Circle,
+                                format!("{} Circle", egui_phosphor::regular::CIRCLE),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Line,
+                                format!("{} Line", egui_phosphor::regular::ARROW_UP_RIGHT),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Polygon,
+                                format!("{} Polygon", egui_phosphor::regular::POLYGON),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Link,
+                                format!("{} Link", egui_phosphor::regular::LINK),
+                            );
+
+                            ui.separator();
+
+                            if ui
+                                .button(format!("{} Insert Image", egui_phosphor::regular::IMAGE))
+                                .on_hover_text("Insert image onto page")
+                                .clicked()
+                            {
+                                self.insert_image_dialog();
+                            }
+
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Redact,
+                                format!("{} Mark Redact", egui_phosphor::regular::RECTANGLE),
+                            );
+
+                            if !self.marked_redactions.is_empty() {
+                                ui.separator();
+                                let count = self.marked_redactions.len();
+                                if ui
+                                    .button(
+                                        RichText::new(format!("{} Apply {} Redaction(s)", egui_phosphor::regular::WARNING, count))
+                                            .color(Color32::from_rgb(239, 68, 68))
+                                            .strong(),
+                                    )
+                                    .on_hover_text("Permanently apply marked redactions")
+                                    .clicked()
+                                {
+                                    self.show_apply_redactions_confirm_dialog = true;
+                                }
+                                if ui
+                                    .button(egui::RichText::new(egui_phosphor::regular::X).size(12.0))
+                                    .on_hover_text("Clear all marked redactions")
+                                    .clicked()
+                                {
+                                    self.marked_redactions.clear();
+                                }
+                            }
+                        });
                     }
-                });
+
+                    ToolbarCategory::Forms => {
+                        ui.add_enabled_ui(has_doc, |ui| {
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Select,
+                                format!("{} Select", egui_phosphor::regular::CURSOR),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::Hand,
+                                format!("{} Pan", egui_phosphor::regular::HAND),
+                            );
+
+                            ui.separator();
+
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::FormField(FormFieldType::Text),
+                                format!("{} Text Field", egui_phosphor::regular::NOTE_PENCIL),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::FormField(FormFieldType::Checkbox),
+                                format!("{} Checkbox", egui_phosphor::regular::CHECK_SQUARE),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::FormField(FormFieldType::Radio),
+                                format!("{} Radio", egui_phosphor::regular::RADIO_BUTTON),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::FormField(FormFieldType::Choice),
+                                format!("{} Dropdown", egui_phosphor::regular::CARET_CIRCLE_DOWN),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::FormField(FormFieldType::PushButton),
+                                format!("{} Button", egui_phosphor::regular::SQUARE),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::FormField(FormFieldType::Signature),
+                                format!("{} Signature Field", egui_phosphor::regular::SIGNATURE),
+                            );
+
+                            ui.separator();
+
+                            ui.checkbox(&mut self.form_test_mode, format!("{} Test Mode", egui_phosphor::regular::EYE))
+                                .on_hover_text("Toggle Form Test / Fill Preview Mode");
+
+                            if self.selected_form_field.is_some() {
+                                ui.separator();
+                                if ui
+                                    .button(
+                                        egui::RichText::new(format!("{} Delete", egui_phosphor::regular::TRASH))
+                                            .size(13.0)
+                                            .color(Color32::from_rgb(239, 68, 68)),
+                                    )
+                                    .on_hover_text("Delete selected form field (Del)")
+                                    .clicked()
+                                {
+                                    if let Some(sel) = self.selected_form_field.take() {
+                                        if let Some(tab) = self.active_tab_mut() {
+                                            let _ = delete_form_field(&mut tab.doc, sel.id);
+                                            tab.is_modified = true;
+                                            tab.invalidate_render();
+                                            self.status_message =
+                                                format!("Deleted form field '{}'", sel.name);
+                                        }
+                                        self.show_form_field_inspector = false;
+                                    }
+                                }
+                                if ui
+                                    .button(format!("{} Properties", egui_phosphor::regular::GEAR))
+                                    .on_hover_text("Configure form field properties")
+                                    .clicked()
+                                {
+                                    self.show_form_field_inspector = true;
+                                }
+                                if ui
+                                    .button(format!("{} Duplicate", egui_phosphor::regular::COPY))
+                                    .on_hover_text("Duplicate field across multiple pages")
+                                    .clicked()
+                                {
+                                    self.show_duplicate_field_dialog = true;
+                                }
+                            }
+                        });
+                    }
+
+                    ToolbarCategory::Tools => {
+                        ui.add_enabled_ui(has_doc, |ui| {
+                            if ui
+                                .button(format!("{} Find & Replace", egui_phosphor::regular::ARROWS_CLOCKWISE))
+                                .on_hover_text("Find and Replace (Ctrl+H)")
+                                .clicked()
+                            {
+                                self.search_bar_open = true;
+                                self.search_replace_mode = true;
+                            }
+
+                            ui.separator();
+
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::MeasureDistance,
+                                format!("{} Distance", egui_phosphor::regular::RULER),
+                            );
+                            ui.selectable_value(
+                                &mut self.active_tool,
+                                ActiveTool::MeasureArea,
+                                format!("{} Area", egui_phosphor::regular::POLYGON),
+                            );
+
+                            if self.active_tool == ActiveTool::MeasureDistance
+                                || self.active_tool == ActiveTool::MeasureArea
+                            {
+                                if ui
+                                    .button(egui::RichText::new(egui_phosphor::regular::GEAR).size(13.0))
+                                    .on_hover_text("Configure scale ratio and measurement units")
+                                    .clicked()
+                                {
+                                    self.show_measure_scale_dialog = true;
+                                }
+                                ui.checkbox(&mut self.measure_bake_as_annot, "Annotate")
+                                    .on_hover_text("Bake measurements into document as annotations");
+                            }
+
+                            ui.separator();
+
+                            if ui
+                                .button(format!("{} Watermark", egui_phosphor::regular::STAMP))
+                                .on_hover_text("Apply semi-transparent text watermark")
+                                .clicked()
+                            {
+                                self.show_watermark_dialog = true;
+                            }
+
+                            if ui
+                                .button(format!("{} Bates Numbering", egui_phosphor::regular::TAG))
+                                .on_hover_text("Apply Bates numbering across pages")
+                                .clicked()
+                            {
+                                self.show_bates_dialog = true;
+                            }
+
+                            if ui
+                                .button("Headers & Footers")
+                                .on_hover_text("Configure running headers and footers")
+                                .clicked()
+                            {
+                                self.show_header_footer_dialog = true;
+                            }
+
+                            if ui
+                                .button(format!("{} Sign", egui_phosphor::regular::PEN_NIB))
+                                .on_hover_text("Digitally sign document")
+                                .clicked()
+                            {
+                                self.show_add_signature_dialog = true;
+                            }
+
+                            if ui
+                                .button("Compare Docs...")
+                                .on_hover_text("Compare two PDF documents")
+                                .clicked()
+                            {
+                                if let Some(tab) = self.active_tab() {
+                                    self.compare_file_a = tab.file_path.clone();
+                                }
+                                self.show_compare_dialog = true;
+                            }
+
+                            if ui
+                                .button(format!("{} OCR", egui_phosphor::regular::TEXT_T))
+                                .on_hover_text("Run OCR text recognition")
+                                .clicked()
+                            {
+                                self.show_ocr_dialog = true;
+                            }
+                        });
+                    }
+                }
             });
         });
     }
@@ -4266,44 +4283,87 @@ impl RavPdfApp {
             .default_width(240.0)
             .min_width(200.0)
             .show(ctx, |ui| {
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
-                    let row1 = [
-                        (SidebarTab::Thumbnails, egui_phosphor::regular::FILES, "Pages (Thumbnails)"),
-                        (SidebarTab::Bookmarks, egui_phosphor::regular::BOOKMARK_SIMPLE, "Document Outline & Bookmarks"),
-                        (SidebarTab::Destinations, egui_phosphor::regular::MAP_PIN, "Named Destinations"),
-                        (SidebarTab::Annotations, egui_phosphor::regular::CHAT_TEARDROP_TEXT, "Comments & Markup"),
-                        (SidebarTab::Forms, egui_phosphor::regular::CHECK_SQUARE, "Interactive Form Fields"),
-                        (SidebarTab::Layers, egui_phosphor::regular::STACK, "Layers / Optional Content Groups"),
-                    ];
-                    for (tab, icon, tip) in row1 {
-                        let selected = self.sidebar_tab == tab;
-                        if ui
-                            .selectable_label(selected, egui::RichText::new(icon).size(16.0))
-                            .on_hover_text(tip)
-                            .clicked()
-                        {
-                            self.sidebar_tab = tab;
+                ui.add_space(3.0);
+                let current_tab_label = match self.sidebar_tab {
+                    SidebarTab::Thumbnails => format!("{} Pages (Thumbnails)", egui_phosphor::regular::FILES),
+                    SidebarTab::Bookmarks => format!("{} Bookmarks & Outline", egui_phosphor::regular::BOOKMARK_SIMPLE),
+                    SidebarTab::Destinations => format!("{} Named Destinations", egui_phosphor::regular::MAP_PIN),
+                    SidebarTab::Annotations => format!("{} Comments & Markup", egui_phosphor::regular::CHAT_TEARDROP_TEXT),
+                    SidebarTab::Forms => format!("{} Interactive Forms", egui_phosphor::regular::CHECK_SQUARE),
+                    SidebarTab::Layers => format!("{} Document Layers", egui_phosphor::regular::STACK),
+                    SidebarTab::Attachments => format!("{} Attachments", egui_phosphor::regular::PAPERCLIP),
+                    SidebarTab::Signatures => format!("{} Digital Signatures", egui_phosphor::regular::PEN_NIB),
+                    SidebarTab::Properties => format!("{} Document Info", egui_phosphor::regular::INFO),
+                    SidebarTab::Search => format!("{} Search Results", egui_phosphor::regular::MAGNIFYING_GLASS),
+                    SidebarTab::Accessibility => format!("{} Accessibility Audit", egui_phosphor::regular::WHEELCHAIR),
+                };
+
+                egui::ComboBox::from_id_salt("sidebar_panel_selector")
+                    .selected_text(egui::RichText::new(&current_tab_label).strong().size(12.5))
+                    .width(ui.available_width() - 8.0)
+                    .show_ui(ui, |ui| {
+                        let all_tabs = [
+                            (SidebarTab::Thumbnails, egui_phosphor::regular::FILES, "Pages (Thumbnails)"),
+                            (SidebarTab::Bookmarks, egui_phosphor::regular::BOOKMARK_SIMPLE, "Bookmarks & Outline"),
+                            (SidebarTab::Annotations, egui_phosphor::regular::CHAT_TEARDROP_TEXT, "Comments & Markup"),
+                            (SidebarTab::Forms, egui_phosphor::regular::CHECK_SQUARE, "Interactive Forms"),
+                            (SidebarTab::Signatures, egui_phosphor::regular::PEN_NIB, "Digital Signatures"),
+                            (SidebarTab::Layers, egui_phosphor::regular::STACK, "Document Layers"),
+                            (SidebarTab::Attachments, egui_phosphor::regular::PAPERCLIP, "Attachments"),
+                            (SidebarTab::Destinations, egui_phosphor::regular::MAP_PIN, "Named Destinations"),
+                            (SidebarTab::Properties, egui_phosphor::regular::INFO, "Document Info"),
+                            (SidebarTab::Search, egui_phosphor::regular::MAGNIFYING_GLASS, "Search Results"),
+                            (SidebarTab::Accessibility, egui_phosphor::regular::WHEELCHAIR, "Accessibility Audit"),
+                        ];
+                        for (tab, icon, title) in all_tabs {
+                            ui.selectable_value(&mut self.sidebar_tab, tab, format!("{} {}", icon, title));
                         }
-                    }
-                });
+                    });
+
+                ui.add_space(4.0);
+                // Equal-width quick switch icon button row (Primary 6 tabs)
+                let primary_tabs = [
+                    (SidebarTab::Thumbnails, egui_phosphor::regular::FILES, "Pages"),
+                    (SidebarTab::Bookmarks, egui_phosphor::regular::BOOKMARK_SIMPLE, "Bookmarks"),
+                    (SidebarTab::Annotations, egui_phosphor::regular::CHAT_TEARDROP_TEXT, "Comments"),
+                    (SidebarTab::Forms, egui_phosphor::regular::CHECK_SQUARE, "Forms"),
+                    (SidebarTab::Signatures, egui_phosphor::regular::PEN_NIB, "Signatures"),
+                    (SidebarTab::Layers, egui_phosphor::regular::STACK, "Layers"),
+                ];
+                let is_dark = ctx.style().visuals.dark_mode;
+                let avail_w = ui.available_width() - 4.0;
+                let btn_w = ((avail_w - 5.0 * 2.0) / 6.0).max(28.0);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
-                    let row2 = [
-                        (SidebarTab::Attachments, egui_phosphor::regular::PAPERCLIP, "Embedded Attachments"),
-                        (SidebarTab::Signatures, egui_phosphor::regular::PEN_NIB, "Digital Signatures"),
-                        (SidebarTab::Properties, egui_phosphor::regular::INFO, "Document Information"),
-                        (SidebarTab::Search, egui_phosphor::regular::MAGNIFYING_GLASS, "Text Search Results"),
-                        (SidebarTab::Accessibility, egui_phosphor::regular::WHEELCHAIR, "Accessibility Audit"),
-                    ];
-                    for (tab, icon, tip) in row2 {
-                        let selected = self.sidebar_tab == tab;
-                        if ui
-                            .selectable_label(selected, egui::RichText::new(icon).size(16.0))
-                            .on_hover_text(tip)
-                            .clicked()
-                        {
+                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+                    for (tab, icon, tip) in primary_tabs {
+                        let is_sel = self.sidebar_tab == tab;
+                        let (bg_color, fg_color, stroke_color) = if is_sel {
+                            (
+                                Color32::from_rgb(37, 99, 235), // Primary blue
+                                Color32::WHITE,                 // Always pure white icon on blue
+                                Stroke::new(1.0_f32, Color32::from_rgb(29, 78, 216)),
+                            )
+                        } else if is_dark {
+                            (
+                                Color32::from_rgb(39, 39, 44),    // Dark neutral zinc
+                                Color32::from_rgb(220, 220, 225), // Crisp light icon
+                                Stroke::new(1.0_f32, Color32::from_rgb(58, 58, 66)),
+                            )
+                        } else {
+                            (
+                                Color32::from_rgb(255, 255, 255), // Pure white button on slate sidebar
+                                Color32::from_rgb(15, 23, 42),    // Crisp dark slate icon
+                                Stroke::new(1.0_f32, Color32::from_rgb(203, 213, 225)),
+                            )
+                        };
+
+                        let icon_text = egui::RichText::new(icon).size(15.0).color(fg_color);
+                        let btn = egui::Button::new(icon_text)
+                            .min_size(egui::vec2(btn_w, 26.0))
+                            .fill(bg_color)
+                            .stroke(stroke_color)
+                            .rounding(4.0);
+                        if ui.add(btn).on_hover_text(tip).clicked() {
                             self.sidebar_tab = tab;
                         }
                     }
@@ -4387,16 +4447,38 @@ impl RavPdfApp {
                                     Color32::from_rgb(24, 24, 28)
                                 };
 
+                                let card_avail_w = ui.available_width();
+                                let target_w = (card_avail_w - 24.0).clamp(130.0, 180.0);
+
                                 egui::Frame::none()
                                     .fill(bg)
                                     .stroke(stroke)
                                     .rounding(6.0)
-                                    .inner_margin(egui::Margin::same(6.0))
+                                    .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                                     .show(ui, |ui| {
                                         ui.vertical_centered(|ui| {
+                                            // Page Number Badge Header
+                                            let lbl = if let Some(tab) = self.active_tab() {
+                                                get_page_label(&tab.doc, i)
+                                            } else {
+                                                (i + 1).to_string()
+                                            };
+                                            ui.label(
+                                                RichText::new(format!("Page {}", lbl))
+                                                    .size(11.5)
+                                                    .color(if is_selected {
+                                                        Color32::from_rgb(96, 165, 250)
+                                                    } else {
+                                                        Color32::from_rgb(180, 180, 190)
+                                                    })
+                                                    .strong(),
+                                            );
+
+                                            ui.add_space(2.0);
+
+                                            // Thumbnail Image Button
                                             if let Some(tex) = thumb_tex {
                                                 let (w, h) = (tex.size()[0] as f32, tex.size()[1] as f32);
-                                                let target_w = 140.0_f32;
                                                 let aspect = if w > 0.0 { h / w } else { 1.33 };
                                                 let target_h = target_w * aspect;
 
@@ -4417,20 +4499,22 @@ impl RavPdfApp {
                                                 }
                                             }
 
-                                            ui.add_space(3.0);
+                                            ui.add_space(4.0);
+
+                                            // Centered Page Action Buttons
                                             ui.horizontal(|ui| {
-                                                let lbl = if let Some(tab) = self.active_tab() {
-                                                    get_page_label(&tab.doc, i)
-                                                } else {
-                                                    (i + 1).to_string()
-                                                };
-                                                ui.label(
-                                                    RichText::new(lbl)
-                                                        .size(11.0)
-                                                        .strong(),
-                                                );
+                                                ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+                                                let mut btn_count = 3.0_f32; // Rotate, Duplicate, Extract
+                                                if i > 0 { btn_count += 1.0; }
+                                                if i + 1 < total_pages { btn_count += 1.0; }
+                                                if total_pages > 1 { btn_count += 1.0; }
+                                                let btn_w = 22.0_f32;
+                                                let total_w = btn_count * btn_w + (btn_count - 1.0).max(0.0) * 4.0;
+                                                let pad = ((target_w - total_w) / 2.0).max(0.0);
+                                                ui.add_space(pad);
+
                                                 if ui
-                                                    .button(egui::RichText::new(egui_phosphor::regular::ARROW_CLOCKWISE).size(11.0))
+                                                    .button(egui::RichText::new(egui_phosphor::regular::ARROW_CLOCKWISE).size(12.0))
                                                     .on_hover_text("Rotate 90° clockwise")
                                                     .clicked()
                                                 {
@@ -4438,7 +4522,7 @@ impl RavPdfApp {
                                                 }
                                                 if i > 0
                                                     && ui
-                                                        .button(egui::RichText::new(egui_phosphor::regular::CARET_UP).size(11.0))
+                                                        .button(egui::RichText::new(egui_phosphor::regular::CARET_UP).size(12.0))
                                                         .on_hover_text("Move page up")
                                                         .clicked()
                                                 {
@@ -4446,28 +4530,28 @@ impl RavPdfApp {
                                                 }
                                                 if i + 1 < total_pages
                                                     && ui
-                                                        .button(egui::RichText::new(egui_phosphor::regular::CARET_DOWN).size(11.0))
+                                                        .button(egui::RichText::new(egui_phosphor::regular::CARET_DOWN).size(12.0))
                                                         .on_hover_text("Move page down")
                                                         .clicked()
                                                 {
                                                     page_action = Some(PageAction::MoveDown(i));
                                                 }
                                                 if ui
-                                                    .button(egui::RichText::new(egui_phosphor::regular::EXPORT).size(11.0))
-                                                    .on_hover_text("Extract page to new tab")
-                                                    .clicked()
-                                                {
-                                                    page_action = Some(PageAction::Extract(i));
-                                                }
-                                                if ui
-                                                    .button(egui::RichText::new(egui_phosphor::regular::COPY).size(11.0))
+                                                    .button(egui::RichText::new(egui_phosphor::regular::COPY).size(12.0))
                                                     .on_hover_text("Duplicate page")
                                                     .clicked()
                                                 {
                                                     page_action = Some(PageAction::Duplicate(i));
                                                 }
                                                 if ui
-                                                    .button(egui::RichText::new(egui_phosphor::regular::SCISSORS).size(11.0))
+                                                    .button(egui::RichText::new(egui_phosphor::regular::EXPORT).size(12.0))
+                                                    .on_hover_text("Extract page to new tab")
+                                                    .clicked()
+                                                {
+                                                    page_action = Some(PageAction::Extract(i));
+                                                }
+                                                if ui
+                                                    .button(egui::RichText::new(egui_phosphor::regular::SCISSORS).size(12.0))
                                                     .on_hover_text("Crop page")
                                                     .clicked()
                                                 {
@@ -4475,7 +4559,11 @@ impl RavPdfApp {
                                                 }
                                                 if total_pages > 1
                                                     && ui
-                                                        .button(egui::RichText::new(egui_phosphor::regular::TRASH).size(11.0))
+                                                        .button(
+                                                            egui::RichText::new(egui_phosphor::regular::TRASH)
+                                                                .size(12.0)
+                                                                .color(Color32::from_rgb(239, 68, 68)),
+                                                        )
                                                         .on_hover_text("Delete page")
                                                         .clicked()
                                                 {
@@ -17030,11 +17118,29 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    let icon_data = if let Ok(img) = image::load_from_memory(include_bytes!("../../../assets/logo.png")) {
+        let rgba = img.into_rgba8();
+        let (width, height) = rgba.dimensions();
+        Some(std::sync::Arc::new(egui::IconData {
+            rgba: rgba.into_raw(),
+            width,
+            height,
+        }))
+    } else {
+        None
+    };
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("RAV PDF")
+        .with_inner_size([1200.0, 800.0])
+        .with_min_inner_size([800.0, 600.0]);
+
+    if let Some(icon) = icon_data {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("RAV PDF")
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([800.0, 600.0]),
+        viewport,
         ..Default::default()
     };
 
