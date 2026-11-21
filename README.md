@@ -1,10 +1,20 @@
-# RavPDF — High-Performance, Memory-Safe PDF Editor in Rust
+<p align="center">
+  <img src="assets/logo.png" alt="RavPDF Logo" width="160" height="160" />
+</p>
 
-[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg?style=flat-square)](LICENSE)
-[![Standards](https://img.shields.io/badge/standards-ISO%2032000--1%20%7C%20ISO%2032000--2-emerald.svg?style=flat-square)](docs/SRS.md)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square)]()
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg?style=flat-square)]()
+<h1 align="center">RavPDF</h1>
+
+<p align="center">
+  <strong>High-Performance, Memory-Safe PDF Editor in Rust</strong>
+</p>
+
+<p align="center">
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=flat-square&logo=rust" alt="Rust" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg?style=flat-square" alt="License" /></a>
+  <a href="docs/SRS.md"><img src="https://img.shields.io/badge/standards-ISO%2032000--1%20%7C%20ISO%2032000--2-emerald.svg?style=flat-square" alt="Standards" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform" />
+  <img src="https://img.shields.io/badge/tests-passing-brightgreen.svg?style=flat-square" alt="Tests" />
+</p>
 
 **RavPDF** is a professional-grade, cross-platform PDF suite written entirely in **Rust**. Built from the ground up to achieve feature parity with **Adobe Acrobat Pro DC**, RavPDF delivers uncompromising performance, true 64-bit zero-cost abstractions, multi-threaded rendering, and the ironclad memory safety guarantees of the Rust language.
 
